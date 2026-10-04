@@ -1,0 +1,4 @@
+console = object.find("console")
+types = object.find("types")
+
+console.println(types.types())

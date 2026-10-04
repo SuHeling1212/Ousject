@@ -1,0 +1,26 @@
+count = 0
+sum = 0
+console = object.find("console")
+
+while count < 10 {
+    count++
+
+    if count % 2 != 0 {
+        continue
+    }
+
+    sum = sum + count
+
+    if sum > 10 {
+        break
+    }
+}
+
+count--
+
+if false && missing {
+    console.println("short circuit failed")
+} else if true || missing {
+    console.println(sum)
+    console.println(count)
+}

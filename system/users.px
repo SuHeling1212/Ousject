@@ -1,0 +1,4 @@
+console = object.find("console")
+users = object.find("users")
+
+console.println(users.users())

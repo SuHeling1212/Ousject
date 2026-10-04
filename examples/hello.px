@@ -1,0 +1,13 @@
+count = 0
+console = object.find("console")
+
+while count < 3 {
+    console.println("Ousject " + "running")
+    count++
+}
+
+if count == 3 {
+    console.println(count)
+} else {
+    console.println("unexpected")
+}

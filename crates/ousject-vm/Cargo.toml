@@ -1,0 +1,16 @@
+[package]
+name = "ousject-vm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oms-runtime = { path = "../oms-runtime" }
+oms-types = { path = "../oms-types" }
+ousject-provider = { path = "../ousject-provider" }
+ousject-auth = { path = "../ousject-auth" }
+praxis-compiler = { path = "../praxis-compiler" }
+tf-format = { path = "../tf-format" }
+
+[lints]
+workspace = true

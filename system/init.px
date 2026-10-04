@@ -1,0 +1,23 @@
+console = object.find("console")
+system = object.find("system")
+store = object.find("store")
+authentication = object.find("authentication")
+programs = object.find("programs")
+
+console.println("Ousject user space starting")
+console.println(system.health_check())
+console.println(store.health_check())
+
+if !authentication.local_initialized() {
+    setup_id = programs.resolve("local-setup")
+    setup = object.find(setup_id)
+    setup_process_id = setup.execute()
+    setup_process = object.find(setup_process_id)
+    setup_process.wait()
+}
+
+login_id = programs.resolve("login")
+login = object.find(login_id)
+login_process_id = login.execute()
+login_process = object.find(login_process_id)
+login_process.wait()

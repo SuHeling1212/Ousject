@@ -1,0 +1,12 @@
+[package]
+name = "oms-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oms-shard = { path = "../oms-shard" }
+oms-types = { path = "../oms-types" }
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+// Assignment creates a core.value Object; explicit creation chooses a Type.
+x = 46
+console = object.find("console")
+note = object.create("core.text", "hello")
+console.println(object.type(x))
+console.println(object.type(note))
+console.println(note)
+
+object.replace(note, "hello, Ousject")
+same = object.find(object.id(note))
+console.println(same.value())
+
+root = object.create("core.namespace", {})
+object.link(root, "note", note)
+linked = object.find(object.links(root)["note"])
+console.println(linked.value())
+console.println(#object.query("core.text"))
+console.println("printed by the console Object")

@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oms-types",
+    "crates/oms-shard",
+    "crates/oms-runtime",
+    "crates/oms-tools",
+    "crates/tf-format",
+    "crates/praxis-compiler",
+    "crates/ousject-vm",
+    "crates/ousject-auth",
+    "crates/ousject-provider",
+    "crates/ousject-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

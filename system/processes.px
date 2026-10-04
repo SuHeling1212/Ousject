@@ -1,0 +1,4 @@
+console = object.find("console")
+scheduler = object.find("scheduler")
+
+console.println(scheduler.processes())

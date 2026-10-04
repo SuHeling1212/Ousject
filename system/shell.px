@@ -1,0 +1,21 @@
+console = object.find("console")
+compiler = object.find("compiler")
+
+running = true
+while running {
+    console.println("px>")
+    source = console.read_line()
+    if source == "exit" {
+        running = false
+    } else {
+        try {
+            program_id = compiler.compile(source)
+            program = object.find(program_id)
+            process_id = program.execute()
+            process = object.find(process_id)
+            process.wait()
+        } catch (error) {
+            console.println(error)
+        }
+    }
+}

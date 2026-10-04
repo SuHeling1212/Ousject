@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cargo_local="$project_root/scripts/cargo-local"
+temporary=$(mktemp -d /tmp/ousject-system-check.XXXXXX)
+
+cleanup() {
+    find "$temporary" -type f -delete
+    find "$temporary" -depth -type d -empty -delete
+}
+trap cleanup EXIT HUP INT TERM
+
+cd "$project_root"
+"$cargo_local" fmt --all -- --check
+"$cargo_local" clippy --workspace --all-targets -- -D warnings
+"$cargo_local" test --workspace
+"$project_root/scripts/ousject" compile \
+    "$project_root/examples/hello.px" "$temporary/hello.tf"
+"$project_root/scripts/ousject" run-tf "$temporary/hello.tf" \
+    --state "$temporary/objects.oms" --local
+"$project_root/scripts/ousject" check --state "$temporary/objects.oms" --local
+object_id=$("$project_root/scripts/ousject" object-create core.text unified-object \
+    --state "$temporary/objects.oms" --local)
+object_value=$("$project_root/scripts/ousject" object-value "$object_id" \
+    --state "$temporary/objects.oms" --local)
+test "$object_value" = "unified-object"
+"$project_root/scripts/ousject" object-query core.text \
+    --state "$temporary/objects.oms" --local | rg -q "$object_id"
+"$project_root/scripts/ousject" types --state "$temporary/objects.oms" --local | \
+    rg -q "device.display.*ProviderOnly"
+namespace_id=$("$project_root/scripts/ousject" object-create core.namespace '{}' \
+    --state "$temporary/objects.oms" --local)
+"$project_root/scripts/ousject" object-bind "$namespace_id" README "$object_id" \
+    --state "$temporary/objects.oms" --local >/dev/null
+resolved_id=$("$project_root/scripts/ousject" object-resolve "$namespace_id" README \
+    --state "$temporary/objects.oms" --local)
+test "$resolved_id" = "$object_id"
+"$project_root/scripts/ousject" run "$project_root/examples/control-flow.px" --memory --local
+"$project_root/scripts/ousject" run "$project_root/examples/collections.px" --memory --local
+"$project_root/scripts/ousject" run "$project_root/examples/objects.px" --memory --local
+console_input=$(printf '%s\n' 'console input works' | \
+    "$project_root/scripts/ousject" run "$project_root/examples/console-input.px" --memory --local)
+test "$console_input" = "console input works"
+"$project_root/scripts/ousject" system-install "$project_root/system" --local \
+    --state "$temporary/boot.oms" >/dev/null
+printf '%s\n' 'boot-password' 'local' 'boot-password' 'exit' | \
+    "$project_root/scripts/ousject" boot --state "$temporary/boot.oms" >/dev/null
+printf '%s\n' 'local' 'boot-password' 'exit' | \
+    "$project_root/scripts/ousject" boot --state "$temporary/boot.oms" >/dev/null
+if rg -a -q 'boot-password' "$temporary/boot.oms" "$temporary/boot.wal"; then
+    echo "plaintext password was persisted" >&2
+    exit 1
+fi

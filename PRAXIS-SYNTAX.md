@@ -1,0 +1,1421 @@
+# Praxis
+
+**Praxis** 是面向 Ousject 的高级编程语言。
+
+Praxis 与 Ousject 共享同一个核心原则：
+
+> **万物皆对象。**
+
+Praxis 源代码经过编译后生成 TF，其中的 Token Stream 最终由 Ousject 执行。
+
+```text
+Praxis
+   ↓
+Compiler
+   ↓
+TF
+   ↓
+Token Stream
+   ↓
+Ousject
+```
+
+本文档定义 Praxis 的基础语言语义和表层语法。
+
+---
+
+## 1. Object 是语言基础
+
+在 Praxis 中，程序能够操作的实体都属于 Object 世界。
+
+例如：
+
+```text
+Variable
+Class Instance
+Array
+Map
+Function
+Process
+Network
+Device
+Program
+```
+
+它们可以具有不同的结构和能力，但都遵循相同的对象模型。
+
+---
+
+## 2. Object 的组成
+
+一个 Object 在语义上包含：
+
+```text
+Object
+├── 身份
+├── 隶属关系
+├── 状态
+├── 能力
+└── 生命周期
+```
+
+Praxis 不把 Object 定义为：
+
+```text
+一段内存
+```
+
+也不把它定义为：
+
+```text
+一个地址
+```
+
+Object 是语言和系统中的实体本身。
+
+---
+
+## 3. 对象的隶属关系
+
+Object 可以属于另一个 Object。
+
+例如：
+
+```text
+Process
+├── Variable a
+├── Variable counter
+├── Network Object
+└── Child Process
+```
+
+Praxis 中的变量本身也是 Object。
+
+当：
+
+```praxis
+count = 10
+```
+
+发生时，当前 Process 中建立了一个名为 `count` 的 Variable Object。
+
+因此：
+
+```text
+Process Object
+└── Variable Object: count
+```
+
+Variable Object 隶属于当前 Process。
+
+---
+
+## 4. 不存在语言级 Pointer
+
+Praxis 不提供：
+
+```text
+pointer
+address-of
+dereference
+```
+
+之类的语言模型。
+
+不存在：
+
+```text
+&value
+*pointer
+```
+
+这样的基础语义。
+
+程序员不应该知道 Object 的内存地址。
+
+---
+
+## 5. 不存在 Reference 语义
+
+Praxis 也不使用“赋值意味着两个名字隐式引用同一个对象”的模型。
+
+例如：
+
+```praxis
+a = 46
+b = a
+```
+
+`a = 46` 创建一个值为 46 的 `core.value` 对象并绑定 `a`；`b = a` 复制 46 并为 `b` 创建独立对象，不会偷偷建立 Pointer、Reference 或 Link。`note = object.create("core.value", 42)` 是可以指定类型的显式创建写法。
+
+Praxis 不把程序行为建立在隐藏共享关系上。
+
+需要建立明确关联时，应显式使用：
+
+```praxis
+link
+```
+
+---
+
+## 6. link
+
+`link` 是 Praxis 中显式表达名字关联的机制。
+
+```praxis
+b link a
+```
+
+这意味着：
+
+> `b` 与 `a` 建立明确的 Link 关系。
+
+这种关系是 Praxis 语言语义的一部分。
+
+它不是：
+
+- Pointer
+- Reference
+- Memory Address
+- Rust Reference
+- CPU Address
+
+例如：
+
+```praxis
+count = 1
+displayed link count
+
+displayed++
+
+console.println(count)
+```
+
+结果：
+
+```text
+2
+```
+
+如果之后：
+
+```praxis
+count = 100
+```
+
+Link 关系仍然存在。
+
+---
+
+## 7. 普通赋值与 link 不同
+
+普通赋值：
+
+```praxis
+b = a
+```
+
+表示普通的值或对象赋值语义。
+
+显式关联：
+
+```praxis
+b link a
+```
+
+表示两个名字之间存在持续的 Link。
+
+Praxis 不让共享状态偷偷发生。
+
+如果存在共享关系，它应该能够在源码中明确看到。
+
+---
+
+## 8. Variable 是 Object
+
+Praxis 没有：
+
+```text
+var
+let
+```
+
+变量直接通过赋值产生：
+
+```praxis
+count = 0
+name = "Praxis"
+enabled = true
+```
+
+这些 Variable 都是当前 Process 的子 Object。
+
+例如：
+
+```text
+Process
+├── count
+├── name
+└── enabled
+```
+
+---
+
+## 9. 基本值
+
+Praxis 的基本字面量包括：
+
+```praxis
+123
+3.14
+"hello"
+true
+false
+null
+```
+
+这些值可以成为 Variable Object 的状态。
+
+例如：
+
+```praxis
+count = 123
+```
+
+可以理解为：
+
+```text
+Variable Object: count
+State: 123
+```
+
+---
+
+## 10. 注释
+
+Praxis 使用 `//` 单行注释：
+
+```praxis
+// comment
+count = 10 // comment
+```
+
+`#` 不是注释符号。
+
+---
+
+## 11. 语句与代码块
+
+Praxis 使用 `{}` 表示代码块。
+
+语句可以通过换行分隔：
+
+```praxis
+a = 1
+b = 2
+c = a + b
+```
+
+也允许使用 `;`：
+
+```praxis
+a = 1; b = 2; c = a + b
+```
+
+---
+
+## 12. Array
+
+```praxis
+items = [1, 2, 3]
+```
+
+访问：
+
+```praxis
+items[0]
+```
+
+修改：
+
+```praxis
+items[0] = 10
+```
+
+Array 同样属于 Object 世界。
+
+---
+
+## 13. Map
+
+```praxis
+user = {
+    name: "Ada",
+    age: 18
+}
+```
+
+访问：
+
+```praxis
+user["name"]
+```
+
+修改：
+
+```praxis
+user["age"] = 19
+```
+
+Map 字面量与 Class 实例可以拥有不同语义，但二者都属于 Object Model。
+
+---
+
+## 14. 运算
+
+算术：
+
+```praxis
+a + b
+a - b
+a * b
+a / b
+a % b
+```
+
+比较：
+
+```praxis
+a == b
+a != b
+a < b
+a <= b
+a > b
+a >= b
+```
+
+布尔：
+
+```praxis
+a and b
+a or b
+not a
+```
+
+也可以支持符号形式：
+
+```praxis
+a && b
+a || b
+!a
+```
+
+---
+
+## 15. 长度运算符
+
+`#` 表示长度：
+
+```praxis
+#items
+#name
+```
+
+例如：
+
+```praxis
+items = [1, 2, 3]
+length = #items
+```
+
+---
+
+## 16. 条件
+
+```praxis
+if value > 10 {
+    console.println("large")
+} else {
+    console.println("small")
+}
+```
+
+也可以：
+
+```praxis
+if (value > 10) {
+    ...
+}
+```
+
+支持：
+
+```praxis
+else if
+```
+
+---
+
+## 17. while
+
+```praxis
+count = 0
+
+while count < 10 {
+    count++
+}
+```
+
+支持：
+
+```praxis
+break
+continue
+```
+
+---
+
+## 18. 自增与自减
+
+支持后缀形式：
+
+```praxis
+count++
+count--
+```
+
+也可以作用于字段和索引：
+
+```praxis
+counter.value++
+items[0]--
+```
+
+不存在前缀：
+
+```text
+++count
+--count
+```
+
+---
+
+## 19. 函数
+
+使用 `func`：
+
+```praxis
+func add(a, b) {
+    return a + b
+}
+```
+
+调用：
+
+```praxis
+result = add(1, 2)
+```
+
+无参数：
+
+```praxis
+func hello() {
+    console.println("Hello")
+}
+
+hello()
+```
+
+---
+
+## 20. return
+
+```praxis
+return value
+```
+
+也可以：
+
+```praxis
+return
+```
+
+---
+
+## 21. Class
+
+Class 描述一种 Object 可以拥有的：
+
+- 初始状态
+- 字段
+- 能力
+- 行为
+
+例如：
+
+```praxis
+class Counter {
+    value = 0
+
+    func increment() {
+        this.value++
+    }
+}
+```
+
+字段不需要任何声明关键字：
+
+```praxis
+class User {
+    name = ""
+    age = 0
+}
+```
+
+---
+
+## 22. 创建 Object
+
+Class 只定义 Object 的类型、字段和能力。创建仍统一经过 Object Registry：
+
+```praxis
+counter = object.create("Counter", {})
+user = object.create("User", { name: "Ada", age: 18 })
+```
+
+Praxis 不提供第二套 `new` 创建机制。第二个参数用于覆盖 Class 字段的默认值。
+
+---
+
+## 23. 初始化
+
+没有依赖 `new` 的特殊 `init` 构造器。初始字段由 `object.create` 原子写入；需要额外行为时，创建后显式调用普通能力：
+
+```praxis
+user = object.create("User", { name: "Ada" })
+user.activate()
+```
+
+---
+
+## 24. this
+
+`this` 表示当前正在执行能力的 Object。
+
+```praxis
+class Counter {
+    value = 0
+
+    func increment() {
+        this.value++
+    }
+}
+```
+
+---
+
+## 25. public 与 private
+
+成员默认公开。
+
+可以显式：
+
+```praxis
+public class User {
+    private password = ""
+
+    public func name() {
+        return "User"
+    }
+
+    private func verify() {
+    }
+}
+```
+
+---
+
+## 26. 继承
+
+Praxis 支持单继承：
+
+```praxis
+class Admin extends User {
+    ...
+}
+```
+
+父类方法：
+
+```praxis
+super.method(...)
+```
+
+---
+
+## 27. 方法重载
+
+Praxis 可以根据参数数量区分同名方法：
+
+```praxis
+class Message {
+    func show(text) {
+        console.println(text)
+    }
+
+    func show(title, text) {
+        console.println(title + ": " + text)
+    }
+}
+```
+
+---
+
+## 28. try / catch
+
+```praxis
+try {
+    risky()
+} catch (error) {
+    console.println(error)
+}
+```
+
+错误也可以作为 Object 值参与系统。
+
+---
+
+## 29. 对象能力
+
+Praxis 中的系统对象通过统一的 `object.xxx(...)` 入口访问。直接传变量名时使用其绑定的 Object 身份；普通表达式读取变量的 Value。
+
+Ousject 的系统 Object 同样通过能力进行操作。
+
+所有 Object 都遵循同一个基础协议：
+
+```text
+id              返回稳定 Object 身份
+type            返回 Type Descriptor
+parent          返回父 Object
+status          返回生命周期和可用状态
+inspect         返回当前调用者有权查看的描述
+capabilities    返回当前调用者可以调用的能力
+value           返回不可变 Value Snapshot
+replace         原子替换 Value
+children        返回可见的子 Object
+links           返回可见的 Link 关系
+link            原子建立一个显式 Link
+unlink          原子移除一个显式 Link
+retire          原子退役 Object 及其子 Object，并清理显式名字和 Link
+```
+
+这些基础能力使用统一的小写名称。它们受权限控制；Value 不可见或不可修改时，`value`、`replace` 必须返回 Error，而不是绕过对象策略。
+
+能力调用的规范形式是：
+
+```praxis
+result = target.capability_name(argument)
+```
+
+对象必须先通过 `object.create/find/query` 创建或发现并绑定变量名，随后才用 `变量名.能力(...)` 调用。Console、Network、Display、Keyboard、Clock Sensor 和 Block Storage 已通过同一 Provider 接口接通。
+
+系统提供一个预绑定的 Object Registry Object：
+
+```praxis
+object
+```
+
+它使用小写名称，因为它是一个已经存在的对象实例，不是 Class。它提供统一的对象入口：
+
+```praxis
+found_id = object.find(object_id)
+matches = object.query(type_name, capability_name)
+note = object.create(type_name, initial_value)
+object.retire(note)
+```
+
+`object.create` 直接赋给变量时绑定新 Object；在其他表达式中返回普通 ID 文本。`object.find/query` 返回普通 ID 文本。`object.retire(note)` 与 `note.retire()` 等价。物理 Device 由驱动发现并发布到 Object Registry，因此通过 `object.find/query` 获得身份，再调用对象能力。旧的复数 API 不再接受。
+
+命名规则是：
+
+- 运行时对象、变量和能力：`lower_snake_case`。
+- 用户声明的 Class：`PascalCase`。
+- 不再使用 `Process.create`、`Network.create`、`Device.open` 这种混合的静态入口。
+- 对象能够做什么，由它公布的 Capability 决定，而不是由类似文件的固定接口决定。
+
+---
+
+## 30. Process Object
+
+Process 是 Object。
+
+可以创建同一 Program 中以无参数函数为入口的子 Process：
+
+```praxis
+channel = object.create("Channel", {})
+process = object.create("core.process", {
+    entry: "worker",
+    links: { channel: object.id(channel) }
+})
+```
+
+然后调用能力：
+
+```praxis
+process.start()
+result = process.wait()
+process.suspend()
+process.resume()
+process.terminate()
+state = object.status(process)
+```
+
+当前进程可通过 `object.find("process")` 发现自己，通过 `object.find("program")` 发现自己的 Program。`wait()` 会运行目标 Process，直到它停止或到达运行步数安全上限。进程间共享状态必须通过 `links` 显式传入，子进程再用 `object.find(link_name)` 发现。
+
+Process 可以具有的典型能力包括：
+
+```text
+start
+wait
+suspend
+resume
+terminate
+status
+inspect
+```
+
+具体能力和权限由系统决定。
+
+---
+
+## 31. Network Object
+
+网络通过 Object 表示。
+
+例如：
+
+```praxis
+network = object.create("net.endpoint", {
+    transport: "tcp"
+})
+```
+
+然后：
+
+```praxis
+network.connect("example.com", 443)
+network.send(data)
+data = network.receive()
+network.close()
+```
+
+Network Object 可以具有：
+
+```text
+connect
+listen
+accept
+send
+receive
+close
+status
+```
+
+等能力。
+
+---
+
+## 32. Device Object
+
+设备本身就是由驱动发布的 Object，不是必须套用 File API 的特殊文件。
+
+程序通过统一的 Object Registry 查找设备：
+
+```praxis
+display_id = object.query("device.display", "present")[0]
+display = object.find(display_id)
+
+sensor_id = object.query("device.sensor", "sample")[0]
+sensor = object.find(sensor_id)
+```
+
+然后调用设备实际公布的能力：
+
+```praxis
+display.present(frame)
+display.configure(display_mode)
+
+temperature = sensor.sample()
+sensor.calibrate()
+```
+
+这些设备领域调用已经接入宿主硬件适配器；没有发现对应硬件时，`object.query` 不会伪造设备。它们不提供隐式对象方法简写。
+
+键盘可以公布 `next_event`，显示设备可以公布 `present`，传感器可以公布 `sample`，块存储控制器可以公布 `load_block` 和 `store_block`。具体 Device 能力取决于设备本身；Praxis 不要求所有设备都实现 `open/read/write`。
+
+---
+
+## 33. Program Object
+
+Program 本身也是 Object。
+
+可以具有：
+
+```text
+execute
+inspect
+instantiate
+```
+
+等能力。
+
+例如：
+
+```praxis
+process = program.execute()
+```
+
+`execute()` 和 `execute("entry")` 已实现，分别从 Program 起点或指定无参数入口创建 Process Object。
+
+可以产生一个新的 Process Object。
+
+---
+
+## 34. Collection Object
+
+Collection Object 已拥有：
+
+```text
+get
+set
+insert
+remove
+length
+```
+
+等能力。
+
+普通：
+
+```praxis
+items[0]
+```
+
+可以视为这些能力的语言级简写。
+
+Collection 可以通过统一入口创建：
+
+```praxis
+items = object.create("core.collection", [1, 2, 3])
+items.insert(1, 9)
+first = items.get(0)
+```
+
+---
+
+## 35. 能力属于 Object
+
+Praxis 倾向于：
+
+```praxis
+process.terminate()
+network.send(data)
+display.present(frame)
+```
+
+而不是：
+
+```praxis
+process.terminate()
+network.send(data)
+display.present(frame)
+```
+
+因为能力属于 Object。对象创建或发现并绑定名字后，领域调用写成 `名字.能力(...)`；不同对象不必假装拥有同一组领域能力。已注册 Provider 的领域能力也走这条路径。
+
+---
+
+## 36. 能力可以失败
+
+统一对象模型不意味着所有操作永远成功。
+
+例如：
+
+```praxis
+try {
+    network.send(data)
+} catch (error) {
+    console.println(error)
+}
+```
+
+Network Object 仍然可能：
+
+- 断开
+- 超时
+- 被拒绝
+- 远端失效
+
+Device Object 也可能发生硬件错误。
+
+---
+
+## 37. 能力受到权限控制
+
+一个 Object 具有某项能力，并不意味着当前 Process 一定有权调用。
+
+例如：
+
+```praxis
+process.terminate()
+```
+
+可能因为权限不足而失败。
+
+因此：
+
+```text
+Object Capability
+```
+
+与：
+
+```text
+Caller Permission
+```
+
+是两个不同概念。
+
+---
+
+## 38. 子对象
+
+一个 Object 可以创建属于自己的 Object。
+
+例如：
+
+```praxis
+child = object.create("core.process", {}, {
+    links: {
+        program: program
+    }
+})
+```
+
+可能形成：
+
+```text
+Parent Process
+└── Child Process
+```
+
+同样：
+
+```praxis
+connection = object.create("net.endpoint", {
+    transport: "tcp"
+})
+```
+
+可以形成：
+
+```text
+Process
+└── Network Object
+```
+
+这种隶属关系由 Ousject 管理。
+
+---
+
+## 39. 生命周期
+
+当前 `retire` 采用明确的树形退役规则：目标 Object 及其全部子 Object 一起退役。系统同时删除 Process 变量中的所有对应名字、所有指向这些 Object 的显式 Link，以及父子关系。整个动作与当前 Process 的下一个 Token 位置处在同一个 OMS Transaction 中；任一权限、版本、存储或分片检查失败，都不会留下半删除状态。
+
+退役不是抹掉记录。稳定 ObjectId 对应的 Tombstone 会保留，ID 永不复用；当前实现也保留退役时的编码状态，但普通 Value/领域能力不再可用。之后再次给旧变量名赋值，会创建并绑定一个全新的 Object。
+
+任意 Value 中碰巧出现的 ID 文本不是 Link，系统不会猜测并改写它。需要可追踪关系时必须使用 `link`。当前运行中的 Process 不能退役自身，应使用 `terminate()`。跨 Shard 清理使用同一个全局候选和持久提交边界，完整成功或完整回滚。
+
+---
+
+## 40. Object 修改默认持久化
+
+Praxis 中对持久 Object 的修改默认具有持久语义。
+
+例如：
+
+```praxis
+counter.value++
+```
+
+并不是：
+
+```text
+先修改 RAM
+以后再尝试保存
+```
+
+而是逻辑上：
+
+```text
+旧正式状态
+   ↓
+生成候选状态
+   ↓
+提交到 Ousject 持久对象空间
+   ↓
+原子提交成功
+   ↓
+新状态正式可见
+```
+
+因此：
+
+> **修改只有在持久提交成功之后，才真正发生。**
+
+---
+
+## 41. 修改失败时状态不变
+
+假设：
+
+```praxis
+counter.value = 10
+```
+
+修改之前：
+
+```text
+counter.value = 9
+```
+
+如果持久提交成功：
+
+```text
+Persistent State = 10
+Visible State = 10
+```
+
+如果持久提交失败：
+
+```text
+Persistent State = 9
+Visible State = 9
+```
+
+Praxis 不会观察到一个“RAM 已经变成 10，但持久状态仍然是 9”的正式状态。
+
+因此一次对象修改：
+
+> **要么完整成功，要么完全不发生。**
+
+---
+
+## 42. Transaction
+
+多个对象修改可以组成同一个原子 Transaction。
+
+例如：
+
+```praxis
+transaction {
+    source.balance = source.balance - 10
+    target.balance = target.balance + 10
+}
+```
+
+事务成功：
+
+```text
+两个修改同时生效
+```
+
+事务失败：
+
+```text
+两个对象都保持旧状态
+```
+
+事务中间状态不会成为正式可见状态。
+
+即使没有显式写出 `transaction`，Ousject 也可以在底层把一段相关修改合并为原子提交单元。
+
+---
+
+## 43. Process 状态与对象修改共同提交
+
+Process 的执行位置本身也是持久状态。
+
+因此一个 Process 在执行：
+
+```praxis
+counter++
+```
+
+时，系统可以把：
+
+```text
+counter 的新状态
+Process 当前 Token Position
+Process Stack
+其他相关状态
+```
+
+一起提交。
+
+这样系统重启之后不会出现：
+
+```text
+counter 已经 +1
+但 Process 又从旧 Token 重新执行一次
+```
+
+这种错误。
+
+---
+
+## 44. Process Persistence
+
+Process 本身是 Object，因此也可以持久化。
+
+它的 Variable Objects：
+
+```text
+Process
+├── variable a
+├── variable b
+└── variable state
+```
+
+也属于 Process 的持久状态之一。
+
+系统恢复 Process 时，可以恢复整个所属对象结构。
+
+---
+
+## 45. link 也必须持久化
+
+如果：
+
+```praxis
+displayed link count
+```
+
+已经成为程序状态的一部分，那么系统重启后 Link 关系也必须保持。
+
+它不能因为 Object 被移动到 Storage 或 Process 被恢复而消失。
+
+---
+
+## 46. Object 不关心驻留位置
+
+同样的 Praxis 代码：
+
+```praxis
+object.doSomething()
+```
+
+不应该因为 Object 当前位于：
+
+```text
+RAM
+Storage
+Network
+Device
+```
+
+而使用完全不同的基础语法。
+
+Ousject 负责完成必要的访问过程。
+
+---
+
+## 47. 外部副作用
+
+不是所有能力调用都能像普通 Object State 一样回滚。
+
+例如：
+
+```praxis
+network.send(data)
+display.present(frame)
+sensor.calibrate()
+```
+
+如果外部世界已经发生变化，本地事务失败不能自动撤销远端或物理世界。
+
+因此 Praxis/Ousject 必须区分：
+
+```text
+Object State Change
+```
+
+与：
+
+```text
+External Effect
+```
+
+外部 Effect 应由系统进行持久记录、调度和结果跟踪，而不是假装它们具有普通对象字段修改一样的回滚能力。
+
+---
+
+## 48. import / include
+
+顶层可以使用：
+
+```praxis
+import "module"
+include "source"
+```
+
+这些属于编译组织能力，不改变 Ousject 的 Object Model。
+
+`import` 对同一路径只展开一次，`include` 每次都会展开。CLI 从主源码所在目录加载；省略扩展名时自动使用 `.px`。循环加载会在编译期报错。
+
+---
+
+## 49. Praxis 与 Token Stream
+
+例如：
+
+```praxis
+process.terminate()
+```
+
+在语言层表示：
+
+> 调用 Process Object 的 terminate 能力。
+
+Compiler 会将其转换成对应 TF Token。
+
+概念上可能类似：
+
+```text
+LOAD_OBJECT process
+CALL_CAPABILITY terminate
+```
+
+但 Praxis 规范不规定真实 Opcode。
+
+真正的 Token 编码由 TF 规范决定。
+
+---
+
+## 50. Praxis 与 Ousject 的边界
+
+Praxis 定义：
+
+```text
+语言语义
+对象操作
+能力调用
+link
+控制流
+Class
+```
+
+Ousject 定义：
+
+```text
+Object 实际存在
+Object 隶属关系
+能力执行
+Process 调度
+驻留
+持久化
+原子提交
+设备
+权限
+```
+
+TF / Token Stream 位于两者之间。
+
+---
+
+## 51. 核心原则
+
+Praxis 必须长期遵循：
+
+1. 万物皆对象。
+2. Variable 本身也是 Object。
+3. Variable 通常隶属于当前 Process Object。
+4. Object 可以存在父子和其他隶属关系。
+5. Pointer 不属于 Praxis。
+6. Reference 不属于 Praxis。
+7. 普通赋值不能制造隐藏 Reference。
+8. 显式共享关系使用 `link`。
+9. `link` 不是 Pointer 或 Reference。
+10. Object 可以拥有能力。
+11. 系统 Object 通过和普通 Object 一致的能力调用形式使用。
+12. Process 是 Object。
+13. Network 是 Object。
+14. Device 是 Object。
+15. Program 是 Object。
+16. Object 当前是否位于 RAM 不改变语言语义。
+17. Object 是否持久化不改变正常访问方式。
+18. 持久 Object 修改默认进行同步。
+19. 修改只有在持久提交成功后才正式可见。
+20. 提交失败时，内存与持久状态都保持旧值。
+21. 多个修改可以组成原子 Transaction。
+22. Process 执行状态可以与 Object 修改共同提交。
+23. Process 的变量和其他子对象可以与 Process 一同持久化。
+24. `link` 关系必须能够随 Process/Object 状态持久化。
+25. 外部 Effect 与普通 Object State Change 必须明确区分。
+26. Praxis 不依赖具体 CPU 架构。
+27. 所有 Praxis 行为最终都必须能够编译成 TF Token Stream。
+
+---
+
+## 52. Praxis 的核心模型
+
+Praxis 中最基本的关系不是：
+
+```text
+Variable
+→ Pointer
+→ Memory
+```
+
+而是：
+
+```text
+Process Object
+    │
+    ├── Variable Object
+    │       └── State
+    │
+    ├── Network Object
+    │       └── Capabilities
+    │
+    ├── Child Process Object
+    │       └── Capabilities
+    │
+    └── Other Objects
+```
+
+必要的显式共同状态关系使用：
+
+```praxis
+link
+```
+
+而持久 Object 的修改遵循：
+
+```text
+Old State
+   ↓
+Candidate State
+   ↓
+Atomic Persistent Commit
+   ↓
+Publish
+   ↓
+New State
+```
+
+程序只需要面对：
+
+> **Object、Object 的隶属关系、Object 能做什么，以及修改是否成功。**
+
+至于对象当前存在于 RAM、Storage、Network 还是 Device，由 Ousject 负责。

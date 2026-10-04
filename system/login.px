@@ -1,0 +1,17 @@
+console = object.find("console")
+authentication = object.find("authentication")
+programs = object.find("programs")
+
+console.println("user:")
+name = console.read_line()
+console.println("password:")
+password = console.read_secret()
+session = authentication.login(name, password)
+console.println("logged in")
+console.println(session["subject"])
+
+shell_id = programs.resolve("shell")
+shell = object.find(shell_id)
+shell_process_id = shell.execute()
+shell_process = object.find(shell_process_id)
+shell_process.wait()

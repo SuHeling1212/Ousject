@@ -1,0 +1,12 @@
+[package]
+name = "oms-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oms-runtime = { path = "../oms-runtime" }
+oms-types = { path = "../oms-types" }
+
+[lints]
+workspace = true

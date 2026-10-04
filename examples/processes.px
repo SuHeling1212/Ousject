@@ -1,0 +1,19 @@
+class Channel {
+    value = 0
+}
+
+func worker() {
+    channel = object.find("channel")
+    channel.value++
+}
+
+console = object.find("console")
+channel = object.create("Channel", {})
+child = object.create("core.process", {
+    entry: "worker",
+    links: { channel: object.id(channel) }
+})
+
+child.start()
+console.println(child.wait())
+console.println(channel.value)

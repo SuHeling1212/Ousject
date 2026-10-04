@@ -1,0 +1,9 @@
+console = object.find("console")
+system = object.find("system")
+store = object.find("store")
+providers = object.find("providers")
+
+console.println(system.health_check())
+console.println(store.health_check())
+console.println(providers.providers())
+console.println(providers.devices())
