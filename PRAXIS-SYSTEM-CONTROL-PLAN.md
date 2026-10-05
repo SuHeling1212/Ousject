@@ -1,5 +1,7 @@
 # Praxis 全系统控制与 `local` 用户实施计划
 
+> 当前实现采用了收敛后的设计。实际 API 以 [API-REFERENCE.md](./API-REFERENCE.md) 为准：键盘使用 `capture/release/next_event/poll_event` 并与 Console 行输入互斥；调度器是内核机制，不是用户可调用的 `core.scheduler` 对象；Store 不暴露手动 checkpoint；块存储仅供内核/驱动。
+
 ## 目标
 
 最终用户不通过 Rust CLI 管理 Ousject。Rust 只实现内核机制、Praxis VM 和临时宿主驱动适配；启动、登录、Shell、用户管理、进程管理、对象管理和系统维护全部由 Praxis 程序完成。
@@ -26,7 +28,7 @@ secret = console.read_secret()
 5. Process 位置、返回文本、Effect 完成状态共同提交。
 6. 同一个 EffectId 重试时必须返回同一份输入，不能再次读取下一行。
 7. EOF、无效 UTF-8、设备断开和权限拒绝返回可捕获 Error。
-8. `device.keyboard.next_event()` 保留给按键/事件输入；Console `read_line()` 负责文本命令输入，两者不混为 File API。
+8. Keyboard 使用 `capture/release/next_event/poll_event` 读取结构化按键事件；Console `read_line()` 负责文本输入。二者共享同一终端输入源，并以 Process 为单位互斥。
 
 验收：两 Process 同时等输入、提交故障重试、重启恢复、EOF、Unicode 和非授权读取测试全部通过。
 
@@ -58,11 +60,11 @@ secret = console.read_secret()
 | `core.system` | `status`、`shutdown`、`restart`、`health_check` |
 | `core.authentication` | `login`、`logout`、`change_password` |
 | `core.user_registry` | `create_user`、`users`、`disable_user` |
-| `core.scheduler` | `enqueue`、`processes`、`suspend`、`resume`、`terminate` |
+| `core.process` | `start`、`wait`、`suspend`、`resume`、`terminate`；通过 `object.query("core.process")` 发现 |
 | `core.compiler` | `compile`、`validate`、`disassemble` |
 | `core.type_registry` | `register`、`types`、`descriptor` |
-| `core.provider_registry` | `providers`、`devices`、`bind`、`unbind` |
-| `core.object_store` | `stats`、`health_check`、`checkpoint`、`effects` |
+| `core.provider_registry` | `providers`、`devices`；仅 `local` |
+| `core.object_store` | `stats`、`health_check`、`effects`；`effects` 仅 `local` |
 
 要求：
 

@@ -687,29 +687,32 @@ try {
 
 ## 29. 对象能力
 
-Praxis 中的系统对象通过统一的 `object.xxx(...)` 入口访问。直接传变量名时使用其绑定的 Object 身份；普通表达式读取变量的 Value。
+`object` 只负责创建、发现和查询。获得 Object 后，通过 `name.property` 读取公共属性，通过 `name.capability(...)` 调用能力。
 
 Ousject 的系统 Object 同样通过能力进行操作。
 
 所有 Object 都遵循同一个基础协议：
 
 ```text
-id              返回稳定 Object 身份
-type            返回 Type Descriptor
-parent          返回父 Object
-status          返回生命周期和可用状态
-inspect         返回当前调用者有权查看的描述
-capabilities    返回当前调用者可以调用的能力
-value           返回不可变 Value Snapshot
-replace         原子替换 Value
-children        返回可见的子 Object
-links           返回可见的 Link 关系
-link            原子建立一个显式 Link
-unlink          原子移除一个显式 Link
-retire          原子退役 Object 及其子 Object，并清理显式名字和 Link
+id              只读属性：稳定 Object 身份
+type            只读属性：Type 名称
+parent          只读属性：父 Object
+status          只读属性：生命周期和可用状态
+owner           只读属性：Owner Subject
+version         只读属性：当前 Object 版本
+permissions     只读属性：有权管理时可见的授权关系
+inspect         只读属性：当前调用者有权查看的描述
+capabilities    只读属性：当前调用者可以调用的能力
+value           只读属性：Object 的本质内容
+children        只读属性：可见的子 Object
+links           只读属性：可见的 Link 关系
+replace         能力：原子替换 Value
+link            能力：原子建立一个显式 Link
+unlink          能力：原子移除一个显式 Link
+retire          能力：原子退役 Object 及其子 Object，并清理显式名字和 Link
 ```
 
-这些基础能力使用统一的小写名称。它们受权限控制；Value 不可见或不可修改时，`value`、`replace` 必须返回 Error，而不是绕过对象策略。
+这些属性和能力使用统一的小写名称，并且受权限控制。Process 的 `value` 是可读运行状态；`process.variables` 返回变量值，`process.x` 可直接读取变量 `x`。
 
 能力调用的规范形式是：
 
@@ -717,7 +720,7 @@ retire          原子退役 Object 及其子 Object，并清理显式名字和 
 result = target.capability_name(argument)
 ```
 
-对象必须先通过 `object.create/find/query` 创建或发现并绑定变量名，随后才用 `变量名.能力(...)` 调用。Console、Network、Display、Keyboard、Clock Sensor 和 Block Storage 已通过同一 Provider 接口接通。
+对象必须先通过 `object.create/find/query` 创建或发现并绑定变量名，随后才用 `变量名.能力(...)` 调用。Console、Network、Display、Keyboard、Block Storage、Time 和 DNS Resolver 都通过对象能力调用；时间不是伪装成传感器的设备。
 
 系统提供一个预绑定的 Object Registry Object：
 
@@ -731,10 +734,10 @@ object
 found_id = object.find(object_id)
 matches = object.query(type_name, capability_name)
 note = object.create(type_name, initial_value)
-object.retire(note)
+note.retire()
 ```
 
-`object.create` 直接赋给变量时绑定新 Object；在其他表达式中返回普通 ID 文本。`object.find/query` 返回普通 ID 文本。`object.retire(note)` 与 `note.retire()` 等价。物理 Device 由驱动发现并发布到 Object Registry，因此通过 `object.find/query` 获得身份，再调用对象能力。旧的复数 API 不再接受。
+`object.create` 直接赋给变量时绑定新 Object；在其他表达式中返回普通 ID 文本。`object.find/query` 返回普通 ID 文本。获得 Object 后通过 `name.id`、`name.value` 等属性读取信息，通过 `name.retire()` 等能力执行操作。物理 Device 由驱动发现并发布到 Object Registry。
 
 命名规则是：
 
@@ -755,7 +758,7 @@ Process 是 Object。
 channel = object.create("Channel", {})
 process = object.create("core.process", {
     entry: "worker",
-    links: { channel: object.id(channel) }
+    links: { channel: channel.id }
 })
 ```
 
@@ -767,10 +770,10 @@ result = process.wait()
 process.suspend()
 process.resume()
 process.terminate()
-state = object.status(process)
+state = process.status
 ```
 
-当前进程可通过 `object.find("process")` 发现自己，通过 `object.find("program")` 发现自己的 Program。`wait()` 会运行目标 Process，直到它停止或到达运行步数安全上限。进程间共享状态必须通过 `links` 显式传入，子进程再用 `object.find(link_name)` 发现。
+当前进程可通过 `object.find("process")` 发现自己，通过 `object.find("program")` 发现自己的 Program。`wait()` 会运行目标 Process，直到它停止或到达运行步数安全上限，并返回 `halted`、`failed` 等状态。`process.result` 是正常结束时的结果；失败时用 `process.error` 查看错误。进程间共享状态必须通过 `links` 显式传入，子进程再用 `object.find(link_name)` 发现。
 
 Process 可以具有的典型能力包括：
 
@@ -827,7 +830,7 @@ status
 
 ## 32. Device Object
 
-设备本身就是由驱动发布的 Object，不是必须套用 File API 的特殊文件。
+设备本身就是由驱动发布的 Object，不是必须套用 File API 的特殊文件。时间和 DNS 是系统服务，不属于设备。
 
 程序通过统一的 Object Registry 查找设备：
 
@@ -835,8 +838,9 @@ status
 display_id = object.query("device.display", "present")[0]
 display = object.find(display_id)
 
-sensor_id = object.query("device.sensor", "sample")[0]
-sensor = object.find(sensor_id)
+keyboard_id = object.query("device.keyboard", "capture")[0]
+keyboard = object.find(keyboard_id)
+keyboard.capture()
 ```
 
 然后调用设备实际公布的能力：
@@ -845,13 +849,41 @@ sensor = object.find(sensor_id)
 display.present(frame)
 display.configure(display_mode)
 
-temperature = sensor.sample()
-sensor.calibrate()
+key_event = keyboard.poll_event()
+keyboard.release()
 ```
 
-这些设备领域调用已经接入宿主硬件适配器；没有发现对应硬件时，`object.query` 不会伪造设备。它们不提供隐式对象方法简写。
+这些设备领域调用由宿主硬件适配器提供；没有发现对应硬件时，`object.query` 不会伪造设备。它们不提供隐式对象方法简写。
 
-键盘可以公布 `next_event`，显示设备可以公布 `present`，传感器可以公布 `sample`，块存储控制器可以公布 `load_block` 和 `store_block`。具体 Device 能力取决于设备本身；Praxis 不要求所有设备都实现 `open/read/write`。
+键盘提供 `capture/release/next_event/poll_event`，与 `console.read_line/read_secret` 共用独占输入源。事件记录包含 `key`、`text`、`pressed`、`ctrl`、`alt`、`shift`，覆盖 Unicode、方向键、导航键和 F1–F12；终端通常只提供按下事件，不能可靠提供按键释放事件。块存储 API 仅供内核和驱动使用，普通 Praxis 程序通过更新 Object 保存数据。具体 Device 能力取决于设备本身；Praxis 不要求所有设备都实现 `open/read/write`。
+
+## 常用系统对象
+
+```praxis
+console = object.find("console")
+dimensions = console.size() // Record: columns、rows
+interactive = console.is_interactive()
+console.print("prompt> ")
+console.println("hello")
+
+time = object.find("time")
+unix_milliseconds = time.now()
+uptime_milliseconds = time.monotonic()
+time.sleep(100) // 等待 100 毫秒
+
+math = object.find("math")
+fraction = math.random()                 // [0, 1)
+die_roll = math.random_integer(1, 6)     // 含 1 和 6
+
+resolver = object.find("resolver")
+addresses = resolver.resolve("example.com")
+
+name = "  Praxis  "
+trimmed = name.trim()
+clean_name = trimmed.lower()
+```
+
+文本 Value 直接提供 `slice(start, length)`、`find(text)`、`contains(text)`、`split(separator)`、`replace_all(from, to)`、`trim()`、`lower()` 和 `upper()`；`slice` 的位置按 Unicode 字符计。
 
 ---
 
@@ -883,32 +915,18 @@ process = program.execute()
 
 ## 34. Collection Object
 
-Collection Object 已拥有：
-
-```text
-get
-set
-insert
-remove
-length
-```
-
-等能力。
-
-普通：
-
-```praxis
-items[0]
-```
-
-可以视为这些能力的语言级简写。
-
-Collection 可以通过统一入口创建：
+`core.collection` 的值可以是 Array 或 Map；它们和普通变量使用同一套操作，没有额外的 `get/set/length/insert/remove` API。
 
 ```praxis
 items = object.create("core.collection", [1, 2, 3])
-items.insert(1, 9)
-first = items.get(0)
+first = items[0]             // 读取数组元素
+items[1] = 9                 // 改写已有数组位置
+size = #items                // 读取长度
+items.replace([7, 9, 11])    // 整体替换；数组长度可随新值改变
+
+settings = object.create("core.collection", {"theme": "dark"})
+settings["theme"] = "light" // Map 可读写键值
+settings["font"] = "large"  // 也可新增键
 ```
 
 ---

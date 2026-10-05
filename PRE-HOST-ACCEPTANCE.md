@@ -11,7 +11,7 @@ Ousject 0.0.0 当前交付的是“可在宿主应用中运行的系统核心”
 - 动态 Type Descriptor；启动时 Provider 注册；统一 `object.create/find/query` 与 `name.capability(...)`。
 - Console、TCP Endpoint、Display、Keyboard、Clock Sensor 和 4096-byte Block Storage 宿主适配器。
 - 密码验证、一次展示的 Session Token、登录/退出，以及非系统 Subject Process。
-- 跨 Shard 原子事务、乐观冲突、权限、Parent/Child、Link、Tombstone 和一致性检查。
+- 跨 Shard 原子事务、乐观冲突、权限、Parent/Child、Link、Tombstone 和一致性检查；退役内容 7 天后后台自动清理并永久保留元数据。
 - 校验 WAL、原子 Checkpoint、尾部撕裂恢复、Store 独占与死进程锁恢复。
 - 外部 Provider 操作的持久 Effect Intent 和同一启动内的幂等重试。
 

@@ -4,6 +4,8 @@
 
 当前真正可运行和可调用的功能清单见 [IMPLEMENTED-FEATURES.md](./IMPLEMENTED-FEATURES.md)；设计目标与现状在该文档中明确分开。
 
+当前 Praxis 可调用的完整 Object API 表见 [API-REFERENCE.md](./API-REFERENCE.md)。
+
 脱离宿主之前已经完成的边界见 [PRE-HOST-ACCEPTANCE.md](./PRE-HOST-ACCEPTANCE.md)；不牺牲已提交信息的性能优化顺序见 [PERFORMANCE-PLAN.md](./PERFORMANCE-PLAN.md)。
 
 将 Console 输入、`local` 最高用户和全部系统管理迁移到 Praxis 的实施顺序见 [PRAXIS-SYSTEM-CONTROL-PLAN.md](./PRAXIS-SYSTEM-CONTROL-PLAN.md)。
@@ -13,6 +15,8 @@ Process 的创建、调度、原子提交、硬件发现和恢复流程见 [PROC
 Rust 内核与 Praxis 用户空间的明确边界见 [KERNEL-USERSPACE.md](./KERNEL-USERSPACE.md)。
 
 Object、Value、Type、Process、Network、Device 与传统 File 的统一设计见 [UNIFIED-OBJECT-MODEL.md](./UNIFIED-OBJECT-MODEL.md)。
+
+退役对象保留 7 天后自动清理、并永久保留最小元数据的规则见 [GARBAGE-COLLECTION.md](./GARBAGE-COLLECTION.md)。
 
 **Ousject 是一个以对象、统一访问、Token Stream 与原生持久化为核心的操作系统。**
 
@@ -204,11 +208,13 @@ close
 ```text
 present
 sample
-next_event
 calibrate
-load_block
-store_block
 ```
+
+Keyboard additionally provides `capture/release/next_event/poll_event`. It owns
+the same terminal input source as `console.read_line/read_secret`, so only one
+Process can read at a time. Block reads and writes belong to the kernel/driver
+layer; Praxis programs work with persisted Objects instead.
 
 这不是要求每个 Device 实现同一组操作。显示器、传感器、键盘和存储控制器只公布符合自身语义的能力；Device 不需要伪装成 File。
 
@@ -283,18 +289,18 @@ unlink
 retire
 ```
 
-对象先用 `object.create/find/query` 创建或发现并绑定变量名，再以 `变量名.能力(...)` 调用。Console Object 可写成 `aaa = object.find("console")`，随后调用 `aaa.println(value)`；系统、认证、用户、调度、编译、类型、Provider、Store、Network 和已发现设备都使用同一调用形式。
+对象先用 `object.create/find/query` 创建或发现并绑定变量名，再以 `变量名.能力(...)` 调用。Console Object 可写成 `aaa = object.find("console")`，随后调用 `aaa.println(value)`；系统、认证、用户、编译、类型、Provider、Store、Network 和已发现设备都使用同一调用形式。调度器是内核机制，不提供单独的用户对象。
 
 系统中的预绑定 Object Registry 使用小写名称 `object`，因为它是对象实例而不是类型：
 
 ```text
-object = object.find(object_id)
+target = object.find(object_id)
 object.query(criteria)
 object.create(type_name, initial_value)
-object.retire(target)
+target.retire()
 ```
 
-`object.retire(target)`（也可写作 `target.retire()`）会在一次原子事务中退役目标及其子 Object，清理所有 Process 变量别名和显式 Link，并保留不可复用的 Tombstone。任一步骤失败都不会产生半删除状态。
+`target.retire()` 会在一次原子事务中退役目标及其子 Object，清理所有 Process 变量别名和显式 Link，并留下 Tombstone。对象内容保留 7 天后由系统自动清理；元数据和 ObjectId 永久保留，不会复用。不需要额外的退役或 GC 命令。任一步骤失败都不会产生半删除状态。
 
 这取代 `Process.create`、`Network.create`、`Device.open` 等大小写和创建方式不统一的入口。
 
@@ -890,19 +896,24 @@ close
 
 程序通过统一入口发现它，而不是把它当作 File 打开：
 
-```text
-display = object.query({ type: "device.display", capability: "present" })[0]
-sensor = object.query({ type: "device.sensor", capability: "sample" })[0]
+```praxis
+display_id = object.query("device.display", "present")[0]
+display = object.find(display_id)
+keyboard_id = object.query("device.keyboard", "capture")[0]
+keyboard = object.find(keyboard_id)
+keyboard.capture()
+event = keyboard.poll_event()
+keyboard.release()
 ```
 
 不同类型 Device 可以具有完全不同的领域能力，例如：
 
 ```text
 display.present(frame)
-sensor.sample()
 keyboard.next_event()
-storage.load_block(index)
 ```
+
+时间是系统服务而不是传感器：`time = object.find("time")` 后调用 `time.now()`、`time.monotonic()` 或非阻塞的 `time.sleep(milliseconds)`；打印和按行终端输入则使用共享 `console` 对象。结束的 Process 保留结果七天后由内核自动退役，Program 不会被连带删除。
 
 `open/read/write` 不再是 Device 的统一接口。设备只公布符合自身真实行为的 Capability。
 

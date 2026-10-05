@@ -555,7 +555,8 @@ Creating
 → Suspended / Migrating
 → Terminating
 → Tombstoned
-→ Reclaimed
+→ Payload Reclaimed after 7 days
+→ Minimal metadata retained
 ```
 
 ### 13.1 创建
@@ -572,28 +573,28 @@ Object 只有在创建 Transaction 提交后才可被普通调用者发现。
 
 ### 13.2 终止
 
-终止先产生 Tombstone，不立即复用空间。
+终止通过 `对象名.retire()` 产生 Tombstone，不提供额外的宿主命令。清理不是立刻发生：对象内容会保留 7 天，再由 OMS 后台服务自动回收。
 
-Tombstone 至少保存：
+清理后永久保留的最小 Tombstone 元数据：
 
 ```text
 ObjectId
+TypeId
+Owner
 FinalVersion
-TerminationTransactionId
-Minimal Audit Metadata
+RetiredAt
+Lifecycle = Tombstoned
 ```
 
-### 13.3 安全回收
+### 13.3 七天后的自动回收
 
-只有同时满足以下条件才可回收旧状态：
+OMS 后台服务在系统运行期间等待最早的到期 Tombstone；没有待到期对象时不扫描对象表。对象库打开时会重建到期索引；系统关闭期间错过的清理在下次启动时补做。
 
-- 没有活动 ReadView 使用该版本。
-- 没有未决 Transaction 引用它。
-- 恢复窗口和快照不再需要它。
-- link 与 Parent 策略已处理。
-- 复制节点已越过相应提交点。
+到期后，系统原子地删除 Tombstone 的原始 State、Links 和多余授权，再保留以上元数据。ObjectId 仍被占用，不能再次创建。
 
-实现可使用 Epoch-Based Reclamation、引用追踪与持久可达性扫描的组合。
+Pending、结果不明或无法安全识别状态的 Effect 不可退役，也不会被回收。清理期间 OMS 暂时锁住全部 Shard，并以代际快照切换保证崩溃后只能恢复到完整的清理前或清理后状态。
+
+时限按系统墙钟计算；宿主时钟大幅前调可能导致提前到期。生产系统需要可信硬件时钟。
 
 ---
 

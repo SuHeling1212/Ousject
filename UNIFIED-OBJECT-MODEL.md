@@ -78,6 +78,8 @@ Network Object
 
 `residency` 不是对象身份，Praxis 程序不能依赖它。
 
+`target.retire()` 会立即停用对象，但不马上丢弃内容。OMS 保留内容 7 天后自动清理；之后永久保留 ObjectId、类型、所有者、最终版本、退役状态和时间等最小元数据，ID 不会复用。清理由内核后台执行，不需要管理命令。
+
 ## 4. Value 类型
 
 第一版统一 Value 应支持：
@@ -132,9 +134,11 @@ core.bytes
 core.collection
 core.program
 core.process
+core.math
+core.time
+net.resolver
 net.endpoint
 device.display
-device.sensor
 device.keyboard
 device.block_storage
 ```
@@ -253,22 +257,24 @@ display = object.query({
 
 ## 8. 所有 Object 的统一 API
 
-每个 Object 都通过同一个 `object.xxx(...)` 协议访问。变量名绑定 Object，在普通表达式中读出 Value；作为对象调用的目标时提供绑定身份。ID 也可以作为普通文本显式传递：
+`object` 只负责创建和发现。获得 Object 后，直接读取它的公共属性或调用它的能力：
 
 | API | 含义 |
 |---|---|
-| `object.id(target)` | 返回 ObjectId 文本 |
-| `object.type(target)` | 返回类型名 |
-| `object.parent(target)` | 返回父 ObjectId 文本或 `null` |
-| `object.status(target)` | 返回生命周期和可用状态 |
-| `object.inspect(target)` | 返回有权查看的描述 |
-| `object.capabilities(target)` | 返回基础能力名称 |
-| `object.value(target)` | 返回当前不可变 Value Snapshot |
-| `object.replace(target, value)` | 原子替换 Value |
-| `object.children(target)` | 返回可见子 ObjectId 文本数组 |
-| `object.links(target)` | 返回命名 Link 到 ObjectId 文本的 Map |
-| `object.link(source, name, target)` | 原子建立一个显式 Link |
-| `object.unlink(source, name)` | 原子移除一个显式 Link |
+| `target.id` | 返回 ObjectId 文本 |
+| `target.type` | 返回类型名 |
+| `target.parent` | 返回父 ObjectId 文本或 `null` |
+| `target.status` | 返回生命周期和可用状态 |
+| `target.owner` / `target.permissions` | 返回 owner；有管理权限时返回完整授权关系 |
+| `target.version` | 返回当前 Object 版本 |
+| `target.inspect` | 返回有权查看的描述 |
+| `target.capabilities` | 返回基础能力和领域能力名称 |
+| `target.value` | 返回 Object 的本质内容；Process 返回可读运行状态 |
+| `target.replace(value)` | 原子替换 Value |
+| `target.children` | 返回可见子 ObjectId 文本数组 |
+| `target.links` | 返回命名 Link 到 ObjectId 文本的 Map |
+| `source.link(name, target)` | 原子建立一个显式 Link |
+| `source.unlink(name)` | 原子移除一个显式 Link |
 | `name.capability(...)` | 对已经创建或发现并绑定到 `name` 的 Object 调用能力；按 Type 分发到内核能力、Class 方法或 Provider |
 
 并不是每个 Object 都必须拥有相同的领域能力。统一的是基础协议和调用方式，不是行为本身。
@@ -277,7 +283,8 @@ display = object.query({
 process.start()
 connection.send(data)
 display.present(frame)
-sensor.sample()
+time.now()
+resolver.resolve("example.com")
 ```
 
 Process、Network、Device 领域能力已经通过统一分发执行，例如：
@@ -295,8 +302,8 @@ aaa.println("hello")
 | Program | TF、元数据、入口信息 | Program Provider | `execute`、`inspect` |
 | Process | Token 位置、Stack、状态 | Scheduler/VM Provider | `start`、`wait`、`suspend`、`terminate` |
 | Network Endpoint | 协议、地址、连接阶段、结果 | Network Provider | `connect`、`send`、`receive`、`close` |
-| Device | 可持久配置、描述、最近状态 | Driver Provider | `present`、`sample`、`next_event`、`calibrate` |
-| Collection | Array/Map Value 或分段索引 | Collection Provider | `get`、`set`、`insert`、`remove` |
+| Device | 可持久配置、描述、最近状态 | Driver Provider | `present`、`next_event`、以及设备自身公布的能力 |
+| Collection | Array 或 Map Value | 与变量相同的通用 Value 操作 | 索引读取/写入、`#` 长度、整体 `replace`；没有集合专属能力 |
 
 这些对象使用相同的 ObjectId、权限、父子关系、Link、版本、事务、查询和恢复机制。
 
@@ -332,7 +339,7 @@ Ousject 将它们拆开：
 
 ```praxis
 readme = object.create("core.text", "# Ousject")
-object.link(project, "README", readme)
+project.link("README", readme)
 ```
 
 路径：

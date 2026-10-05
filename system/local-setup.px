@@ -1,7 +1,7 @@
 console = object.find("console")
 authentication = object.find("authentication")
 
-console.println("Create the local password:")
+console.print("Create the local password: ")
 password = console.read_secret()
 identity = authentication.initialize_local(password)
 console.println("local initialized")

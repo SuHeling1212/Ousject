@@ -1,10 +1,13 @@
 use oms_runtime::{
     AccessContext, CreateObject, InMemoryObjectManager, ObjectManager, SnapshotBackend,
 };
-use oms_types::{Capability, LifecycleState, ObjectId, OmsError, SubjectId, TypeId};
+use oms_types::{
+    CORE_EFFECT_TYPE, Capability, LifecycleState, ObjectId, OmsError, SubjectId, TypeId, Value,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
+use std::time::{Duration, SystemTime};
 
 fn setup() -> (Arc<InMemoryObjectManager>, AccessContext) {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
@@ -247,6 +250,158 @@ fn tombstone_remains_inspectable_and_counted() {
 }
 
 #[test]
+fn gc_dry_run_is_read_only_and_compaction_preserves_identity_and_live_objects() {
+    let directory = std::env::temp_dir().join(format!("ousject-gc-{}", ObjectId::new()));
+    let path = directory.join("objects.oms");
+    let owner = SubjectId::new();
+    let context = AccessContext::new(owner);
+    let dead;
+    let active;
+    let tombstone_header;
+    let active_before;
+    {
+        let manager = InMemoryObjectManager::open_persistent(&path).unwrap();
+        let mut seed = 0x9e37_79b9_u32;
+        let payload = (0..64 * 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed.to_le_bytes()[0]
+            })
+            .collect::<Vec<_>>();
+        dead = create(&manager, context, &payload, None);
+        active = create(&manager, context, b"must remain unchanged", None);
+
+        let version = manager.inspect(context, dead).unwrap().version;
+        let mut link = manager.begin(context);
+        link.expect(dead, version).set_link(dead, "anchor", active);
+        manager.commit(link).unwrap();
+        let version = manager.inspect(context, dead).unwrap().version;
+        let mut retire = manager.begin(context);
+        retire.expect(dead, version).tombstone(dead);
+        manager.commit(retire).unwrap();
+
+        tombstone_header = manager.inspect(context, dead).unwrap();
+        active_before = manager.read(context, active).unwrap();
+        let expired_time = SystemTime::now() + Duration::from_secs(8 * 24 * 60 * 60);
+        let before_dry_run = manager.analyze_gc_at(expired_time).unwrap();
+        let after_dry_run = manager.analyze_gc_at(expired_time).unwrap();
+        assert_eq!(before_dry_run, after_dry_run);
+        assert_eq!(before_dry_run.tombstones_waiting_for_retention, 0);
+        assert!(before_dry_run.payload_bytes_reclaimable >= 64 * 1024);
+        let still_retained = manager
+            .analyze_gc_at(SystemTime::now() + Duration::from_secs(6 * 24 * 60 * 60))
+            .unwrap();
+        assert_eq!(still_retained.objects_compactable, 0);
+        assert_eq!(still_retained.tombstones_waiting_for_retention, 1);
+        assert!(matches!(
+            manager.read(context, dead),
+            Err(OmsError::InvalidLifecycle {
+                state: LifecycleState::Tombstoned,
+                ..
+            })
+        ));
+
+        let report = manager.compact_expired_tombstones_at(expired_time).unwrap();
+        assert_eq!(report.objects_compacted, 1);
+        assert!(report.payload_bytes_reclaimed >= 64 * 1024);
+        assert_eq!(manager.inspect(context, dead).unwrap(), tombstone_header);
+        let active_after = manager.read(context, active).unwrap();
+        assert_eq!(active_after.state(), active_before.state());
+        assert_eq!(active_after.header(), active_before.header());
+        manager.health_check().unwrap();
+    }
+
+    let recovered = InMemoryObjectManager::open_persistent(&path).unwrap();
+    assert_eq!(recovered.inspect(context, dead).unwrap(), tombstone_header);
+    assert!(matches!(
+        recovered.read(context, dead),
+        Err(OmsError::InvalidLifecycle {
+            state: LifecycleState::Tombstoned,
+            ..
+        })
+    ));
+    assert_eq!(
+        recovered.read(context, active).unwrap().state(),
+        b"must remain unchanged"
+    );
+    recovered.health_check().unwrap();
+
+    let mut duplicate = recovered.begin(context);
+    duplicate.create(CreateObject::new(TypeId::new(), b"reuse").with_id(dead));
+    assert!(matches!(
+        recovered.commit(duplicate),
+        Err(OmsError::InvalidOperation("ObjectId already exists"))
+    ));
+    let fresh = create(&recovered, context, b"fresh", None);
+    assert_ne!(fresh, dead);
+    drop(recovered);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn persistent_tombstone_retention_survives_restart() {
+    let directory = std::env::temp_dir().join(format!("ousject-retention-{}", ObjectId::new()));
+    let path = directory.join("objects.oms");
+    let context = AccessContext::new(SubjectId::new());
+    let object;
+    let tombstone;
+    {
+        let manager = InMemoryObjectManager::open_persistent(&path).unwrap();
+        object = create(&manager, context, b"keep this for seven days", None);
+        let version = manager.inspect(context, object).unwrap().version;
+        let mut retire = manager.begin(context);
+        retire.expect(object, version).tombstone(object);
+        manager.commit(retire).unwrap();
+        tombstone = manager.inspect(context, object).unwrap();
+        let report = manager.analyze_gc().unwrap();
+        assert_eq!(report.tombstones_waiting_for_retention, 1);
+        assert_eq!(report.objects_compactable, 0);
+    }
+
+    let recovered = InMemoryObjectManager::open_persistent(&path).unwrap();
+    assert_eq!(recovered.inspect(context, object).unwrap(), tombstone);
+    let report = recovered.analyze_gc().unwrap();
+    assert_eq!(report.tombstones_waiting_for_retention, 1);
+    assert_eq!(report.objects_compactable, 0);
+    assert_eq!(recovered.compact().unwrap().objects_compacted, 0);
+    recovered.health_check().unwrap();
+    drop(recovered);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn unresolved_effect_cannot_be_tombstoned_or_compacted() {
+    let (manager, context) = setup();
+    let effect = CreateObject::new(
+        CORE_EFFECT_TYPE,
+        Value::Record(std::collections::BTreeMap::from([(
+            "status".to_owned(),
+            Value::Text("outcome_unknown".to_owned()),
+        )]))
+        .encode()
+        .unwrap(),
+    );
+    let effect_id = effect.id;
+    let mut create_effect = manager.begin(context);
+    create_effect.create(effect);
+    manager.commit(create_effect).unwrap();
+
+    let version = manager.inspect(context, effect_id).unwrap().version;
+    let mut retire = manager.begin(context);
+    retire.expect(effect_id, version).tombstone(effect_id);
+    assert_eq!(
+        manager.commit(retire),
+        Err(OmsError::InvalidOperation(
+            "an unresolved Effect cannot be tombstoned"
+        ))
+    );
+    assert!(manager.read(context, effect_id).is_ok());
+    assert_eq!(manager.compact().unwrap().objects_compacted, 0);
+}
+
+#[test]
 fn persistent_store_recovers_committed_state() {
     let directory = std::env::temp_dir().join(format!("ousject-test-{}", ObjectId::new()));
     let path = directory.join("objects.oms");
@@ -362,9 +517,13 @@ fn checkpoint_batches_commits_without_weakening_wal_recovery() {
                 .update_state(object, [value]);
             manager.commit(transaction).unwrap();
         }
-        assert!(path.exists());
+        let manifest = path.with_extension("manifest");
+        let checkpoint = path.with_extension("oms.g1");
+        let wal = path.with_extension("wal.g1");
+        assert!(manifest.exists());
+        assert!(checkpoint.exists());
         assert_eq!(
-            std::fs::metadata(path.with_extension("wal")).unwrap().len(),
+            std::fs::metadata(&wal).map_or(0, |metadata| metadata.len()),
             0
         );
 
@@ -375,14 +534,79 @@ fn checkpoint_batches_commits_without_weakening_wal_recovery() {
             .update_state(object, [64]);
         manager.commit(transaction).unwrap();
         assert!(
-            std::fs::metadata(path.with_extension("wal")).unwrap().len()
-                < std::fs::metadata(&path).unwrap().len()
+            std::fs::metadata(&wal).unwrap().len() < std::fs::metadata(&checkpoint).unwrap().len()
         );
     }
 
     let recovered = InMemoryObjectManager::open_persistent(&path).unwrap();
     assert_eq!(recovered.read(context, object).unwrap().state(), [64]);
     drop(recovered);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn generation_switch_recovers_both_sides_of_the_manifest_commit_point() {
+    let directory = std::env::temp_dir().join(format!("ousject-gc-crash-{}", ObjectId::new()));
+    let path = directory.join("objects.oms");
+    let context = AccessContext::new(SubjectId::new());
+    let object;
+    {
+        let manager = InMemoryObjectManager::open_persistent(&path).unwrap();
+        object = create(&manager, context, b"durable old generation", None);
+    }
+
+    // Simulate a crash after preparing the next snapshot but before switching
+    // the manifest. The previous generation's WAL remains authoritative.
+    let abandoned_snapshot = path.with_extension("oms.g1");
+    let abandoned_wal = path.with_extension("wal.g1");
+    std::fs::write(&abandoned_snapshot, b"incomplete next generation").unwrap();
+    std::fs::write(&abandoned_wal, b"uncommitted WAL").unwrap();
+    {
+        let recovered = InMemoryObjectManager::open_persistent(&path).unwrap();
+        assert_eq!(
+            recovered.read(context, object).unwrap().state(),
+            b"durable old generation"
+        );
+        assert!(!abandoned_snapshot.exists());
+        assert!(!abandoned_wal.exists());
+        recovered.checkpoint().unwrap();
+    }
+
+    // Simulate a crash during post-switch cleanup: the manifest and new
+    // checkpoint are complete, but obsolete generation-zero files remain.
+    std::fs::write(&path, b"obsolete old checkpoint").unwrap();
+    std::fs::write(path.with_extension("wal"), b"obsolete old WAL").unwrap();
+    let recovered = InMemoryObjectManager::open_persistent(&path).unwrap();
+    assert_eq!(
+        recovered.read(context, object).unwrap().state(),
+        b"durable old generation"
+    );
+    assert!(!path.exists());
+    assert!(!path.with_extension("wal").exists());
+    recovered.health_check().unwrap();
+    drop(recovered);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn generation_manifest_corruption_is_not_treated_as_an_empty_store() {
+    let directory = std::env::temp_dir().join(format!("ousject-manifest-{}", ObjectId::new()));
+    let path = directory.join("objects.oms");
+    {
+        let manager = InMemoryObjectManager::open_persistent(&path).unwrap();
+        create(
+            &manager,
+            AccessContext::new(SubjectId::new()),
+            b"state",
+            None,
+        );
+        manager.checkpoint().unwrap();
+    }
+    std::fs::write(path.with_extension("manifest"), b"corrupt manifest").unwrap();
+    assert!(matches!(
+        InMemoryObjectManager::open_persistent(&path),
+        Err(OmsError::Corruption(_))
+    ));
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -409,7 +633,7 @@ fn compressed_incremental_wal_rejects_bit_corruption() {
             .update_state(object, vec![255_u8; 4096]);
         manager.commit(transaction).unwrap();
     }
-    let wal = path.with_extension("wal");
+    let wal = path.with_extension("wal.g1");
     let mut bytes = std::fs::read(&wal).unwrap();
     assert!(bytes.len() > 24);
     bytes[16] ^= 0x40;

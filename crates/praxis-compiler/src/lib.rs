@@ -1154,9 +1154,11 @@ impl Parser {
             Lexeme::Identifier(name) => {
                 if matches!(self.current().lexeme, Lexeme::LeftParen) {
                     self.call_expression(&name)?;
-                } else if let Some((receiver, field)) = split_field(&name) {
+                } else if let Some((receiver, fields)) = split_fields(&name) {
                     self.tokens.push(Token::LoadIdentity(receiver.to_owned()));
-                    self.tokens.push(Token::GetField(field.to_owned()));
+                    for field in fields {
+                        self.tokens.push(Token::GetField(field.to_owned()));
+                    }
                 } else {
                     self.tokens.push(Token::Load(name));
                 }
@@ -1200,28 +1202,11 @@ impl Parser {
         if !matches!(self.current().lexeme, Lexeme::RightParen) {
             loop {
                 let registry_method = registry.map(|entry| entry.0);
+                let capability_method = object_capability.map(|entry| entry.1);
                 let identity_argument = if registry_method == Some("create") {
                     arguments == 2
-                } else if matches!(
-                    registry_method,
-                    Some(
-                        "id" | "type"
-                            | "parent"
-                            | "status"
-                            | "inspect"
-                            | "capabilities"
-                            | "value"
-                            | "children"
-                            | "links"
-                            | "replace"
-                            | "unlink"
-                            | "link"
-                            | "grant"
-                            | "revoke"
-                            | "retire"
-                    )
-                ) {
-                    arguments == 0 || registry_method == Some("link") && arguments == 2
+                } else if capability_method == Some("link") {
+                    arguments == 1
                 } else {
                     false
                 };
@@ -1437,26 +1422,22 @@ fn split_field(name: &str) -> Option<(&str, &str)> {
     }
 }
 
+fn split_fields(name: &str) -> Option<(&str, Vec<&str>)> {
+    let mut parts = name.split('.');
+    let receiver = parts.next()?;
+    let fields: Vec<_> = parts.collect();
+    if receiver.is_empty() || fields.is_empty() || fields.iter().any(|field| field.is_empty()) {
+        None
+    } else {
+        Some((receiver, fields))
+    }
+}
+
 fn registry_call(name: &str) -> Option<(&'static str, u32, u32)> {
     match name {
         "object.create" => Some(("create", 2, 3)),
         "object.find" => Some(("find", 1, 1)),
         "object.query" => Some(("query", 1, 2)),
-        "object.id" => Some(("id", 1, 1)),
-        "object.type" => Some(("type", 1, 1)),
-        "object.parent" => Some(("parent", 1, 1)),
-        "object.status" => Some(("status", 1, 1)),
-        "object.inspect" => Some(("inspect", 1, 1)),
-        "object.capabilities" => Some(("capabilities", 1, 1)),
-        "object.value" => Some(("value", 1, 1)),
-        "object.children" => Some(("children", 1, 1)),
-        "object.links" => Some(("links", 1, 1)),
-        "object.replace" => Some(("replace", 2, 2)),
-        "object.unlink" => Some(("unlink", 2, 2)),
-        "object.link" => Some(("link", 3, 3)),
-        "object.grant" => Some(("grant", 3, 3)),
-        "object.revoke" => Some(("revoke", 3, 3)),
-        "object.retire" => Some(("retire", 1, 1)),
         _ => None,
     }
 }
@@ -1497,17 +1478,16 @@ mod tests {
 
     #[test]
     fn compiles_explicit_object_registry_calls() {
-        let program = compile(
-            "item = object.create(\"core.text\", \"one\")\nobject.replace(item, \"two\")\n",
-        )
-        .unwrap();
+        let program =
+            compile("item = object.create(\"core.text\", \"one\")\nitem.replace(\"two\")\n")
+                .unwrap();
         assert!(program.tokens.contains(&Token::BindCreated {
             name: "item".to_owned(),
             arguments: 2,
         }));
-        assert!(program.tokens.contains(&Token::RegistryCall {
+        assert!(program.tokens.contains(&Token::ObjectCall {
             method: "replace".to_owned(),
-            arguments: 2,
+            arguments: 1,
         }));
         assert!(compile("objects.create(\"core.text\", \"one\")").is_err());
         assert!(compile("io.println(\"old\")").is_err());

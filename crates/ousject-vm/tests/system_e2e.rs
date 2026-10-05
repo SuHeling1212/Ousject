@@ -200,11 +200,11 @@ console = object.find("console")
 system = object.find("system")
 store = object.find("store")
 types = object.find("types")
-scheduler = object.find("scheduler")
+processes = object.query("core.process")
 console.println(system.status())
 console.println(store.health_check())
 console.println(types.types())
-console.println(scheduler.processes())
+console.println(processes)
 "#,
     )
     .unwrap();
@@ -230,7 +230,7 @@ source = "value = 40 + 2"
 console.println(compiler.validate(source))
 program_id = compiler.compile(source)
 program = object.find(program_id)
-console.println(object.type(program))
+console.println(program.type)
 child_id = program.execute()
 child = object.find(child_id)
 console.println(child.wait())
@@ -241,6 +241,48 @@ console.println(child.wait())
     let report = vm.run(process, 2_000).unwrap();
     assert_eq!(report.status, ProcessStatus::Halted);
     assert_eq!(report.output, ["true", "core.program", "halted"]);
+}
+
+#[test]
+fn process_wait_keeps_driving_a_child_suspended_for_console_input() {
+    let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+    let console =
+        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let driver = Arc::new(InputConsole {
+        lines: Mutex::new(VecDeque::new()),
+        reads: AtomicUsize::new(0),
+    });
+    let vm = VirtualMachine::with_console(manager, console, driver.clone()).unwrap();
+    let delayed_input = Arc::clone(&driver);
+    let input_thread = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        delayed_input
+            .lines
+            .lock()
+            .unwrap()
+            .push_back("ready".to_owned());
+    });
+    let program = compile(
+        r#"
+console = object.find("console")
+compiler = object.find("compiler")
+source = "console = object.find(\"console\")\nconsole.read_line()"
+program_id = compiler.compile(source)
+child_program = object.find(program_id)
+child_id = child_program.execute()
+child = object.find(child_id)
+console.println(child.wait())
+"#,
+    )
+    .unwrap();
+    let process = vm.create_process(&program).unwrap();
+
+    let report = vm.run(process, 2_000).unwrap();
+    input_thread.join().unwrap();
+
+    assert_eq!(report.status, ProcessStatus::Halted);
+    assert_eq!(report.output, ["halted"]);
+    assert!(driver.reads.load(Ordering::SeqCst) >= 2);
 }
 
 #[test]
@@ -270,6 +312,204 @@ authentication.logout(session["token"])
         vm.process_state(process).unwrap().subject.to_string(),
         report.output[0]
     );
+}
+
+#[test]
+fn shell_context_keeps_variables_and_current_user_between_command_processes() {
+    let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+    let vm = vm_with_console(manager);
+    let source = r#"
+console = object.find("console")
+authentication = object.find("authentication")
+users = object.find("users")
+authentication.initialize_local("local-password")
+users.create_user("alice", "alice-password")
+authentication.login("alice", "alice-password")
+identity = authentication.current_user()
+console.println(identity["name"])
+context = {}
+compiler = object.find("compiler")
+first_id = compiler.compile("a = 123456789")
+first_program = object.find(first_id)
+first_process_id = first_program.execute(context)
+first_process = object.find(first_process_id)
+first_process.wait()
+context = first_process.bindings()
+second_id = compiler.compile("b = a + 1")
+second_program = object.find(second_id)
+second_process_id = second_program.execute(context)
+second_process = object.find(second_process_id)
+second_process.wait()
+second_context = second_process.bindings()
+b_object = object.find(second_context["b"])
+console.println(b_object.value)
+"#;
+    let process = vm.create_process(&compile(source).unwrap()).unwrap();
+    let report = vm.run(process, 10_000).unwrap();
+
+    assert_eq!(report.status, ProcessStatus::Halted);
+    assert_eq!(report.output, ["alice", "123456790"]);
+    let subject = vm.process_state(process).unwrap().subject;
+    assert_ne!(subject, SYSTEM_SUBJECT);
+}
+
+#[test]
+fn system_shell_collects_bracket_and_backslash_continuations() {
+    let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+    let console =
+        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let driver = Arc::new(InputConsole {
+        lines: Mutex::new(VecDeque::from([
+            "a = {".to_owned(),
+            "x: 3".to_owned(),
+            "}".to_owned(),
+            "b = 4 + \\".to_owned(),
+            "5".to_owned(),
+            "objects".to_owned(),
+            "exit".to_owned(),
+        ])),
+        reads: AtomicUsize::new(0),
+    });
+    let vm = VirtualMachine::with_console(manager.clone(), console, driver.clone()).unwrap();
+    let setup = vm
+        .create_process(
+            &compile(
+                "authentication = object.find(\"authentication\")\nauthentication.initialize_local(\"local-password\")",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(vm.run(setup, 1_000).unwrap().status, ProcessStatus::Halted);
+
+    let shell = vm
+        .create_process(&compile(include_str!("../../../system/shell.px")).unwrap())
+        .unwrap();
+    let report = vm.run(shell, 100_000).unwrap();
+
+    assert_eq!(report.status, ProcessStatus::Halted);
+    assert_eq!(driver.reads.load(Ordering::SeqCst), 7);
+    assert!(
+        report
+            .output
+            .iter()
+            .all(|line| !line.starts_with("provider_error")),
+        "Shell reported an error: {:?}",
+        report.output
+    );
+    let context = vm.variable(shell, "context").unwrap();
+    let (Value::Map(context) | Value::Record(context)) = context else {
+        panic!("Shell context should be a map of variable names to Object IDs");
+    };
+    assert!(
+        context.contains_key("a"),
+        "Shell context {context:?}; output {:?}",
+        report.output
+    );
+    assert!(
+        context.contains_key("b"),
+        "Shell context {context:?}; output {:?}",
+        report.output
+    );
+    let Value::Text(a_id) = &context["a"] else {
+        panic!("variable a should be bound to an Object ID");
+    };
+    let Value::Text(b_id) = &context["b"] else {
+        panic!("variable b should be bound to an Object ID");
+    };
+    let access = AccessContext::new(SYSTEM_SUBJECT);
+    let a = manager.value(access, a_id.parse().unwrap()).unwrap();
+    let b = manager.value(access, b_id.parse().unwrap()).unwrap();
+    assert_eq!(
+        a,
+        Value::Map(BTreeMap::from([("x".to_owned(), Value::Integer(3))]))
+    );
+    assert_eq!(b, Value::Integer(9));
+}
+
+#[test]
+fn praxis_uses_math_object_capabilities_and_constants() {
+    let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+    let vm = vm_with_console(manager);
+    let source = r#"
+math = object.find("math")
+pi = math.pi
+e = math.e
+absolute = math.abs(-7)
+minimum = math.min(2, 5)
+maximum = math.max(4, 4.5)
+clamped = math.clamp(9, 0, 5)
+root = math.sqrt(81)
+power = math.pow(2, 3)
+floor_value = math.floor(3.9)
+ceil_value = math.ceil(3.1)
+rounded = math.round(-2.5)
+truncated = math.trunc(-2.9)
+sine = math.sin(0)
+cosine = math.cos(0)
+tangent = math.tan(0)
+angle = math.atan2(1, 0)
+natural_log = math.log(e)
+binary_log = math.log2(8)
+decimal_log = math.log10(100)
+exponential = math.exp(0)
+distance = math.hypot(3, 4)
+"#;
+    let process = vm.create_process(&compile(source).unwrap()).unwrap();
+    assert_eq!(
+        vm.run(process, 5_000).unwrap().status,
+        ProcessStatus::Halted
+    );
+
+    for (name, expected) in [
+        ("pi", std::f64::consts::PI),
+        ("e", std::f64::consts::E),
+        ("maximum", 4.5),
+        ("root", 9.0),
+        ("power", 8.0),
+        ("floor_value", 3.0),
+        ("ceil_value", 4.0),
+        ("rounded", -3.0),
+        ("truncated", -2.0),
+        ("sine", 0.0),
+        ("cosine", 1.0),
+        ("tangent", 0.0),
+        ("angle", std::f64::consts::FRAC_PI_2),
+        ("natural_log", 1.0),
+        ("binary_log", 3.0),
+        ("decimal_log", 2.0),
+        ("exponential", 1.0),
+        ("distance", 5.0),
+    ] {
+        assert_eq!(
+            vm.variable(process, name),
+            Ok(Value::Float(oms_types::FloatValue::new(expected))),
+            "unexpected math result for {name}"
+        );
+    }
+    assert_eq!(vm.variable(process, "absolute"), Ok(Value::Integer(7)));
+    assert_eq!(vm.variable(process, "minimum"), Ok(Value::Integer(2)));
+    assert_eq!(vm.variable(process, "clamped"), Ok(Value::Integer(5)));
+}
+
+#[test]
+fn math_object_reports_domain_and_overflow_errors() {
+    let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+    let vm = vm_with_console(manager);
+    let negative_root = vm
+        .create_process(&compile("math = object.find(\"math\")\nmath.sqrt(-1)").unwrap())
+        .unwrap();
+    assert!(matches!(
+        vm.run(negative_root, 100),
+        Err(ousject_vm::VmError::TypeError(_))
+    ));
+
+    let overflow = vm
+        .create_process(&compile("math = object.find(\"math\")\nmath.exp(10000)").unwrap())
+        .unwrap();
+    assert!(matches!(
+        vm.run(overflow, 100),
+        Err(ousject_vm::VmError::TypeError(_))
+    ));
 }
 
 #[test]
@@ -348,7 +588,7 @@ try {
     console.println("replace denied")
 }
 try {
-    object.retire(local)
+    local.retire()
 } catch (error) {
     console.println("retire denied")
 }
@@ -501,10 +741,10 @@ same link counter
 console.println(counter.add(3))
 console.println(same.value)
 console.println(counter.reveal())
-console.println(object.type(counter))
-console.println(object.inspect(counter)["type"])
+console.println(counter.type)
+console.println(counter.inspect["type"])
 console.println(#object.query("Counter", "add"))
-console.println(#object.capabilities(counter))
+console.println(#counter.capabilities)
 "#;
     let directory = std::env::temp_dir().join(format!("ousject-class-{}", ObjectId::new()));
     let path = directory.join("objects.oms");
@@ -600,24 +840,25 @@ fn praxis_object_api_runs_and_recovers() {
     let source = r#"
 	console = object.find("console")
 	item = object.create("core.text", "one")
-	same = object.find(object.id(item))
-	console.println(object.type(item))
-	console.println(object.value(item))
-	object.replace(item, "two")
+	same = object.find(item.id)
+	console.println(item.type)
+	console.println(item.value)
+	item.replace("two")
 	root = object.create("core.namespace", {})
 	child = object.create("core.text", "nested", root)
-	parent = object.parent(child)
-	console.println(parent == object.id(root))
-	console.println(#object.children(root))
-	object.link(root, "item", item)
-	found = object.links(root)["item"]
-	console.println(object.value(object.find(found)))
+	parent = child.parent
+	console.println(parent == root.id)
+	console.println(#root.children)
+	root.link("item", item)
+	found = root.links["item"]
+	found_object = object.find(found)
+	console.println(found_object.value)
 	console.println(#object.query("core.text"))
-	console.println(object.inspect(item)["type"])
-	console.println(object.status(item))
-	console.println(#object.capabilities(item))
-	object.unlink(root, "item")
-	console.println(#object.links(root))
+	console.println(item.inspect["type"])
+	console.println(item.status)
+	console.println(#item.capabilities)
+	root.unlink("item")
+	console.println(#root.links)
 "#;
     let directory = std::env::temp_dir().join(format!("ousject-object-api-{}", ObjectId::new()));
     let path = directory.join("objects.oms");
@@ -640,7 +881,7 @@ fn praxis_object_api_runs_and_recovers() {
                 "2",
                 "core.text",
                 "Active",
-                "9",
+                "17",
                 "0"
             ]
         );
@@ -673,7 +914,7 @@ fn assignment_copies_value_into_an_independent_object() {
     let process = vm
         .create_process(
             &compile(
-                "console = object.find(\"console\")\nitem = object.create(\"core.text\", \"one\")\ncopy = item\nconsole.println(copy == item)\nconsole.println(object.value(copy))",
+                "console = object.find(\"console\")\nitem = object.create(\"core.text\", \"one\")\ncopy = item\nconsole.println(copy == item)\nconsole.println(copy.value)",
             )
             .unwrap(),
         )
@@ -696,11 +937,11 @@ hex_text = "00000000000000000000000000000001"
 aaa = object.find("console")
 aaa.println(x + 1)
 aaa.println(note + 1)
-aaa.println(object.type(x))
-aaa.println(object.type(note))
-aaa.println(object.value(x))
-aaa.println(object.value(note))
-aaa.println(object.value(hex_text))
+aaa.println(x.type)
+aaa.println(note.type)
+aaa.println(x.value)
+aaa.println(note.value)
+aaa.println(hex_text.value)
 aaa.println("named console object")
 "#;
     let program = compile(source).unwrap();
@@ -978,12 +1219,11 @@ fn praxis_object_replacement_and_process_advance_are_atomic() {
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
     let vm = vm_with_console(manager);
     let program =
-        compile("item = object.create(\"core.text\", \"old\")\nobject.replace(item, \"new\")")
-            .unwrap();
+        compile("item = object.create(\"core.text\", \"old\")\nitem.replace(\"new\")").unwrap();
     let replace_position = program
         .tokens
         .iter()
-        .position(|token| matches!(token, tf_format::Token::RegistryCall { method, .. } if method == "replace"))
+        .position(|token| matches!(token, tf_format::Token::ObjectCall { method, .. } if method == "replace"))
         .unwrap();
     let process = vm.create_process(&program).unwrap();
     assert_eq!(
@@ -1019,13 +1259,13 @@ fn praxis_link_and_process_advance_are_atomic() {
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
     let vm = vm_with_console(manager);
     let program = compile(
-        "root = object.create(\"core.namespace\", {})\nitem = object.create(\"core.text\", \"x\")\nobject.link(root, \"item\", item)",
+        "root = object.create(\"core.namespace\", {})\nitem = object.create(\"core.text\", \"x\")\nroot.link(\"item\", item)",
     )
     .unwrap();
     let link_position = program
         .tokens
         .iter()
-        .position(|token| matches!(token, tf_format::Token::RegistryCall { method, .. } if method == "link"))
+        .position(|token| matches!(token, tf_format::Token::ObjectCall { method, .. } if method == "link"))
         .unwrap();
     let process = vm.create_process(&program).unwrap();
     vm.run(process, u64::try_from(link_position).unwrap())
@@ -1127,11 +1367,11 @@ program = object.find("program")
 channel = object.create("Channel", {})
 child = object.create("core.process", {
     entry: "worker",
-    links: { channel: object.id(channel) }
+    links: { channel: channel.id }
 })
-console.println(object.type(self))
-console.println(object.type(program))
-console.println(object.status(child))
+console.println(self.type)
+console.println(program.type)
+console.println(child.status)
 child.start()
 console.println(child.wait())
 console.println(channel.value)
@@ -1153,16 +1393,22 @@ console.println(channel.value)
 }
 
 #[test]
-fn collection_object_exposes_uniform_capabilities() {
+fn collection_uses_variable_value_capabilities() {
     let source = r#"
 console = object.find("console")
 items = object.create("core.collection", [1, 2])
-items.insert(1, 9)
-items.set(0, 7)
-console.println(items.get(1))
-console.println(items.length())
-console.println(items.remove(2))
-console.println(object.value(items))
+items[1] = 9
+console.println(items[1])
+items.replace([7, 9, 11])
+console.println(items[2])
+console.println(#items)
+console.println(items.value)
+
+mapping = object.create("core.collection", {"a": 1})
+mapping["b"] = 2
+console.println(mapping["a"])
+console.println(mapping["b"])
+console.println(#mapping)
 "#;
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
     let vm = vm_with_console(manager);
@@ -1171,7 +1417,15 @@ console.println(object.value(items))
     assert_eq!(report.status, ProcessStatus::Halted);
     assert_eq!(
         report.output,
-        vec!["9", "3", "2", "[Integer(7), Integer(9)]"]
+        vec![
+            "9",
+            "11",
+            "3",
+            "[Integer(7), Integer(9), Integer(11)]",
+            "1",
+            "2",
+            "2"
+        ]
     );
 }
 
@@ -1179,7 +1433,7 @@ console.println(object.value(items))
 fn praxis_object_api_can_grant_permissions() {
     let subject = oms_types::SubjectId::from_u128(0xabc);
     let source = format!(
-        "item = object.create(\"core.text\", \"shared\")\nobject.grant(item, \"{subject}\", \"view_value\")\n"
+        "item = object.create(\"core.text\", \"shared\")\nitem.grant(\"{subject}\", \"view_value\")\n"
     );
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
     let vm = vm_with_console(manager);
@@ -1199,8 +1453,8 @@ root = object.create("core.namespace", {})
 item = object.create("core.text", "old")
 child = object.create("core.text", "child", item)
 alias link item
-object.link(root, "item", item)
-object.retire(item)
+root.link("item", item)
+item.retire()
 item = "fresh"
 "#;
     let backend = Arc::new(FaultBackend::default());
@@ -1211,7 +1465,7 @@ item = "fresh"
         program
             .tokens
             .iter()
-            .position(|token| matches!(token, tf_format::Token::RegistryCall { method, .. } if method == "retire"))
+            .position(|token| matches!(token, tf_format::Token::ObjectCall { method, .. } if method == "retire"))
             .unwrap(),
     )
     .unwrap();
@@ -1294,6 +1548,7 @@ fn process_subject_is_persistent_and_enforced_for_object_access() {
         .expect(secret, manager.inspect(system, secret).unwrap().version)
         .grant(secret, subject, Capability::Inspect);
     manager.commit(grant_inspect).unwrap();
+    let process = vm.create_process_as(&program, subject).unwrap();
     assert!(matches!(
         vm.run(process, 100),
         Err(VmError::Oms(OmsError::Denied {
@@ -1307,6 +1562,7 @@ fn process_subject_is_persistent_and_enforced_for_object_access() {
         .expect(secret, manager.inspect(system, secret).unwrap().version)
         .grant(secret, subject, Capability::ViewValue);
     manager.commit(grant_value).unwrap();
+    let process = vm.create_process_as(&program, subject).unwrap();
     assert_eq!(vm.run(process, 100).unwrap().status, ProcessStatus::Halted);
     assert_eq!(
         vm.variable(process, "copy"),
@@ -1327,7 +1583,7 @@ func receiver() {
 
 root = object.create("core.namespace", {})
 item = object.create("core.text", "named")
-root.bind("item", object.id(item))
+root.bind("item", item.id)
 found = object.find(root.resolve("item"))
 root.unbind("item")
 
@@ -1335,7 +1591,7 @@ inbox = object.create("core.channel", [])
 out = object.create("core.channel", [])
 child = object.create("core.process", {
     entry: "receiver",
-    links: { inbox: object.id(inbox), out: object.id(out) }
+    links: { inbox: inbox.id, out: out.id }
 })
 child.start()
 first_status = child.wait()

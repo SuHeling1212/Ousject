@@ -7,25 +7,33 @@
 use oms_shard::FixedDirectory;
 use oms_types::{
     CORE_AUTHENTICATION_TYPE, CORE_BYTES_TYPE, CORE_CHANNEL_TYPE, CORE_COLLECTION_TYPE,
-    CORE_COMPILER_TYPE, CORE_CONSOLE_TYPE, CORE_EFFECT_TYPE, CORE_INSTANCE_TYPE,
+    CORE_COMPILER_TYPE, CORE_CONSOLE_TYPE, CORE_EFFECT_TYPE, CORE_INSTANCE_TYPE, CORE_MATH_TYPE,
     CORE_NAMESPACE_TYPE, CORE_OBJECT_STORE_TYPE, CORE_PROCESS_TYPE, CORE_PROGRAM_TYPE,
     CORE_PROVIDER_REGISTRY_TYPE, CORE_SCHEDULER_TYPE, CORE_SESSION_TYPE, CORE_SYSTEM_TYPE,
-    CORE_TEXT_TYPE, CORE_TYPE_REGISTRY_TYPE, CORE_USER_REGISTRY_TYPE, CORE_VALUE_TYPE, Capability,
-    DEVICE_BLOCK_STORAGE_TYPE, DEVICE_DISPLAY_TYPE, DEVICE_KEYBOARD_TYPE, DEVICE_SENSOR_TYPE,
-    LifecycleState, NET_ENDPOINT_TYPE, ObjectHeader, ObjectId, ObjectVersion, OmsError,
-    SYSTEM_SUBJECT, ShardId, SubjectId, TYPE_DESCRIPTOR_TYPE, TransactionId, TypeId, Value,
+    CORE_TEXT_TYPE, CORE_TIME_TYPE, CORE_TYPE_REGISTRY_TYPE, CORE_USER_REGISTRY_TYPE,
+    CORE_VALUE_TYPE, Capability, DEVICE_BLOCK_STORAGE_TYPE, DEVICE_DISPLAY_TYPE,
+    DEVICE_KEYBOARD_TYPE, DEVICE_SENSOR_TYPE, LifecycleState, NET_ENDPOINT_TYPE, NET_RESOLVER_TYPE,
+    ObjectHeader, ObjectId, ObjectVersion, OmsError, SYSTEM_SUBJECT, ShardId, SubjectId,
+    TYPE_DESCRIPTOR_TYPE, TransactionId, TypeId, Value,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SNAPSHOT_MAGIC: &[u8; 4] = b"OMS0";
 const WAL_MAGIC: &[u8; 4] = b"OMW0";
+const MANIFEST_MAGIC: &[u8; 4] = b"OMG0";
+const RETIREMENT_TIME_EXTENSION: &[u8; 4] = b"RTM0";
 const MAX_SNAPSHOT_ITEMS: usize = 16 * 1024 * 1024;
 const CHECKPOINT_COMMIT_INTERVAL: u64 = 64;
+const TOMBSTONE_RETENTION_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
+const TOMBSTONE_REAPER_RETRY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccessContext {
@@ -117,14 +125,32 @@ impl TypeRegistry {
                 "core.value",
                 ValueSchema::Any,
                 CreationPolicy::Public,
-                &[],
+                &[
+                    "slice",
+                    "find",
+                    "contains",
+                    "split",
+                    "replace_all",
+                    "trim",
+                    "lower",
+                    "upper",
+                ],
             ),
             type_descriptor(
                 CORE_TEXT_TYPE,
                 "core.text",
                 ValueSchema::Text,
                 CreationPolicy::Public,
-                &[],
+                &[
+                    "slice",
+                    "find",
+                    "contains",
+                    "split",
+                    "replace_all",
+                    "trim",
+                    "lower",
+                    "upper",
+                ],
             ),
             type_descriptor(
                 CORE_BYTES_TYPE,
@@ -138,14 +164,14 @@ impl TypeRegistry {
                 "core.collection",
                 ValueSchema::Collection,
                 CreationPolicy::Public,
-                &["get", "set", "insert", "remove", "length"],
+                &[],
             ),
             type_descriptor(
                 CORE_CHANNEL_TYPE,
                 "core.channel",
                 ValueSchema::Collection,
                 CreationPolicy::Public,
-                &["send", "receive", "wait", "length"],
+                &["send", "receive", "wait"],
             ),
             type_descriptor(
                 CORE_NAMESPACE_TYPE,
@@ -173,7 +199,14 @@ impl TypeRegistry {
                 "core.process",
                 ValueSchema::Record,
                 CreationPolicy::ProviderOnly,
-                &["start", "wait", "suspend", "resume", "terminate"],
+                &[
+                    "start",
+                    "wait",
+                    "suspend",
+                    "resume",
+                    "terminate",
+                    "bindings",
+                ],
             ),
             type_descriptor(
                 oms_types::CORE_USER_TYPE,
@@ -201,7 +234,14 @@ impl TypeRegistry {
                 "core.console",
                 ValueSchema::Record,
                 CreationPolicy::ProviderOnly,
-                &["println", "read_line", "read_secret"],
+                &[
+                    "print",
+                    "println",
+                    "read_line",
+                    "read_secret",
+                    "size",
+                    "is_interactive",
+                ],
             ),
             type_descriptor(
                 CORE_SYSTEM_TYPE,
@@ -220,6 +260,7 @@ impl TypeRegistry {
                     "initialize_local",
                     "login",
                     "logout",
+                    "current_user",
                     "change_password",
                 ],
             ),
@@ -235,7 +276,7 @@ impl TypeRegistry {
                 "core.scheduler",
                 ValueSchema::Record,
                 CreationPolicy::ProviderOnly,
-                &["enqueue", "processes", "suspend", "resume", "terminate"],
+                &[],
             ),
             type_descriptor(
                 CORE_COMPILER_TYPE,
@@ -263,7 +304,50 @@ impl TypeRegistry {
                 "core.object_store",
                 ValueSchema::Record,
                 CreationPolicy::ProviderOnly,
-                &["stats", "health_check", "checkpoint", "effects"],
+                &["stats", "health_check", "effects"],
+            ),
+            type_descriptor(
+                CORE_MATH_TYPE,
+                "core.math",
+                ValueSchema::Record,
+                CreationPolicy::ProviderOnly,
+                &[
+                    "abs",
+                    "min",
+                    "max",
+                    "clamp",
+                    "sqrt",
+                    "pow",
+                    "floor",
+                    "ceil",
+                    "round",
+                    "trunc",
+                    "sin",
+                    "cos",
+                    "tan",
+                    "atan2",
+                    "log",
+                    "log2",
+                    "log10",
+                    "exp",
+                    "hypot",
+                    "random",
+                    "random_integer",
+                ],
+            ),
+            type_descriptor(
+                CORE_TIME_TYPE,
+                "core.time",
+                ValueSchema::Record,
+                CreationPolicy::ProviderOnly,
+                &["now", "monotonic", "sleep"],
+            ),
+            type_descriptor(
+                NET_RESOLVER_TYPE,
+                "net.resolver",
+                ValueSchema::Record,
+                CreationPolicy::ProviderOnly,
+                &["resolve"],
             ),
             type_descriptor(
                 NET_ENDPOINT_TYPE,
@@ -291,7 +375,7 @@ impl TypeRegistry {
                 "device.keyboard",
                 ValueSchema::Record,
                 CreationPolicy::ProviderOnly,
-                &["next_event"],
+                &["capture", "release", "next_event", "poll_event"],
             ),
             type_descriptor(
                 DEVICE_BLOCK_STORAGE_TYPE,
@@ -592,6 +676,7 @@ impl AccessPolicy {
 #[derive(Debug, Clone)]
 struct ObjectRecord {
     header: ObjectHeader,
+    retired_at_unix_ms: Option<u64>,
     state: Arc<[u8]>,
     children: BTreeSet<ObjectId>,
     links: BTreeMap<String, ObjectId>,
@@ -627,6 +712,7 @@ impl ObjectRecord {
             links: Arc::new(self.links.clone()),
             capabilities: Arc::new(self.capabilities.clone()),
             owner: self.policy.owner,
+            grants: Arc::new(self.policy.grants.clone()),
         }
     }
 }
@@ -639,6 +725,7 @@ pub struct ObjectView {
     links: Arc<BTreeMap<String, ObjectId>>,
     capabilities: Arc<BTreeSet<Capability>>,
     owner: SubjectId,
+    grants: Arc<BTreeMap<SubjectId, BTreeSet<Capability>>>,
 }
 
 impl ObjectView {
@@ -670,6 +757,11 @@ impl ObjectView {
     #[must_use]
     pub const fn owner(&self) -> SubjectId {
         self.owner
+    }
+
+    #[must_use]
+    pub fn grants(&self) -> &BTreeMap<SubjectId, BTreeSet<Capability>> {
+        &self.grants
     }
 }
 
@@ -826,6 +918,142 @@ pub struct OmsStats {
     pub tombstoned_count: usize,
 }
 
+/// Read-only estimate of reclaimable Tombstone payload and durable storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GcAnalysis {
+    pub objects_scanned: u64,
+    pub active_objects: u64,
+    pub tombstones: u64,
+    pub tombstones_waiting_for_retention: u64,
+    pub objects_compactable: u64,
+    pub live_payload_bytes: u64,
+    pub dead_payload_bytes: u64,
+    pub payload_bytes_reclaimable: u64,
+    pub store_bytes_before: u64,
+    pub wal_bytes_before: u64,
+    pub estimated_store_bytes_after: u64,
+}
+
+/// Result of one exclusive, type-agnostic Tombstone compaction pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GcReport {
+    pub objects_scanned: u64,
+    pub active_objects: u64,
+    pub tombstones: u64,
+    pub tombstones_waiting_for_retention: u64,
+    pub objects_compacted: u64,
+    pub live_payload_bytes: u64,
+    pub dead_payload_bytes: u64,
+    pub payload_bytes_reclaimed: u64,
+    pub store_bytes_before: u64,
+    pub store_bytes_after: u64,
+    pub wal_bytes_before: u64,
+    pub wal_bytes_after: u64,
+    pub bytes_reclaimed: u64,
+    pub gc_duration_millis: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StorageUsage {
+    pub store_bytes: u64,
+    pub wal_bytes: u64,
+}
+
+/// Internal kernel maintenance service that reclaims payloads from Objects
+/// retired for at least seven days. It performs a sweep immediately, then
+/// waits for the next expiry while the system runtime is active.
+#[derive(Debug)]
+pub struct TombstoneReaper {
+    shutdown: Sender<()>,
+    worker: Option<JoinHandle<()>>,
+    manager: std::sync::Weak<InMemoryObjectManager>,
+}
+
+impl TombstoneReaper {
+    /// Starts the background retirement cleanup service.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the kernel cannot start the worker thread.
+    pub fn start(manager: &Arc<InMemoryObjectManager>) -> Result<Self, OmsError> {
+        let (shutdown, receiver) = mpsc::channel();
+        {
+            let mut active = manager
+                .reaper_wakeup
+                .lock()
+                .map_err(|_| OmsError::TemporarilyUnavailable)?;
+            if active.is_some() {
+                return Err(OmsError::InvalidOperation(
+                    "a Tombstone reaper is already running",
+                ));
+            }
+            *active = Some(shutdown.clone());
+        }
+        let manager_weak = Arc::downgrade(manager);
+        let worker_manager = Arc::clone(manager);
+        let worker = match thread::Builder::new()
+            .name("ousject-tombstone-reaper".to_owned())
+            .spawn(move || tombstone_reaper_loop(worker_manager, receiver))
+        {
+            Ok(worker) => worker,
+            Err(error) => {
+                if let Some(manager) = manager_weak.upgrade() {
+                    if let Ok(mut active) = manager.reaper_wakeup.lock() {
+                        active.take();
+                    }
+                }
+                return Err(storage_error(error));
+            }
+        };
+        Ok(Self {
+            shutdown,
+            worker: Some(worker),
+            manager: manager_weak,
+        })
+    }
+}
+
+impl Drop for TombstoneReaper {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        if let Some(manager) = self.manager.upgrade() {
+            if let Ok(mut active) = manager.reaper_wakeup.lock() {
+                active.take();
+            }
+        }
+    }
+}
+
+// These values are deliberately moved into the worker so its lifetime owns
+// both the manager lease and the shutdown receiver.
+#[allow(clippy::needless_pass_by_value)]
+fn tombstone_reaper_loop(manager: Arc<InMemoryObjectManager>, shutdown: Receiver<()>) {
+    loop {
+        if let Err(error) = manager.reap_expired_tombstones() {
+            eprintln!("Ousject tombstone cleanup failed: {error}");
+        }
+        match manager.tombstone_reaper_wait() {
+            None => match shutdown.recv() {
+                Ok(()) | Err(_) => return,
+            },
+            Some(wait) => {
+                let wait = if wait.is_zero() {
+                    TOMBSTONE_REAPER_RETRY
+                } else {
+                    wait
+                };
+                match shutdown.recv_timeout(wait) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Timeout) => {}
+                }
+            }
+        }
+    }
+}
+
 pub trait ObjectManager: Send + Sync {
     /// Reads an object using the caller's access context.
     ///
@@ -881,6 +1109,27 @@ pub trait SnapshotBackend: Send + Sync + std::fmt::Debug {
     fn checkpoint(&self, snapshot: &[u8]) -> Result<(), OmsError> {
         self.store(snapshot)
     }
+
+    /// Returns physical checkpoint and WAL sizes when the backend exposes them.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the backend cannot inspect its durable files.
+    fn storage_usage(&self) -> Result<StorageUsage, OmsError> {
+        Ok(StorageUsage::default())
+    }
+
+    /// Durably switches to a compacted complete image.
+    ///
+    /// Backends without a specialized generation protocol may use their
+    /// ordinary checkpoint operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the compacted image cannot be made durable.
+    fn compact(&self, snapshot: &[u8]) -> Result<(), OmsError> {
+        self.checkpoint(snapshot)
+    }
 }
 
 #[derive(Debug)]
@@ -903,6 +1152,8 @@ pub struct FileSnapshotBackend {
     lease: Arc<Mutex<Option<StoreLease>>>,
     commits_since_checkpoint: Arc<AtomicU64>,
     latest: Arc<Mutex<Option<Vec<u8>>>>,
+    generation: Arc<AtomicU64>,
+    requires_reopen: Arc<AtomicBool>,
 }
 
 impl FileSnapshotBackend {
@@ -913,6 +1164,8 @@ impl FileSnapshotBackend {
             lease: Arc::new(Mutex::new(None)),
             commits_since_checkpoint: Arc::new(AtomicU64::new(0)),
             latest: Arc::new(Mutex::new(None)),
+            generation: Arc::new(AtomicU64::new(0)),
+            requires_reopen: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -921,8 +1174,69 @@ impl FileSnapshotBackend {
         &self.path
     }
 
+    fn manifest_path(&self) -> PathBuf {
+        self.path.with_extension("manifest")
+    }
+
+    fn snapshot_path(&self, generation: u64) -> PathBuf {
+        generation_path(&self.path, generation, "oms")
+    }
+
+    fn wal_path_for(&self, generation: u64) -> PathBuf {
+        generation_path(&self.path, generation, "wal")
+    }
+
+    fn active_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     fn wal_path(&self) -> PathBuf {
-        self.path.with_extension("wal")
+        self.wal_path_for(self.active_generation())
+    }
+
+    fn switch_generation(
+        &self,
+        snapshot: &[u8],
+        latest: &mut Option<Vec<u8>>,
+    ) -> Result<(), OmsError> {
+        let old_generation = self.active_generation();
+        let new_generation = old_generation
+            .checked_add(1)
+            .ok_or_else(|| OmsError::Storage("Object Store generation overflow".to_owned()))?;
+        let new_snapshot = self.snapshot_path(new_generation);
+        let new_wal = self.wal_path_for(new_generation);
+
+        // A generation newer than the manifest can only be an interrupted,
+        // uncommitted attempt. Replace it before preparing the next switch.
+        remove_file_if_exists(&new_wal)?;
+        persist_file_snapshot(&new_snapshot, snapshot)?;
+
+        let manifest = encode_generation_manifest(new_generation);
+        let manifest_directory_synced =
+            persist_generation_manifest(&self.manifest_path(), &manifest)?;
+
+        self.publish_generation(new_generation, snapshot, latest);
+        if !manifest_directory_synced {
+            // A rename is visible, but its directory entry could not be
+            // confirmed durable. Either manifest may survive a crash; retain
+            // both complete generations so either recovery path is valid.
+            self.requires_reopen.store(true, Ordering::Release);
+            return Ok(());
+        }
+        // The new manifest and snapshot are durable. Reclaim older generations
+        // only after that switch point; cleanup failures leave harmless orphans.
+        for generation in 0..new_generation {
+            let _ = remove_file_if_exists(&self.snapshot_path(generation));
+            let _ = remove_file_if_exists(&self.wal_path_for(generation));
+        }
+        let _ = sync_parent_directory(&self.path);
+        Ok(())
+    }
+
+    fn publish_generation(&self, generation: u64, snapshot: &[u8], latest: &mut Option<Vec<u8>>) {
+        self.generation.store(generation, Ordering::Release);
+        latest.replace(snapshot.to_vec());
+        self.commits_since_checkpoint.store(0, Ordering::Release);
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -994,20 +1308,47 @@ fn stale_process_lock(path: &Path) -> Result<bool, OmsError> {
 impl SnapshotBackend for FileSnapshotBackend {
     fn load(&self) -> Result<Option<Vec<u8>>, OmsError> {
         self.ensure_lease()?;
-        let snapshot = if self.path.exists() {
-            Some(fs::read(&self.path).map_err(storage_error)?)
+        let manifest_generation = read_generation_manifest(&self.manifest_path())?;
+        let generation = manifest_generation.unwrap_or(0);
+        let snapshot_path = self.snapshot_path(generation);
+        if manifest_generation.is_some() && !snapshot_path.exists() {
+            return Err(corruption(
+                "active Object Store generation is missing its checkpoint",
+            ));
+        }
+        let snapshot = if snapshot_path.exists() {
+            Some(fs::read(&snapshot_path).map_err(storage_error)?)
         } else {
             None
         };
-        let recovered = load_wal(&self.wal_path(), snapshot)?;
+        let recovered = load_wal(&self.wal_path_for(generation), snapshot)?;
+        self.generation.store(generation, Ordering::Release);
         self.latest
             .lock()
             .map_err(|_| OmsError::TemporarilyUnavailable)?
             .clone_from(&recovered);
+        let orphan_generation = generation.saturating_add(1);
+        for candidate in 0..=orphan_generation {
+            let _ = remove_file_if_exists(&temporary_path(&self.snapshot_path(candidate)));
+            let _ = remove_file_if_exists(&temporary_path(&self.wal_path_for(candidate)));
+        }
+        let _ = remove_file_if_exists(&temporary_path(&self.manifest_path()));
+        for obsolete in 0..generation {
+            let _ = remove_file_if_exists(&self.snapshot_path(obsolete));
+            let _ = remove_file_if_exists(&self.wal_path_for(obsolete));
+        }
+        let _ = remove_file_if_exists(&self.snapshot_path(orphan_generation));
+        let _ = remove_file_if_exists(&self.wal_path_for(orphan_generation));
+        let _ = sync_parent_directory(&self.path);
         Ok(recovered)
     }
 
     fn store(&self, snapshot: &[u8]) -> Result<(), OmsError> {
+        if self.requires_reopen.load(Ordering::Acquire) {
+            return Err(OmsError::Storage(
+                "generation switch durability is uncertain; reopen the Object Store".to_owned(),
+            ));
+        }
         self.ensure_lease()?;
         let mut latest = self
             .latest
@@ -1025,31 +1366,146 @@ impl SnapshotBackend for FileSnapshotBackend {
             return Ok(());
         }
 
-        // The synced WAL record is the durability point. Checkpoint failure is
-        // safe: recovery will use that record. A later successful checkpoint
-        // may discard the log because the complete state is already durable.
-        if persist_file_snapshot(&self.path, snapshot).is_ok() {
-            // Failure to discard an already-checkpointed log is harmless; the
-            // full-state WAL record is idempotent and will be replayed.
-            if checkpoint_wal(&self.wal_path()).is_ok() {
-                self.commits_since_checkpoint.store(0, Ordering::Relaxed);
-            }
+        // Checkpoint failure does not undo the already-synced transaction.
+        // Switch to a new generation instead of truncating the active WAL.
+        if pending >= CHECKPOINT_COMMIT_INTERVAL {
+            let _ = self.switch_generation(snapshot, &mut latest);
         }
         Ok(())
     }
 
     fn checkpoint(&self, snapshot: &[u8]) -> Result<(), OmsError> {
+        if self.requires_reopen.load(Ordering::Acquire) {
+            return Err(OmsError::Storage(
+                "generation switch durability is uncertain; reopen the Object Store".to_owned(),
+            ));
+        }
         self.ensure_lease()?;
         let mut latest = self
             .latest
             .lock()
             .map_err(|_| OmsError::TemporarilyUnavailable)?;
-        persist_file_snapshot(&self.path, snapshot)?;
-        checkpoint_wal(&self.wal_path())?;
-        self.commits_since_checkpoint.store(0, Ordering::Release);
-        latest.replace(snapshot.to_vec());
-        Ok(())
+        // A reset record is a complete independent generation. If power is
+        // lost after this flush, recovery can use it with either the old or
+        // the newly renamed checkpoint. Only after the new checkpoint and its
+        // directory entry are durable may the covered WAL be discarded.
+        self.switch_generation(snapshot, &mut latest)
     }
+
+    fn storage_usage(&self) -> Result<StorageUsage, OmsError> {
+        self.ensure_lease()?;
+        let generation = self.active_generation();
+        let mut usage = StorageUsage::default();
+        for candidate in 0..=generation.saturating_add(1) {
+            usage.store_bytes = usage
+                .store_bytes
+                .saturating_add(file_size(&self.snapshot_path(candidate))?);
+            usage.wal_bytes = usage
+                .wal_bytes
+                .saturating_add(file_size(&self.wal_path_for(candidate))?);
+            usage.store_bytes = usage
+                .store_bytes
+                .saturating_add(file_size(&temporary_path(&self.snapshot_path(candidate)))?);
+            usage.wal_bytes = usage
+                .wal_bytes
+                .saturating_add(file_size(&temporary_path(&self.wal_path_for(candidate)))?);
+        }
+        usage.store_bytes = usage
+            .store_bytes
+            .saturating_add(file_size(&self.manifest_path())?)
+            .saturating_add(file_size(&temporary_path(&self.manifest_path()))?);
+        Ok(usage)
+    }
+
+    fn compact(&self, snapshot: &[u8]) -> Result<(), OmsError> {
+        if self.requires_reopen.load(Ordering::Acquire) {
+            return Err(OmsError::Storage(
+                "generation switch durability is uncertain; reopen the Object Store".to_owned(),
+            ));
+        }
+        self.ensure_lease()?;
+        let mut latest = self
+            .latest
+            .lock()
+            .map_err(|_| OmsError::TemporarilyUnavailable)?;
+        self.switch_generation(snapshot, &mut latest)
+    }
+}
+
+fn file_size(path: &Path) -> Result<u64, OmsError> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(storage_error(error)),
+    }
+}
+
+fn generation_path(path: &Path, generation: u64, extension: &str) -> PathBuf {
+    if generation == 0 {
+        if extension == "oms" {
+            path.to_path_buf()
+        } else {
+            path.with_extension(extension)
+        }
+    } else {
+        path.with_extension(format!("{extension}.g{generation}"))
+    }
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let mut temporary_name = path.as_os_str().to_os_string();
+    temporary_name.push(".tmp");
+    PathBuf::from(temporary_name)
+}
+
+fn encode_generation_manifest(generation: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(20);
+    bytes.extend_from_slice(MANIFEST_MAGIC);
+    bytes.extend_from_slice(&generation.to_le_bytes());
+    let checksum = wal_checksum(&bytes);
+    bytes.extend_from_slice(&checksum.to_le_bytes());
+    bytes
+}
+
+fn read_generation_manifest(path: &Path) -> Result<Option<u64>, OmsError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage_error(error)),
+    };
+    if bytes.len() != 20 || &bytes[..4] != MANIFEST_MAGIC {
+        return Err(corruption("invalid Object Store generation manifest"));
+    }
+    let expected = u64::from_le_bytes(
+        bytes[12..20]
+            .try_into()
+            .map_err(|_| corruption("truncated Object Store manifest checksum"))?,
+    );
+    if wal_checksum(&bytes[..12]) != expected {
+        return Err(corruption(
+            "Object Store generation manifest checksum mismatch",
+        ));
+    }
+    Ok(Some(u64::from_le_bytes(bytes[4..12].try_into().map_err(
+        |_| corruption("truncated Object Store manifest generation"),
+    )?)))
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), OmsError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(storage_error(error)),
+    }
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), OmsError> {
+    if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(storage_error)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1078,6 +1534,8 @@ pub struct InMemoryObjectManager {
     shards: Vec<RwLock<ShardState>>,
     persistence: Option<Arc<dyn SnapshotBackend>>,
     types: TypeRegistry,
+    next_tombstone_reap_unix_ms: AtomicU64,
+    reaper_wakeup: Mutex<Option<Sender<()>>>,
 }
 
 impl InMemoryObjectManager {
@@ -1096,6 +1554,8 @@ impl InMemoryObjectManager {
             shards,
             persistence: None,
             types: TypeRegistry::builtins(),
+            next_tombstone_reap_unix_ms: AtomicU64::new(u64::MAX),
+            reaper_wakeup: Mutex::new(None),
         })
     }
 
@@ -1144,7 +1604,11 @@ impl InMemoryObjectManager {
         backend: Arc<dyn SnapshotBackend>,
         shard_count: u32,
     ) -> Result<Self, OmsError> {
-        let state = backend.load()?.map_or_else(
+        let recovered = backend.load()?;
+        let needs_retirement_time_upgrade = recovered.as_ref().is_some_and(|snapshot| {
+            snapshot.get(4..8) != Some(RETIREMENT_TIME_EXTENSION.as_slice())
+        });
+        let state = recovered.map_or_else(
             || Ok(ShardState::default()),
             |bytes| decode_snapshot(&bytes),
         )?;
@@ -1152,6 +1616,12 @@ impl InMemoryObjectManager {
         validate_type_index(&state)?;
         let types = TypeRegistry::builtins();
         validate_dynamic_types(&state, &types)?;
+        if needs_retirement_time_upgrade {
+            // Persist upgrade-time timestamps once, so later restarts do not
+            // restart the retention period for legacy Tombstones.
+            backend.compact(&encode_snapshot(&state)?)?;
+        }
+        let next_tombstone_reap_unix_ms = next_tombstone_reap_deadline(&state);
         let directory = FixedDirectory::new(shard_count)?;
         let shards = partition_shards(state, &directory)
             .into_iter()
@@ -1162,6 +1632,8 @@ impl InMemoryObjectManager {
             shards,
             persistence: Some(backend),
             types,
+            next_tombstone_reap_unix_ms: AtomicU64::new(next_tombstone_reap_unix_ms),
+            reaper_wakeup: Mutex::new(None),
         })
     }
 
@@ -1693,6 +2165,160 @@ impl InMemoryObjectManager {
         })
     }
 
+    /// Analyzes every Object without modifying memory, WAL or checkpoints.
+    /// Only Tombstones at least seven days old are reclaimable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shard state is unavailable, inconsistent or cannot
+    /// be encoded, or if backend size metadata cannot be read.
+    pub fn analyze_gc(&self) -> Result<GcAnalysis, OmsError> {
+        self.analyze_gc_at(SystemTime::now())
+    }
+
+    /// Estimates cleanup as of `now`; the supplied time is primarily useful to
+    /// the kernel scheduler and deterministic retention-policy tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if state, time conversion, or storage metadata is
+    /// unavailable.
+    pub fn analyze_gc_at(&self, now: SystemTime) -> Result<GcAnalysis, OmsError> {
+        let cutoff_unix_ms = retention_cutoff_unix_ms(system_time_to_unix_millis(now)?);
+        let shards = self
+            .shards
+            .iter()
+            .map(|shard| shard.read().map_err(|_| OmsError::TemporarilyUnavailable))
+            .collect::<Result<Vec<_>, _>>()?;
+        let current = combine_shards(shards.iter().map(|shard| &**shard))?;
+        let mut compacted = current.clone();
+        let counts = compact_tombstone_payloads(&mut compacted, cutoff_unix_ms);
+        validate_gc_candidate(&compacted, &self.types)?;
+        let usage = self
+            .persistence
+            .as_ref()
+            .map_or(Ok(StorageUsage::default()), |backend| {
+                backend.storage_usage()
+            })?;
+        Ok(GcAnalysis {
+            objects_scanned: counts.objects_scanned,
+            active_objects: counts.active_objects,
+            tombstones: counts.tombstones,
+            tombstones_waiting_for_retention: counts.tombstones_waiting_for_retention,
+            objects_compactable: counts.objects_compacted,
+            live_payload_bytes: counts.live_payload_bytes,
+            dead_payload_bytes: counts.dead_payload_bytes_before,
+            payload_bytes_reclaimable: counts
+                .dead_payload_bytes_before
+                .saturating_sub(counts.dead_payload_bytes_after),
+            store_bytes_before: usage.store_bytes,
+            wal_bytes_before: usage.wal_bytes,
+            estimated_store_bytes_after: u64::try_from(encode_snapshot(&compacted)?.len())
+                .map_err(|_| OmsError::Storage("compacted snapshot is too large".to_owned()))?,
+        })
+    }
+
+    /// Exclusively compacts every eligible Tombstone to its minimal form.
+    ///
+    /// This is a stop-the-world maintenance operation for this manager. All
+    /// shard write locks remain held until the compacted image is durable and
+    /// every shard publishes the same candidate. Active Objects are copied
+    /// byte-for-byte and `ObjectId`s are never removed or reused.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if locking, validation, encoding or durable generation
+    /// switching fails. Before the durable switch, the old state remains live.
+    pub fn compact(&self) -> Result<GcReport, OmsError> {
+        self.compact_expired_tombstones_at(SystemTime::now())
+    }
+
+    /// Compacts Tombstones that have reached the seven-day retention age as
+    /// of `now`. The kernel maintenance worker runs this automatically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if locking, validation, encoding or durable generation
+    /// switching fails. Before the durable switch, the old state remains live.
+    pub fn compact_expired_tombstones_at(&self, now: SystemTime) -> Result<GcReport, OmsError> {
+        let cutoff_unix_ms = retention_cutoff_unix_ms(system_time_to_unix_millis(now)?);
+        let started = Instant::now();
+        let mut locked = self
+            .shards
+            .iter()
+            .map(|shard| shard.write().map_err(|_| OmsError::TemporarilyUnavailable))
+            .collect::<Result<Vec<_>, _>>()?;
+        let current = combine_shards(locked.iter().map(|shard| &**shard))?;
+        let mut candidate = current.clone();
+        let counts = compact_tombstone_payloads(&mut candidate, cutoff_unix_ms);
+        let next_reap_deadline = next_tombstone_reap_deadline(&candidate);
+        validate_gc_candidate(&candidate, &self.types)?;
+        let usage_before = self
+            .persistence
+            .as_ref()
+            .map_or(Ok(StorageUsage::default()), |backend| {
+                backend.storage_usage()
+            })?;
+
+        if counts.objects_compacted != 0 {
+            let snapshot = encode_snapshot(&candidate)?;
+            if let Some(backend) = &self.persistence {
+                backend.compact(&snapshot)?;
+            }
+            let partitioned = partition_shards(candidate, &self.directory);
+            for (target, state) in locked.iter_mut().zip(partitioned) {
+                **target = state;
+            }
+        }
+
+        self.next_tombstone_reap_unix_ms
+            .store(next_reap_deadline, Ordering::Release);
+
+        let usage_after = self
+            .persistence
+            .as_ref()
+            .map_or(Ok(StorageUsage::default()), |backend| {
+                backend.storage_usage()
+            })?;
+        let before_total = usage_before
+            .store_bytes
+            .saturating_add(usage_before.wal_bytes);
+        let after_total = usage_after
+            .store_bytes
+            .saturating_add(usage_after.wal_bytes);
+        Ok(GcReport {
+            objects_scanned: counts.objects_scanned,
+            active_objects: counts.active_objects,
+            tombstones: counts.tombstones,
+            tombstones_waiting_for_retention: counts.tombstones_waiting_for_retention,
+            objects_compacted: counts.objects_compacted,
+            live_payload_bytes: counts.live_payload_bytes,
+            dead_payload_bytes: counts.dead_payload_bytes_before,
+            payload_bytes_reclaimed: counts
+                .dead_payload_bytes_before
+                .saturating_sub(counts.dead_payload_bytes_after),
+            store_bytes_before: usage_before.store_bytes,
+            store_bytes_after: usage_after.store_bytes,
+            wal_bytes_before: usage_before.wal_bytes,
+            wal_bytes_after: usage_after.wal_bytes,
+            bytes_reclaimed: before_total.saturating_sub(after_total),
+            gc_duration_millis: started.elapsed().as_millis(),
+        })
+    }
+
+    /// Performs one kernel cleanup sweep using the current wall-clock time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the system clock, store, or durable backend fails.
+    pub fn reap_expired_tombstones(&self) -> Result<GcReport, OmsError> {
+        let now_unix_ms = unix_time_millis()?;
+        if self.next_tombstone_reap_unix_ms.load(Ordering::Acquire) > now_unix_ms {
+            return Ok(GcReport::default());
+        }
+        self.compact_expired_tombstones_at(SystemTime::now())
+    }
+
     /// Validates all first-stage in-memory invariants.
     ///
     /// # Errors
@@ -1799,6 +2425,7 @@ impl InMemoryObjectManager {
         let mut candidate = combine_shards(locked.iter().map(LockedShard::state))?;
 
         let mut results = Vec::with_capacity(transactions.len());
+        let mut new_tombstone_deadlines = Vec::new();
         for transaction in transactions {
             validate_expected(&candidate, &transaction.expected)?;
             let mut changed = BTreeSet::new();
@@ -1825,6 +2452,9 @@ impl InMemoryObjectManager {
                     .objects
                     .get_mut(&object)
                     .ok_or(OmsError::NotFound(object))?;
+                if let Some(deadline) = tombstone_reap_deadline(record) {
+                    new_tombstone_deadlines.push(deadline);
+                }
                 if !created.contains(&object) {
                     record.header.version = record
                         .header
@@ -1850,6 +2480,13 @@ impl InMemoryObjectManager {
                 **target = state;
             }
         }
+        for deadline in &new_tombstone_deadlines {
+            self.next_tombstone_reap_unix_ms
+                .fetch_min(*deadline, Ordering::AcqRel);
+        }
+        if !new_tombstone_deadlines.is_empty() {
+            self.wake_tombstone_reaper();
+        }
         // All write guards remain held until every shard contains its new
         // state, so readers see either the old global state or the new one.
 
@@ -1859,6 +2496,151 @@ impl InMemoryObjectManager {
     fn shard(&self, object: ObjectId) -> &RwLock<ShardState> {
         &self.shards[self.directory.locate(object).get() as usize]
     }
+
+    fn tombstone_reaper_wait(&self) -> Option<Duration> {
+        let deadline = self.next_tombstone_reap_unix_ms.load(Ordering::Acquire);
+        if deadline == u64::MAX {
+            return None;
+        }
+        let Ok(now) = unix_time_millis() else {
+            return Some(TOMBSTONE_REAPER_RETRY);
+        };
+        Some(Duration::from_millis(deadline.saturating_sub(now)))
+    }
+
+    fn wake_tombstone_reaper(&self) {
+        if let Ok(active) = self.reaper_wakeup.lock() {
+            if let Some(wakeup) = active.as_ref() {
+                let _ = wakeup.send(());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct GcCounts {
+    objects_scanned: u64,
+    active_objects: u64,
+    tombstones: u64,
+    tombstones_waiting_for_retention: u64,
+    objects_compacted: u64,
+    live_payload_bytes: u64,
+    dead_payload_bytes_before: u64,
+    dead_payload_bytes_after: u64,
+}
+
+fn needs_tombstone_compaction(record: &ObjectRecord) -> bool {
+    record.header.lifecycle == LifecycleState::Tombstoned
+        && !unresolved_effect_state(record.header.type_id, &record.state)
+        && (!record.state.is_empty()
+            || !record.links.is_empty()
+            || record.capabilities != BTreeSet::from([Capability::Inspect])
+            || record
+                .policy
+                .grants
+                .values()
+                .any(|capabilities| capabilities != &BTreeSet::from([Capability::Inspect])))
+}
+
+fn tombstone_reap_deadline(record: &ObjectRecord) -> Option<u64> {
+    if !needs_tombstone_compaction(record) {
+        return None;
+    }
+    record
+        .retired_at_unix_ms
+        .map(|retired_at| retired_at.saturating_add(TOMBSTONE_RETENTION_MILLIS))
+}
+
+fn next_tombstone_reap_deadline(state: &ShardState) -> u64 {
+    state
+        .objects
+        .values()
+        .filter_map(tombstone_reap_deadline)
+        .min()
+        .unwrap_or(u64::MAX)
+}
+
+fn compact_tombstone_payloads(state: &mut ShardState, cutoff_unix_ms: u64) -> GcCounts {
+    let mut counts = GcCounts::default();
+    for record in state.objects.values_mut() {
+        counts.objects_scanned = counts.objects_scanned.saturating_add(1);
+        let payload = u64::try_from(record.state.len()).unwrap_or(u64::MAX);
+        if record.header.lifecycle != LifecycleState::Tombstoned {
+            counts.active_objects = counts.active_objects.saturating_add(1);
+            counts.live_payload_bytes = counts.live_payload_bytes.saturating_add(payload);
+            continue;
+        }
+        counts.tombstones = counts.tombstones.saturating_add(1);
+        counts.dead_payload_bytes_before = counts.dead_payload_bytes_before.saturating_add(payload);
+        if record
+            .retired_at_unix_ms
+            .is_none_or(|retired_at| retired_at > cutoff_unix_ms)
+        {
+            counts.tombstones_waiting_for_retention =
+                counts.tombstones_waiting_for_retention.saturating_add(1);
+            counts.dead_payload_bytes_after =
+                counts.dead_payload_bytes_after.saturating_add(payload);
+            continue;
+        }
+        if unresolved_effect_state(record.header.type_id, &record.state) {
+            // An Effect may be in flight or have an unknown external outcome.
+            // Keep its full durable idempotency record until it is resolved.
+            counts.dead_payload_bytes_after =
+                counts.dead_payload_bytes_after.saturating_add(payload);
+            continue;
+        }
+        let compactable = needs_tombstone_compaction(record);
+        if compactable {
+            counts.objects_compacted = counts.objects_compacted.saturating_add(1);
+            record.state = Arc::from(Vec::<u8>::new());
+            record.links.clear();
+            record.capabilities = BTreeSet::from([Capability::Inspect]);
+            record.policy.grants.retain(|_, capabilities| {
+                capabilities.retain(|capability| *capability == Capability::Inspect);
+                !capabilities.is_empty()
+            });
+        }
+        counts.dead_payload_bytes_after = counts
+            .dead_payload_bytes_after
+            .saturating_add(u64::try_from(record.state.len()).unwrap_or(u64::MAX));
+    }
+    counts
+}
+
+fn validate_gc_candidate(state: &ShardState, types: &TypeRegistry) -> Result<(), OmsError> {
+    validate_parent_graph(state)?;
+    validate_type_index(state)?;
+    validate_dynamic_types(state, types)
+}
+
+fn unresolved_effect_state(type_id: TypeId, state: &[u8]) -> bool {
+    if type_id != CORE_EFFECT_TYPE {
+        return false;
+    }
+    let Ok(Value::Record(fields)) = Value::decode(state) else {
+        // A malformed Effect cannot safely be classified as resolved.
+        return true;
+    };
+    !matches!(
+        fields.get("status"),
+        Some(Value::Text(status)) if status == "completed" || status == "failed"
+    )
+}
+
+fn unix_time_millis() -> Result<u64, OmsError> {
+    system_time_to_unix_millis(SystemTime::now())
+}
+
+fn system_time_to_unix_millis(time: SystemTime) -> Result<u64, OmsError> {
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| OmsError::Storage("system time is before the Unix epoch".to_owned()))?;
+    u64::try_from(duration.as_millis())
+        .map_err(|_| OmsError::Storage("Unix time is out of supported range".to_owned()))
+}
+
+const fn retention_cutoff_unix_ms(now_unix_ms: u64) -> u64 {
+    now_unix_ms.saturating_sub(TOMBSTONE_RETENTION_MILLIS)
 }
 
 impl ObjectManager for InMemoryObjectManager {
@@ -2047,6 +2829,7 @@ fn apply_create(
                 version: ObjectVersion::default(),
                 lifecycle: LifecycleState::Active,
             },
+            retired_at_unix_ms: None,
             state: Arc::from(request.state),
             children: BTreeSet::new(),
             links: request.links,
@@ -2218,6 +3001,12 @@ fn apply_tombstone(
     }
     let parent = object_record.header.parent_id;
     object_record.require(context, Capability::Retire)?;
+    if unresolved_effect_state(object_record.header.type_id, &object_record.state) {
+        return Err(OmsError::InvalidOperation(
+            "an unresolved Effect cannot be tombstoned",
+        ));
+    }
+    let retired_at_unix_ms = unix_time_millis()?;
     if let Some(parent) = parent {
         require_expected(expected, parent)?;
         let parent_record = active_record_mut(state, parent)?;
@@ -2228,6 +3017,7 @@ fn apply_tombstone(
     let record = active_record_mut(state, object)?;
     record.header.parent_id = None;
     record.header.lifecycle = LifecycleState::Tombstoned;
+    record.retired_at_unix_ms = Some(retired_at_unix_ms);
     changed.insert(object);
     Ok(())
 }
@@ -2439,21 +3229,32 @@ fn persist_file_snapshot(path: &Path, bytes: &[u8]) -> Result<(), OmsError> {
     if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(storage_error)?;
     }
-    let temporary = path.with_extension("tmp");
+    let temporary = temporary_path(path);
     let mut file = File::create(&temporary).map_err(storage_error)?;
     file.write_all(bytes).map_err(storage_error)?;
     file.sync_all().map_err(storage_error)?;
     drop(file);
     fs::rename(&temporary, path).map_err(storage_error)?;
+    sync_parent_directory(path)
+}
+
+fn persist_generation_manifest(path: &Path, bytes: &[u8]) -> Result<bool, OmsError> {
     if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(storage_error)?;
+        fs::create_dir_all(parent).map_err(storage_error)?;
     }
-    Ok(())
+    let temporary = temporary_path(path);
+    let mut file = File::create(&temporary).map_err(storage_error)?;
+    file.write_all(bytes).map_err(storage_error)?;
+    file.sync_all().map_err(storage_error)?;
+    drop(file);
+    fs::rename(&temporary, path).map_err(storage_error)?;
+    // `false` still means the atomic rename is visible. The caller keeps the
+    // old generation intact unless the directory entry is confirmed durable.
+    Ok(sync_parent_directory(path).is_ok())
 }
 
 fn append_wal(path: &Path, payload: &[u8]) -> Result<(), OmsError> {
+    repair_wal_tail(path)?;
     let length = u64::try_from(payload.len())
         .map_err(|_| OmsError::Storage("WAL record is too large".to_owned()))?;
     let mut file = OpenOptions::new()
@@ -2470,9 +3271,9 @@ fn append_wal(path: &Path, payload: &[u8]) -> Result<(), OmsError> {
     file.sync_all().map_err(storage_error)
 }
 
-fn load_wal(path: &Path, mut latest: Option<Vec<u8>>) -> Result<Option<Vec<u8>>, OmsError> {
+fn repair_wal_tail(path: &Path) -> Result<(), OmsError> {
     if !path.exists() {
-        return Ok(latest);
+        return Ok(());
     }
     let bytes = fs::read(path).map_err(storage_error)?;
     let mut position = 0_usize;
@@ -2508,8 +3309,92 @@ fn load_wal(path: &Path, mut latest: Option<Vec<u8>>) -> Result<Option<Vec<u8>>,
         if wal_checksum(payload) != expected {
             return Err(corruption("Object Store WAL checksum mismatch"));
         }
-        latest = Some(apply_wal_payload(latest.as_deref(), payload)?);
         position = checksum_end;
+    }
+    if position < bytes.len() {
+        let file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(storage_error)?;
+        file.set_len(
+            u64::try_from(position)
+                .map_err(|_| OmsError::Storage("WAL offset does not fit in u64".to_owned()))?,
+        )
+        .map_err(storage_error)?;
+        file.sync_all().map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn load_wal(path: &Path, mut latest: Option<Vec<u8>>) -> Result<Option<Vec<u8>>, OmsError> {
+    if !path.exists() {
+        return Ok(latest);
+    }
+    let bytes = fs::read(path).map_err(storage_error)?;
+    let mut position = 0_usize;
+    let mut payloads = Vec::new();
+    while bytes.len().saturating_sub(position) >= 12 {
+        if &bytes[position..position + 4] != WAL_MAGIC {
+            return Err(corruption("invalid Object Store WAL magic"));
+        }
+        let length = u64::from_le_bytes(
+            bytes[position + 4..position + 12]
+                .try_into()
+                .map_err(|_| corruption("truncated Object Store WAL length"))?,
+        );
+        let length = usize::try_from(length)
+            .map_err(|_| corruption("Object Store WAL record is too large"))?;
+        let Some(record_end) = position
+            .checked_add(12)
+            .and_then(|start| start.checked_add(length))
+        else {
+            return Err(corruption("Object Store WAL length overflow"));
+        };
+        let Some(checksum_end) = record_end.checked_add(8) else {
+            return Err(corruption("Object Store WAL length overflow"));
+        };
+        if checksum_end > bytes.len() {
+            break;
+        }
+        let payload = &bytes[position + 12..record_end];
+        let expected = u64::from_le_bytes(
+            bytes[record_end..checksum_end]
+                .try_into()
+                .map_err(|_| corruption("truncated Object Store WAL checksum"))?,
+        );
+        if wal_checksum(payload) != expected {
+            return Err(corruption("Object Store WAL checksum mismatch"));
+        }
+        payloads.push(payload);
+        position = checksum_end;
+    }
+    if position < bytes.len() {
+        // A torn final frame was never a committed transaction. Remove it
+        // before future appends, otherwise the next valid WAL frame would be
+        // hidden behind a permanently malformed tail.
+        let file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(storage_error)?;
+        file.set_len(
+            u64::try_from(position)
+                .map_err(|_| OmsError::Storage("WAL offset does not fit in u64".to_owned()))?,
+        )
+        .map_err(storage_error)?;
+        file.sync_all().map_err(storage_error)?;
+    }
+    let start = payloads
+        .iter()
+        .rposition(|payload| payload.first() == Some(&3));
+    if let Some(index) = start {
+        latest = Some(payloads[index][1..].to_vec());
+        for payload in &payloads[index + 1..] {
+            latest = Some(apply_wal_payload(latest.as_deref(), payload)?);
+        }
+    } else {
+        for payload in payloads {
+            latest = Some(apply_wal_payload(latest.as_deref(), payload)?);
+        }
     }
     Ok(latest)
 }
@@ -2593,6 +3478,9 @@ fn apply_wal_payload(previous: Option<&[u8]>, payload: &[u8]) -> Result<Vec<u8>,
         return apply_wal_payload(previous, &expanded);
     }
     if kind == 0 {
+        return Ok(body.to_vec());
+    }
+    if kind == 3 {
         return Ok(body.to_vec());
     }
     if kind != 1 {
@@ -2713,16 +3601,6 @@ impl<'a> WalDeltaReader<'a> {
     }
 }
 
-fn checkpoint_wal(path: &Path) -> Result<(), OmsError> {
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .map_err(storage_error)?;
-    file.sync_all().map_err(storage_error)
-}
-
 fn wal_checksum(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
@@ -2732,6 +3610,7 @@ fn wal_checksum(bytes: &[u8]) -> u64 {
 fn encode_snapshot(state: &ShardState) -> Result<Vec<u8>, OmsError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(SNAPSHOT_MAGIC);
+    bytes.extend_from_slice(RETIREMENT_TIME_EXTENSION);
     snapshot_u32(&mut bytes, snapshot_len(state.objects.len())?);
     for record in state.objects.values() {
         snapshot_u128(&mut bytes, record.header.id.as_u128());
@@ -2745,6 +3624,7 @@ fn encode_snapshot(state: &ShardState) -> Result<Vec<u8>, OmsError> {
         }
         snapshot_u64(&mut bytes, record.header.version.get());
         bytes.push(lifecycle_tag(record.header.lifecycle));
+        snapshot_u64(&mut bytes, record.retired_at_unix_ms.unwrap_or_default());
         snapshot_bytes(&mut bytes, &record.state)?;
 
         snapshot_u32(&mut bytes, snapshot_len(record.children.len())?);
@@ -2772,6 +3652,10 @@ fn decode_snapshot(bytes: &[u8]) -> Result<ShardState, OmsError> {
     if reader.take(4)? != SNAPSHOT_MAGIC {
         return Err(corruption("invalid Object Store snapshot magic"));
     }
+    let has_retirement_time = reader.peek(4)? == RETIREMENT_TIME_EXTENSION;
+    if has_retirement_time {
+        reader.take(4)?;
+    }
     let count = reader.count()?;
     let mut objects = BTreeMap::new();
     let mut by_type = BTreeMap::<TypeId, BTreeSet<ObjectId>>::new();
@@ -2785,6 +3669,24 @@ fn decode_snapshot(bytes: &[u8]) -> Result<ShardState, OmsError> {
         };
         let version = ObjectVersion::new(reader.u64()?);
         let lifecycle = decode_lifecycle(reader.u8()?)?;
+        let retired_at_unix_ms = if has_retirement_time {
+            let timestamp = reader.u64()?;
+            match (lifecycle, timestamp) {
+                (LifecycleState::Tombstoned, 0) => {
+                    return Err(corruption("Tombstone has no retirement timestamp"));
+                }
+                (LifecycleState::Tombstoned, timestamp) => Some(timestamp),
+                (_, 0) => None,
+                (_, _) => return Err(corruption("active Object has a retirement timestamp")),
+            }
+        } else if lifecycle == LifecycleState::Tombstoned {
+            // An older unpublished snapshot has no age metadata. Start the
+            // seven-day retention window at upgrade time rather than deleting
+            // its payload immediately.
+            Some(unix_time_millis()?)
+        } else {
+            None
+        };
         let state = Arc::from(reader.bytes()?.to_vec());
 
         let mut children = BTreeSet::new();
@@ -2817,6 +3719,7 @@ fn decode_snapshot(bytes: &[u8]) -> Result<ShardState, OmsError> {
                 version,
                 lifecycle,
             },
+            retired_at_unix_ms,
             state,
             children,
             links,
@@ -2960,6 +3863,16 @@ impl<'a> SnapshotReader<'a> {
         Ok(value)
     }
 
+    fn peek(&self, count: usize) -> Result<&'a [u8], OmsError> {
+        let end = self
+            .position
+            .checked_add(count)
+            .ok_or_else(|| corruption("snapshot position overflow"))?;
+        self.bytes
+            .get(self.position..end)
+            .ok_or_else(|| corruption("truncated Object Store snapshot"))
+    }
+
     fn u8(&mut self) -> Result<u8, OmsError> {
         Ok(self.take(1)?[0])
     }
@@ -3028,6 +3941,163 @@ mod tests {
     fn owner() -> (SubjectId, AccessContext) {
         let owner = SubjectId::new();
         (owner, AccessContext::new(owner))
+    }
+
+    fn legacy_tombstone_snapshot(id: ObjectId, type_id: TypeId, owner: SubjectId) -> Vec<u8> {
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(SNAPSHOT_MAGIC);
+        snapshot_u32(&mut legacy, 1);
+        snapshot_u128(&mut legacy, id.as_u128());
+        snapshot_u128(&mut legacy, type_id.as_u128());
+        legacy.push(0);
+        snapshot_u64(&mut legacy, 9);
+        legacy.push(lifecycle_tag(LifecycleState::Tombstoned));
+        snapshot_bytes(&mut legacy, b"retained legacy payload").unwrap();
+        snapshot_u32(&mut legacy, 0);
+        snapshot_u32(&mut legacy, 0);
+        snapshot_u16(&mut legacy, capability_bits(&all_capabilities()));
+        snapshot_u128(&mut legacy, owner.as_u128());
+        snapshot_u32(&mut legacy, 0);
+        legacy
+    }
+
+    #[test]
+    fn legacy_tombstones_get_a_fresh_retention_period_and_keep_metadata() {
+        let id = ObjectId::new();
+        let type_id = TypeId::new();
+        let owner = SubjectId::new();
+        let legacy = legacy_tombstone_snapshot(id, type_id, owner);
+
+        let mut state = decode_snapshot(&legacy).unwrap();
+        let record = state.objects.get(&id).unwrap();
+        let retired_at = record.retired_at_unix_ms.unwrap();
+        assert_eq!(record.header.type_id, type_id);
+        assert_eq!(record.header.version, ObjectVersion::new(9));
+        assert_eq!(record.policy.owner, owner);
+        assert_eq!(record.state.as_ref(), b"retained legacy payload");
+        assert_eq!(
+            next_tombstone_reap_deadline(&state),
+            retired_at.saturating_add(TOMBSTONE_RETENTION_MILLIS)
+        );
+
+        let encoded = encode_snapshot(&state).unwrap();
+        state = decode_snapshot(&encoded).unwrap();
+        let record = state.objects.get(&id).unwrap();
+        assert_eq!(record.retired_at_unix_ms, Some(retired_at));
+
+        let mut too_early = state.clone();
+        let just_before = compact_tombstone_payloads(&mut too_early, retired_at - 1);
+        assert_eq!(just_before.objects_compacted, 0);
+        assert_eq!(just_before.tombstones_waiting_for_retention, 1);
+
+        let mut expired = state;
+        let eligible = compact_tombstone_payloads(&mut expired, retired_at);
+        assert_eq!(eligible.objects_compacted, 1);
+        assert_eq!(expired.objects[&id].state.len(), 0);
+        assert_eq!(expired.objects[&id].header.id, id);
+        assert_eq!(expired.objects[&id].header.type_id, type_id);
+        assert_eq!(expired.objects[&id].header.version, ObjectVersion::new(9));
+        assert_eq!(expired.objects[&id].policy.owner, owner);
+        assert_eq!(expired.objects[&id].retired_at_unix_ms, Some(retired_at));
+    }
+
+    #[test]
+    fn legacy_retirement_time_upgrade_survives_store_restart() {
+        let directory = std::env::temp_dir().join(format!("ousject-legacy-{}", ObjectId::new()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("objects.oms");
+        let id = ObjectId::new();
+        let type_id = TypeId::new();
+        let owner = SubjectId::new();
+        std::fs::write(&path, legacy_tombstone_snapshot(id, type_id, owner)).unwrap();
+
+        let first = InMemoryObjectManager::open_persistent(&path).unwrap();
+        let context = AccessContext::new(owner);
+        let first_header = first.inspect(context, id).unwrap();
+        let first_retired_at = first
+            .shard(id)
+            .read()
+            .unwrap()
+            .objects
+            .get(&id)
+            .unwrap()
+            .retired_at_unix_ms;
+        assert!(first_retired_at.is_some());
+        drop(first);
+
+        let reopened = InMemoryObjectManager::open_persistent(&path).unwrap();
+        assert_eq!(reopened.inspect(context, id).unwrap(), first_header);
+        assert_eq!(
+            reopened
+                .shard(id)
+                .read()
+                .unwrap()
+                .objects
+                .get(&id)
+                .unwrap()
+                .retired_at_unix_ms,
+            first_retired_at
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn background_reaper_wakes_for_an_expired_tombstone_and_keeps_its_id() {
+        let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+        let (owner, context) = owner();
+        let object = create(&manager, context, b"payload removed after expiry");
+        let version = manager.inspect(context, object).unwrap().version;
+        let mut retire = manager.begin(context);
+        retire.expect(object, version).tombstone(object);
+        manager.commit(retire).unwrap();
+
+        let retired_at = unix_time_millis()
+            .unwrap()
+            .saturating_sub(TOMBSTONE_RETENTION_MILLIS + 1);
+        manager
+            .shard(object)
+            .write()
+            .unwrap()
+            .objects
+            .get_mut(&object)
+            .unwrap()
+            .retired_at_unix_ms = Some(retired_at);
+        manager.next_tombstone_reap_unix_ms.store(
+            retired_at.saturating_add(TOMBSTONE_RETENTION_MILLIS),
+            Ordering::Release,
+        );
+
+        let reaper = TombstoneReaper::start(&manager).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if manager.shard(object).read().unwrap().objects[&object]
+                .state
+                .is_empty()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "reaper did not compact the expired object"
+            );
+            thread::yield_now();
+        }
+        drop(reaper);
+
+        let header = manager.inspect(AccessContext::new(owner), object).unwrap();
+        assert_eq!(header.lifecycle, LifecycleState::Tombstoned);
+        assert_eq!(manager.stats().unwrap().tombstoned_count, 1);
+        assert_eq!(
+            manager.next_tombstone_reap_unix_ms.load(Ordering::Acquire),
+            u64::MAX
+        );
+        let mut duplicate = manager.begin(context);
+        duplicate.create(CreateObject::new(TypeId::new(), b"reuse").with_id(object));
+        assert!(matches!(
+            manager.commit(duplicate),
+            Err(OmsError::InvalidOperation("ObjectId already exists"))
+        ));
     }
 
     fn create(manager: &InMemoryObjectManager, context: AccessContext, state: &[u8]) -> ObjectId {

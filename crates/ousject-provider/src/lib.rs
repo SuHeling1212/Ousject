@@ -94,6 +94,28 @@ pub trait ObjectProvider: fmt::Debug + Send + Sync {
         effect: ObjectId,
     ) -> Result<ProviderOutcome, ProviderError>;
 
+    /// Performs a capability on behalf of a specific Process. Providers that
+    /// need per-Process leases (for example exclusive keyboard input) can
+    /// override this method; ordinary Providers remain source-compatible.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same provider-specific errors as [`Self::invoke`].
+    fn invoke_for_process(
+        &self,
+        _process: ObjectId,
+        object: ObjectId,
+        state: &Value,
+        capability: &str,
+        arguments: &[Value],
+        effect: ObjectId,
+    ) -> Result<ProviderOutcome, ProviderError> {
+        self.invoke(object, state, capability, arguments, effect)
+    }
+
+    /// Releases any boot-scoped resources leased by a Process that ended.
+    fn process_ended(&self, _process: ObjectId) {}
+
     fn capabilities(&self) -> BTreeSet<String>;
 
     /// Resolves a boot-scoped opaque secret token. Providers that do not own
@@ -165,6 +187,22 @@ impl ProviderRegistry {
             .keys()
             .copied()
             .collect())
+    }
+
+    /// Notifies Providers that a Process has ended so they can release leases.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unavailable` if the registry lock is poisoned.
+    pub fn process_ended(&self, process: ObjectId) -> Result<(), ProviderError> {
+        let providers = self
+            .providers
+            .read()
+            .map_err(|_| ProviderError::Unavailable)?;
+        for provider in providers.values() {
+            provider.process_ended(process);
+        }
+        Ok(())
     }
 }
 

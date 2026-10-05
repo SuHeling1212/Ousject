@@ -11,11 +11,12 @@
 | `system` | `core.system` | `status` `health_check` `shutdown` `restart` |
 | `authentication` | `core.authentication` | `local_initialized` `initialize_local` `login` `logout` `change_password` |
 | `users` | `core.user_registry` | `create_user` `users` `disable_user` |
-| `scheduler` | `core.scheduler` | `enqueue` `processes` `suspend` `resume` `terminate` |
 | `compiler` | `core.compiler` | `compile` `validate` `disassemble` |
 | `types` | `core.type_registry` | `register` `types` `descriptor` |
-| `providers` | `core.provider_registry` | `providers` `devices` |
-| `store` | `core.object_store` | `stats` `health_check` `checkpoint` `effects` |
+| `providers` | `core.provider_registry` | `providers` `devices`（仅 `local`） |
+| `store` | `core.object_store` | `stats` `health_check` `effects`（仅 `local`） |
+
+调度器是内核机制，不单独发布为用户对象；程序以 `object.query("core.process")` 发现进程并调用进程自身的生命周期能力。块设备读写同样是内核/驱动 API，普通 Praxis 程序直接操作持久化对象。
 
 Console、设备与网络同样是 Provider-owned Object，不是 File API。密码由 `console.read_secret()` 返回启动期不透明句柄，认证内核解析句柄；明文不写入普通变量、Process 状态、Effect 或 WAL，Linux 终端适配器读取期间关闭回显。
 

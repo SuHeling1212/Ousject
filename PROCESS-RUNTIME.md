@@ -41,6 +41,7 @@ Process 状态包含：
 - 变量名到 Value Object ID 的映射；
 - `Running`、`Suspended`、`Halted` 或 `Terminated` 状态；
 - Program Object ID。
+- 可选的持久唤醒截止时间和结束时间；
 - 函数/方法调用帧与异常处理帧。
 
 变量名绑定 Object。第一次执行 `x = 42` 会创建 Process 的 `core.value` 子对象；以后修改 `x` 会更新这个对象。
@@ -60,7 +61,9 @@ Process 状态包含：
 
 对象创建、替换、Link 修改、变量值和 Process 位置会放进同一个 OMS Transaction。提交失败时，这些变化全部不生效。
 
-`VirtualMachine::run` 执行一个 Process。`CooperativeScheduler` 可以管理多个 Process，每轮给一个 Process 执行一条 Token。两者都是 Ousject 代码，不创建 Linux 子进程，也不调用 Linux Scheduler 来表达 Ousject Process 语义。
+`VirtualMachine::run` 执行一个 Process。内核协作调度器每轮给可运行 Process 执行一条 Token；Praxis 不暴露独立的 `scheduler` 对象，进程列表通过 `object.query("core.process")` 查询。定时睡眠只把当前 Process 标记为 `Suspended` 并保存唤醒时间，不占住 VM 工作线程。两者都是 Ousject 代码，不创建 Linux 子进程，也不调用 Linux Scheduler 来表达 Ousject Process 语义。
+
+结束 Process 的结果和错误会保留七天；后台进程回收器之后原子退役 Process 与其拥有的数据。它指向的 Program 不会被误删。退役后再按统一七天墓碑策略回收内容，元数据仍保留。
 
 ## 创建子 Process 与通信
 
@@ -69,7 +72,7 @@ Praxis 可从当前 Program 的无参数函数创建子 Process：
 ```praxis
 child = object.create("core.process", {
     entry: "worker",
-    links: { channel: object.id(channel) }
+    links: { channel: channel.id }
 })
 child.start()
 result = child.wait()

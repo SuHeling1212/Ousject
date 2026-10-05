@@ -48,7 +48,7 @@ printf '%s\n' 'boot-password' 'local' 'boot-password' 'exit' | \
     "$project_root/scripts/ousject" boot --state "$temporary/boot.oms" >/dev/null
 printf '%s\n' 'local' 'boot-password' 'exit' | \
     "$project_root/scripts/ousject" boot --state "$temporary/boot.oms" >/dev/null
-if rg -a -q 'boot-password' "$temporary/boot.oms" "$temporary/boot.wal"; then
+if rg -a -q 'boot-password' "$temporary"/boot.*; then
     echo "plaintext password was persisted" >&2
     exit 1
 fi

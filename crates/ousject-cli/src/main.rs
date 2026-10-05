@@ -1,17 +1,21 @@
-use nix::sys::termios::{LocalFlags, SetArg, tcgetattr, tcsetattr};
+use nix::sys::termios::{
+    ControlFlags, InputFlags, LocalFlags, SetArg, SpecialCharacterIndices, Termios, tcgetattr,
+    tcsetattr,
+};
 use oms_runtime::{
     AccessContext, CreateObject, CreateSpec, CreationPolicy, InMemoryObjectManager, ObjectQuery,
-    ValueSchema,
+    TombstoneReaper, ValueSchema,
 };
 use oms_types::{
     CORE_CONSOLE_TYPE, CORE_NAMESPACE_TYPE, CORE_PROGRAM_TYPE, CORE_SYSTEM_TYPE, Capability,
-    DEVICE_BLOCK_STORAGE_TYPE, DEVICE_DISPLAY_TYPE, DEVICE_KEYBOARD_TYPE, DEVICE_SENSOR_TYPE,
+    DEVICE_BLOCK_STORAGE_TYPE, DEVICE_DISPLAY_TYPE, DEVICE_KEYBOARD_TYPE, NET_RESOLVER_TYPE,
     ObjectId, SubjectId, Value,
 };
 use ousject_auth::AuthService;
 use ousject_provider::{ObjectProvider, ProviderError, ProviderOutcome};
 use ousject_vm::{
-    ConsoleProvider, CooperativeScheduler, ProcessStatus, RunReport, SYSTEM_SUBJECT, VirtualMachine,
+    ConsoleProvider, CooperativeScheduler, ProcessReaper, ProcessStatus, RunReport, SYSTEM_SUBJECT,
+    VirtualMachine,
 };
 use praxis_compiler::compile_with_loader;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -19,6 +23,8 @@ use std::fs::OpenOptions;
 use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use tf_format::Program;
@@ -186,6 +192,8 @@ fn command_boot(arguments: &[String]) -> Result<(), String> {
     let program = Program::decode(manager.read(context, init).map_err(error_text)?.state())
         .map_err(error_text)?;
     let vm = discover_host_hardware(manager, block_path)?;
+    let _tombstone_reaper = TombstoneReaper::start(vm.manager()).map_err(error_text)?;
+    let _process_reaper = ProcessReaper::start(&vm, Duration::from_secs(60)).map_err(error_text)?;
     loop {
         let process = vm.create_process(&program).map_err(error_text)?;
         let report = run_hosted_process(&vm, process, options.steps)?;
@@ -792,11 +800,8 @@ fn discover_host_hardware(
     }
     VirtualMachine::publish_provider_object(
         &manager,
-        DEVICE_SENSOR_TYPE,
-        &Value::Record(BTreeMap::from([
-            ("provider".to_owned(), Value::Text("linux.clock".to_owned())),
-            ("kind".to_owned(), Value::Text("clock".to_owned())),
-        ])),
+        NET_RESOLVER_TYPE,
+        &provider_state("linux.dns"),
     )
     .map_err(error_text)?;
     VirtualMachine::publish_provider_object(
@@ -811,15 +816,18 @@ fn discover_host_hardware(
         ])),
     )
     .map_err(error_text)?;
-    let vm = VirtualMachine::with_console(manager, console, Arc::new(LinuxConsole::new()))
-        .map_err(error_text)?;
+    let terminal = LinuxConsole::new()?;
+    let vm =
+        VirtualMachine::with_console(manager, console, terminal.clone()).map_err(error_text)?;
     vm.register_provider(Arc::new(HostNetworkProvider::default()))
         .map_err(error_text)?;
     vm.register_provider(Arc::new(CachedProvider::new(HostDisplayProvider)))
         .map_err(error_text)?;
-    vm.register_provider(Arc::new(CachedProvider::new(HostKeyboardProvider)))
-        .map_err(error_text)?;
-    vm.register_provider(Arc::new(CachedProvider::new(HostClockSensorProvider)))
+    vm.register_provider(Arc::new(CachedProvider::new(HostKeyboardProvider {
+        terminal,
+    })))
+    .map_err(error_text)?;
+    vm.register_provider(Arc::new(HostResolverProvider))
         .map_err(error_text)?;
     vm.register_provider(Arc::new(CachedProvider::new(
         HostBlockStorageProvider::open(block_path).map_err(error_text)?,
@@ -844,13 +852,7 @@ fn grant_console_access(
     }
     let context = AccessContext::new(SYSTEM_SUBJECT);
     let mut transaction = manager.begin(context);
-    for type_id in [
-        CORE_CONSOLE_TYPE,
-        DEVICE_DISPLAY_TYPE,
-        DEVICE_KEYBOARD_TYPE,
-        DEVICE_SENSOR_TYPE,
-        DEVICE_BLOCK_STORAGE_TYPE,
-    ] {
+    for type_id in [CORE_CONSOLE_TYPE, DEVICE_DISPLAY_TYPE, DEVICE_KEYBOARD_TYPE] {
         for object in manager
             .query(context, &ObjectQuery::new().with_type(type_id))
             .map_err(error_text)?
@@ -869,113 +871,647 @@ fn grant_console_access(
 
 #[derive(Debug)]
 struct LinuxConsole {
-    input: Mutex<LinuxInputState>,
+    input: Arc<Mutex<LinuxInputState>>,
+    running: Arc<AtomicBool>,
+    start_reader: mpsc::Sender<()>,
+    reader: Mutex<Option<std::thread::JoinHandle<()>>>,
+    original_termios: Mutex<Option<Termios>>,
+    terminal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputMode {
     Line,
     Secret,
+    Keyboard,
 }
 
 #[derive(Debug)]
 struct LinuxInputState {
-    requests: mpsc::Sender<InputMode>,
-    responses: mpsc::Receiver<(InputMode, Result<String, String>)>,
-    outstanding: Option<InputMode>,
-    lines: VecDeque<Result<String, String>>,
-    secrets: VecDeque<Result<String, String>>,
+    owner: Option<(ObjectId, InputMode)>,
+    line: String,
+    completed_lines: BTreeMap<ObjectId, Result<String, String>>,
+    events: BTreeMap<ObjectId, VecDeque<Value>>,
+    overflowed: BTreeSet<ObjectId>,
+    eof: bool,
+    reader_error: Option<String>,
 }
 
 impl LinuxConsole {
-    fn new() -> Self {
-        let (request_sender, request_receiver) = mpsc::channel();
-        let (response_sender, response_receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            while let Ok(mode) = request_receiver.recv() {
-                if response_sender.send((mode, read_host_line(mode))).is_err() {
-                    break;
+    fn new() -> Result<Arc<Self>, String> {
+        let stdin = std::io::stdin();
+        let terminal = stdin.is_terminal();
+        let original_termios = if terminal {
+            let original = tcgetattr(&stdin).map_err(error_text)?;
+            let mut raw = original.clone();
+            raw.local_flags.remove(
+                LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::IEXTEN | LocalFlags::ISIG,
+            );
+            raw.input_flags.remove(
+                InputFlags::ICRNL
+                    | InputFlags::INLCR
+                    | InputFlags::IGNCR
+                    | InputFlags::IXON
+                    | InputFlags::BRKINT
+                    | InputFlags::ISTRIP
+                    | InputFlags::INPCK,
+            );
+            raw.control_flags.remove(ControlFlags::CSIZE);
+            raw.control_flags.insert(ControlFlags::CS8);
+            raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 0;
+            raw.control_chars[SpecialCharacterIndices::VTIME as usize] = 1;
+            tcsetattr(&stdin, SetArg::TCSANOW, &raw).map_err(error_text)?;
+            Some(original)
+        } else {
+            None
+        };
+        let input = Arc::new(Mutex::new(LinuxInputState {
+            owner: None,
+            line: String::new(),
+            completed_lines: BTreeMap::new(),
+            events: BTreeMap::new(),
+            overflowed: BTreeSet::new(),
+            eof: false,
+            reader_error: None,
+        }));
+        let running = Arc::new(AtomicBool::new(true));
+        let (start_reader, start_receiver) = mpsc::channel();
+        let reader_input = Arc::clone(&input);
+        let reader_running = Arc::clone(&running);
+        let reader = match std::thread::Builder::new()
+            .name("ousject-terminal-input".to_owned())
+            .spawn(move || {
+                input_reader(&reader_input, &reader_running, terminal, &start_receiver);
+            }) {
+            Ok(reader) => reader,
+            Err(error) => {
+                if let Some(original) = &original_termios {
+                    let _ = tcsetattr(&stdin, SetArg::TCSANOW, original);
                 }
+                return Err(error.to_string());
             }
-        });
-        Self {
-            input: Mutex::new(LinuxInputState {
-                requests: request_sender,
-                responses: response_receiver,
-                outstanding: None,
-                lines: VecDeque::new(),
-                secrets: VecDeque::new(),
-            }),
+        };
+        Ok(Arc::new(Self {
+            input,
+            running,
+            start_reader,
+            reader: Mutex::new(Some(reader)),
+            original_termios: Mutex::new(original_termios),
+            terminal,
+        }))
+    }
+
+    fn poll_line(&self, process: ObjectId, mode: InputMode) -> Result<Option<String>, String> {
+        let mut input = self.input.lock().map_err(error_text)?;
+        if let Some(result) = input.completed_lines.remove(&process) {
+            return result.map(Some);
+        }
+        if let Some(error) = &input.reader_error {
+            return Err(error.clone());
+        }
+        if input.eof {
+            return Err("console input reached EOF".to_owned());
+        }
+        let start_reader = match input.owner {
+            None => {
+                input.owner = Some((process, mode));
+                input.line.clear();
+                true
+            }
+            Some((owner, owner_mode)) if owner == process && owner_mode == mode => false,
+            Some(_) => return Ok(None),
+        };
+        drop(input);
+        if start_reader {
+            self.start_reader.send(()).map_err(error_text)?;
+        }
+        Ok(None)
+    }
+
+    fn capture_keyboard(&self, process: ObjectId) -> Result<(), ProviderError> {
+        let mut input = self.input.lock().map_err(|_| ProviderError::Unavailable)?;
+        let start_reader = match input.owner {
+            None => {
+                input.owner = Some((process, InputMode::Keyboard));
+                input.events.entry(process).or_default();
+                input.overflowed.remove(&process);
+                true
+            }
+            Some((owner, InputMode::Keyboard)) if owner == process => false,
+            Some(_) => return Err(ProviderError::Pending),
+        };
+        drop(input);
+        if start_reader {
+            self.start_reader
+                .send(())
+                .map_err(|_| ProviderError::Unavailable)?;
+        }
+        Ok(())
+    }
+
+    fn release_keyboard(&self, process: ObjectId) -> Result<(), ProviderError> {
+        let mut input = self.input.lock().map_err(|_| ProviderError::Unavailable)?;
+        match input.owner {
+            None => Ok(()),
+            Some((owner, InputMode::Keyboard)) if owner == process => {
+                input.owner = None;
+                input.events.remove(&process);
+                input.overflowed.remove(&process);
+                Ok(())
+            }
+            Some((owner, _)) if owner != process => Err(ProviderError::Adapter(
+                "terminal input belongs to another Process".to_owned(),
+            )),
+            Some(_) => Err(ProviderError::Adapter(
+                "this Process does not own keyboard capture".to_owned(),
+            )),
         }
     }
 
-    fn poll_input(&self, mode: InputMode) -> Result<Option<String>, String> {
-        let mut input = self.input.lock().map_err(error_text)?;
-        while let Ok((completed_mode, result)) = input.responses.try_recv() {
-            input.outstanding = None;
-            match completed_mode {
-                InputMode::Line => input.lines.push_back(result),
-                InputMode::Secret => input.secrets.push_back(result),
+    fn take_key_event(&self, process: ObjectId) -> Result<Option<Value>, ProviderError> {
+        let mut input = self.input.lock().map_err(|_| ProviderError::Unavailable)?;
+        if input.owner != Some((process, InputMode::Keyboard)) {
+            return Err(ProviderError::Adapter(
+                "call keyboard.capture() before reading key events".to_owned(),
+            ));
+        }
+        if input.overflowed.remove(&process) {
+            return Err(ProviderError::Adapter(
+                "keyboard event queue overflowed; release and capture again".to_owned(),
+            ));
+        }
+        Ok(input.events.entry(process).or_default().pop_front())
+    }
+
+    fn release_process_input(&self, process: ObjectId) {
+        if let Ok(mut input) = self.input.lock() {
+            if input.owner.is_some_and(|(owner, _)| owner == process) {
+                input.owner = None;
+                input.line.clear();
             }
+            input.completed_lines.remove(&process);
+            input.events.remove(&process);
+            input.overflowed.remove(&process);
         }
-        let ready = match mode {
-            InputMode::Line => input.lines.pop_front(),
-            InputMode::Secret => input.secrets.pop_front(),
-        };
-        if let Some(result) = ready {
-            return result.map(Some);
-        }
-        if input.outstanding.is_none() {
-            input.requests.send(mode).map_err(error_text)?;
-            input.outstanding = Some(mode);
-        }
-        Ok(None)
     }
 }
 
 impl ConsoleProvider for LinuxConsole {
+    fn print(&self, text: &str) -> Result<(), String> {
+        let mut output = std::io::stdout().lock();
+        output.write_all(text.as_bytes()).map_err(error_text)?;
+        output.flush().map_err(error_text)
+    }
+
     fn println(&self, text: &str) -> Result<(), String> {
         writeln!(std::io::stdout().lock(), "{text}").map_err(error_text)
     }
 
+    fn size(&self) -> Result<(u16, u16), String> {
+        let output = Command::new("stty")
+            .arg("size")
+            .stdin(Stdio::inherit())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(error_text)?;
+        if !output.status.success() {
+            return Err("could not read terminal size".to_owned());
+        }
+        let values = String::from_utf8(output.stdout).map_err(error_text)?;
+        let mut dimensions = values.split_whitespace();
+        let rows = dimensions
+            .next()
+            .ok_or_else(|| "terminal did not report its row count".to_owned())?
+            .parse::<u16>()
+            .map_err(error_text)?;
+        let columns = dimensions
+            .next()
+            .ok_or_else(|| "terminal did not report its column count".to_owned())?
+            .parse::<u16>()
+            .map_err(error_text)?;
+        Ok((columns, rows))
+    }
+
+    fn is_interactive(&self) -> bool {
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    }
+
     fn try_read_line(&self) -> Result<Option<String>, String> {
-        self.poll_input(InputMode::Line)
+        self.poll_line(ObjectId::new(), InputMode::Line)
+    }
+
+    fn try_read_line_for(&self, process: ObjectId) -> Result<Option<String>, String> {
+        self.poll_line(process, InputMode::Line)
     }
 
     fn try_read_secret(&self) -> Result<Option<String>, String> {
-        self.poll_input(InputMode::Secret)
+        self.poll_line(ObjectId::new(), InputMode::Secret)
+    }
+
+    fn try_read_secret_for(&self, process: ObjectId) -> Result<Option<String>, String> {
+        self.poll_line(process, InputMode::Secret)
+    }
+
+    fn release_process(&self, process: ObjectId) {
+        self.release_process_input(process);
     }
 }
 
-fn read_host_line(mode: InputMode) -> Result<String, String> {
-    let stdin = std::io::stdin();
-    let terminal = stdin.is_terminal();
-    let original = if mode == InputMode::Secret && terminal {
-        let original = tcgetattr(&stdin).map_err(error_text)?;
-        let mut hidden = original.clone();
-        hidden.local_flags.remove(LocalFlags::ECHO);
-        tcsetattr(&stdin, SetArg::TCSANOW, &hidden).map_err(error_text)?;
-        Some(original)
-    } else {
-        None
-    };
-    let mut line = String::new();
-    let read_result = stdin.read_line(&mut line).map_err(error_text);
-    let restore_result = original
-        .as_ref()
-        .map(|settings| tcsetattr(&stdin, SetArg::TCSANOW, settings).map_err(error_text))
-        .transpose();
-    if original.is_some() {
-        writeln!(std::io::stdout().lock()).map_err(error_text)?;
-    }
-    restore_result?;
-    if read_result? == 0 {
-        Err("console input reached EOF".to_owned())
-    } else {
-        while matches!(line.as_bytes().last(), Some(b'\n' | b'\r')) {
-            line.pop();
+impl Drop for LinuxConsole {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+        let _ = self.start_reader.send(());
+        if self.terminal {
+            if let Ok(mut reader) = self.reader.lock() {
+                if let Some(reader) = reader.take() {
+                    let _ = reader.join();
+                }
+            }
         }
-        Ok(line)
+        if let Ok(original) = self.original_termios.lock() {
+            if let Some(original) = original.as_ref() {
+                let _ = tcsetattr(std::io::stdin(), SetArg::TCSANOW, original);
+            }
+        }
+    }
+}
+
+const MAX_KEYBOARD_EVENTS: usize = 4096;
+
+#[derive(Debug, Clone)]
+struct KeyEvent {
+    key: String,
+    text: Option<String>,
+    control: bool,
+    alt: bool,
+    shift: bool,
+}
+
+impl KeyEvent {
+    fn as_value(&self) -> Value {
+        Value::Record(BTreeMap::from([
+            ("key".to_owned(), Value::Text(self.key.clone())),
+            (
+                "text".to_owned(),
+                self.text.clone().map_or(Value::Null, Value::Text),
+            ),
+            ("pressed".to_owned(), Value::Bool(true)),
+            ("ctrl".to_owned(), Value::Bool(self.control)),
+            ("alt".to_owned(), Value::Bool(self.alt)),
+            ("shift".to_owned(), Value::Bool(self.shift)),
+        ]))
+    }
+}
+
+#[derive(Debug)]
+enum PendingInput {
+    Escape {
+        bytes: Vec<u8>,
+        since: std::time::Instant,
+    },
+    Utf8 {
+        bytes: Vec<u8>,
+        expected: usize,
+    },
+}
+
+#[derive(Debug, Default)]
+struct InputParser {
+    pending: Option<PendingInput>,
+}
+
+impl InputParser {
+    fn push(&mut self, byte: u8) -> Vec<KeyEvent> {
+        let Some(pending) = self.pending.take() else {
+            return self.begin(byte);
+        };
+        match pending {
+            PendingInput::Utf8 {
+                mut bytes,
+                expected,
+            } => {
+                if byte & 0xc0 != 0x80 {
+                    let mut events = vec![replacement_event()];
+                    events.extend(self.begin(byte));
+                    return events;
+                }
+                bytes.push(byte);
+                if bytes.len() == expected {
+                    let text = String::from_utf8(bytes).unwrap_or_else(|_| "�".to_owned());
+                    vec![KeyEvent {
+                        key: "text".to_owned(),
+                        text: Some(text),
+                        control: false,
+                        alt: false,
+                        shift: false,
+                    }]
+                } else {
+                    self.pending = Some(PendingInput::Utf8 { bytes, expected });
+                    Vec::new()
+                }
+            }
+            PendingInput::Escape { mut bytes, since } => {
+                bytes.push(byte);
+                if bytes.len() == 2 && !matches!(byte, b'[' | b'O') {
+                    if byte.is_ascii() && !byte.is_ascii_control() {
+                        return vec![KeyEvent {
+                            key: "text".to_owned(),
+                            text: Some(char::from(byte).to_string()),
+                            control: false,
+                            alt: true,
+                            shift: false,
+                        }];
+                    }
+                    return vec![special_event("escape")];
+                }
+                if bytes.len() > 2 && bytes[1] == b'[' && (0x40..=0x7e).contains(&byte) {
+                    return vec![parse_csi(&bytes)];
+                }
+                if bytes.len() == 3 && bytes[1] == b'O' {
+                    return vec![parse_ss3(byte)];
+                }
+                if bytes.len() > 32 {
+                    return vec![special_event("escape")];
+                }
+                self.pending = Some(PendingInput::Escape { bytes, since });
+                Vec::new()
+            }
+        }
+    }
+
+    fn begin(&mut self, byte: u8) -> Vec<KeyEvent> {
+        match byte {
+            0x1b => {
+                self.pending = Some(PendingInput::Escape {
+                    bytes: vec![byte],
+                    since: std::time::Instant::now(),
+                });
+                Vec::new()
+            }
+            0xc2..=0xdf => {
+                self.pending = Some(PendingInput::Utf8 {
+                    bytes: vec![byte],
+                    expected: 2,
+                });
+                Vec::new()
+            }
+            0xe0..=0xef => {
+                self.pending = Some(PendingInput::Utf8 {
+                    bytes: vec![byte],
+                    expected: 3,
+                });
+                Vec::new()
+            }
+            0xf0..=0xf4 => {
+                self.pending = Some(PendingInput::Utf8 {
+                    bytes: vec![byte],
+                    expected: 4,
+                });
+                Vec::new()
+            }
+            0x01..=0x07 | 0x0b..=0x0c | 0x0e..=0x1a => vec![KeyEvent {
+                key: char::from(b'a' + byte - 1).to_string(),
+                text: None,
+                control: true,
+                alt: false,
+                shift: false,
+            }],
+            0x08 | 0x7f => vec![special_event("backspace")],
+            b'\t' => vec![special_event("tab")],
+            b'\r' | b'\n' => vec![special_event("enter")],
+            0x20..=0x7e => vec![plain_event(byte)],
+            _ => Vec::new(),
+        }
+    }
+
+    fn flush_escape_timeout(&mut self, now: std::time::Instant) -> Option<KeyEvent> {
+        let expired = matches!(
+            self.pending,
+            Some(PendingInput::Escape { since, .. })
+                if now.saturating_duration_since(since) >= Duration::from_millis(35)
+        );
+        if expired {
+            self.pending = None;
+            Some(special_event("escape"))
+        } else {
+            None
+        }
+    }
+}
+
+fn plain_event(byte: u8) -> KeyEvent {
+    let text = char::from(byte).to_string();
+    KeyEvent {
+        key: "text".to_owned(),
+        text: Some(text),
+        control: false,
+        alt: false,
+        shift: byte.is_ascii_uppercase(),
+    }
+}
+
+fn replacement_event() -> KeyEvent {
+    KeyEvent {
+        key: "text".to_owned(),
+        text: Some("�".to_owned()),
+        control: false,
+        alt: false,
+        shift: false,
+    }
+}
+
+fn special_event(key: &str) -> KeyEvent {
+    KeyEvent {
+        key: key.to_owned(),
+        text: None,
+        control: false,
+        alt: false,
+        shift: false,
+    }
+}
+
+fn parse_ss3(byte: u8) -> KeyEvent {
+    match byte {
+        b'A' => special_event("arrow_up"),
+        b'B' => special_event("arrow_down"),
+        b'C' => special_event("arrow_right"),
+        b'D' => special_event("arrow_left"),
+        b'H' => special_event("home"),
+        b'F' => special_event("end"),
+        b'P' => special_event("f1"),
+        b'Q' => special_event("f2"),
+        b'R' => special_event("f3"),
+        b'S' => special_event("f4"),
+        _ => special_event("unknown"),
+    }
+}
+
+fn parse_csi(bytes: &[u8]) -> KeyEvent {
+    let Some((&final_byte, parameters)) = bytes.get(2..).and_then(|body| body.split_last()) else {
+        return special_event("unknown");
+    };
+    let parameters = std::str::from_utf8(parameters).unwrap_or_default();
+    let codes = parameters
+        .split(';')
+        .filter_map(|value| value.parse::<u16>().ok())
+        .collect::<Vec<_>>();
+    let modifier = codes.get(1).copied().unwrap_or(1).saturating_sub(1);
+    let shift = modifier & 1 != 0;
+    let alt = modifier & 2 != 0;
+    let control = modifier & 4 != 0;
+    let key = match final_byte {
+        b'A' => "arrow_up",
+        b'B' => "arrow_down",
+        b'C' => "arrow_right",
+        b'D' => "arrow_left",
+        b'H' => "home",
+        b'F' => "end",
+        b'~' => match codes.first().copied().unwrap_or_default() {
+            1 | 7 => "home",
+            2 => "insert",
+            3 => "delete",
+            4 | 8 => "end",
+            5 => "page_up",
+            6 => "page_down",
+            11 => "f1",
+            12 => "f2",
+            13 => "f3",
+            14 => "f4",
+            15 => "f5",
+            17 => "f6",
+            18 => "f7",
+            19 => "f8",
+            20 => "f9",
+            21 => "f10",
+            23 => "f11",
+            24 => "f12",
+            _ => "unknown",
+        },
+        _ => "unknown",
+    };
+    KeyEvent {
+        key: key.to_owned(),
+        text: None,
+        control,
+        alt,
+        shift,
+    }
+}
+
+fn input_reader(
+    input: &Mutex<LinuxInputState>,
+    running: &AtomicBool,
+    terminal: bool,
+    start: &mpsc::Receiver<()>,
+) {
+    let stdin = std::io::stdin();
+    let mut stdin = stdin.lock();
+    let mut parser = InputParser::default();
+    while running.load(Ordering::Acquire) {
+        match start.recv_timeout(Duration::from_millis(100)) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if !running.load(Ordering::Acquire) {
+            break;
+        }
+        let mut byte = [0_u8; 1];
+        loop {
+            if !running.load(Ordering::Acquire) {
+                break;
+            }
+            let has_owner = input
+                .lock()
+                .map(|state| state.owner.is_some())
+                .unwrap_or(false);
+            if !has_owner {
+                parser.pending = None;
+                break;
+            }
+            match stdin.read(&mut byte) {
+                Ok(0) if terminal => {
+                    if let Some(event) = parser.flush_escape_timeout(std::time::Instant::now()) {
+                        dispatch_event(input, event, terminal);
+                    }
+                    std::thread::yield_now();
+                }
+                Ok(0) => {
+                    if let Ok(mut state) = input.lock() {
+                        state.eof = true;
+                    }
+                    break;
+                }
+                Ok(1) => {
+                    for event in parser.push(byte[0]) {
+                        dispatch_event(input, event, terminal);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    if let Ok(mut state) = input.lock() {
+                        state.reader_error = Some(error.to_string());
+                    }
+                    break;
+                }
+                Ok(_) => unreachable!("one-byte input buffer has a maximum length of one"),
+            }
+        }
+    }
+}
+
+fn dispatch_event(input: &Mutex<LinuxInputState>, event: KeyEvent, terminal: bool) {
+    let Ok(mut state) = input.lock() else {
+        return;
+    };
+    let Some((process, mode)) = state.owner else {
+        return;
+    };
+    if mode == InputMode::Keyboard {
+        let queue = state.events.entry(process).or_default();
+        if queue.len() >= MAX_KEYBOARD_EVENTS {
+            state.overflowed.insert(process);
+        } else {
+            queue.push_back(event.as_value());
+        }
+        return;
+    }
+    match event.key.as_str() {
+        "enter" => {
+            let line = std::mem::take(&mut state.line);
+            state.completed_lines.insert(process, Ok(line));
+            state.owner = None;
+            if terminal {
+                let _ = writeln!(std::io::stdout().lock());
+            }
+        }
+        "backspace" => {
+            if state.line.pop().is_some() && mode == InputMode::Line && terminal {
+                let mut stdout = std::io::stdout().lock();
+                let _ = stdout.write_all(b"\x08 \x08");
+                let _ = stdout.flush();
+            }
+        }
+        _ if event.control && event.key == "c" => {
+            state
+                .completed_lines
+                .insert(process, Err("console input interrupted".to_owned()));
+            state.line.clear();
+            state.owner = None;
+            if mode == InputMode::Line && terminal {
+                let _ = writeln!(std::io::stdout().lock());
+            }
+        }
+        _ => {
+            if let Some(text) = event.text {
+                state.line.push_str(&text);
+                if mode == InputMode::Line && terminal {
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = stdout.write_all(text.as_bytes());
+                    let _ = stdout.flush();
+                }
+            }
+        }
     }
 }
 
@@ -1032,6 +1568,38 @@ impl<P: ObjectProvider> ObjectProvider for CachedProvider<P> {
             .map_err(|_| ProviderError::Unavailable)?
             .insert(effect, outcome.clone());
         Ok(outcome)
+    }
+
+    fn invoke_for_process(
+        &self,
+        process: ObjectId,
+        object: ObjectId,
+        state: &Value,
+        capability: &str,
+        arguments: &[Value],
+        effect: ObjectId,
+    ) -> Result<ProviderOutcome, ProviderError> {
+        if let Some(outcome) = self
+            .completed
+            .lock()
+            .map_err(|_| ProviderError::Unavailable)?
+            .get(&effect)
+            .cloned()
+        {
+            return Ok(outcome);
+        }
+        let outcome = self
+            .inner
+            .invoke_for_process(process, object, state, capability, arguments, effect)?;
+        self.completed
+            .lock()
+            .map_err(|_| ProviderError::Unavailable)?
+            .insert(effect, outcome.clone());
+        Ok(outcome)
+    }
+
+    fn process_ended(&self, process: ObjectId) {
+        self.inner.process_ended(process);
     }
 
     fn capabilities(&self) -> BTreeSet<String> {
@@ -1102,7 +1670,9 @@ impl ObjectProvider for HostDisplayProvider {
 }
 
 #[derive(Debug)]
-struct HostKeyboardProvider;
+struct HostKeyboardProvider {
+    terminal: Arc<LinuxConsole>,
+}
 
 impl ObjectProvider for HostKeyboardProvider {
     fn type_id(&self) -> oms_types::TypeId {
@@ -1120,38 +1690,69 @@ impl ObjectProvider for HostKeyboardProvider {
         _object: ObjectId,
         _state: &Value,
         capability: &str,
+        _arguments: &[Value],
+        _effect: ObjectId,
+    ) -> Result<ProviderOutcome, ProviderError> {
+        Err(ProviderError::Adapter(format!(
+            "keyboard.{capability} requires a Process input lease"
+        )))
+    }
+
+    fn invoke_for_process(
+        &self,
+        process: ObjectId,
+        _object: ObjectId,
+        _state: &Value,
+        capability: &str,
         arguments: &[Value],
         _effect: ObjectId,
     ) -> Result<ProviderOutcome, ProviderError> {
-        if capability != "next_event" || !arguments.is_empty() {
-            return Err(ProviderError::UnsupportedCapability(capability.to_owned()));
+        match (capability, arguments) {
+            ("capture", []) => {
+                self.terminal.capture_keyboard(process)?;
+                Ok(ProviderOutcome::result(Value::Null))
+            }
+            ("release", []) => {
+                self.terminal.release_keyboard(process)?;
+                Ok(ProviderOutcome::result(Value::Null))
+            }
+            ("next_event", []) => self
+                .terminal
+                .take_key_event(process)?
+                .map(ProviderOutcome::result)
+                .ok_or(ProviderError::Pending),
+            ("poll_event", []) => Ok(ProviderOutcome::result(
+                self.terminal
+                    .take_key_event(process)?
+                    .unwrap_or(Value::Null),
+            )),
+            _ => Err(ProviderError::UnsupportedCapability(capability.to_owned())),
         }
-        let mut event = String::new();
-        std::io::stdin()
-            .read_line(&mut event)
-            .map_err(adapter_error)?;
-        while matches!(event.as_bytes().last(), Some(b'\n' | b'\r')) {
-            event.pop();
-        }
-        Ok(ProviderOutcome::result(Value::Text(event)))
+    }
+
+    fn process_ended(&self, process: ObjectId) {
+        self.terminal.release_process_input(process);
     }
 
     fn capabilities(&self) -> BTreeSet<String> {
-        ["next_event".to_owned()].into_iter().collect()
+        ["capture", "release", "next_event", "poll_event"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     }
 }
 
 #[derive(Debug)]
-struct HostClockSensorProvider;
+struct HostResolverProvider;
 
-impl ObjectProvider for HostClockSensorProvider {
+impl ObjectProvider for HostResolverProvider {
     fn type_id(&self) -> oms_types::TypeId {
-        DEVICE_SENSOR_TYPE
+        NET_RESOLVER_TYPE
     }
 
     fn create(&self, _initial: &Value) -> Result<Value, ProviderError> {
         Err(ProviderError::InvalidArguments(
-            "Sensor Objects are published by hardware discovery",
+            "Resolver Objects are published by hardware discovery",
         ))
     }
 
@@ -1163,28 +1764,26 @@ impl ObjectProvider for HostClockSensorProvider {
         arguments: &[Value],
         _effect: ObjectId,
     ) -> Result<ProviderOutcome, ProviderError> {
-        match (capability, arguments) {
-            ("sample", []) => {
-                let millis = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|error| ProviderError::Adapter(error.to_string()))?
-                    .as_millis();
-                Ok(ProviderOutcome::result(Value::Integer(
-                    i64::try_from(millis).map_err(|_| {
-                        ProviderError::Adapter("clock value is too large".to_owned())
-                    })?,
-                )))
-            }
-            ("calibrate", []) => Ok(ProviderOutcome::result(Value::Null)),
-            _ => Err(ProviderError::UnsupportedCapability(capability.to_owned())),
+        let ("resolve", [Value::Text(hostname)]) = (capability, arguments) else {
+            return Err(ProviderError::UnsupportedCapability(capability.to_owned()));
+        };
+        let mut addresses = (hostname.as_str(), 0)
+            .to_socket_addrs()
+            .map_err(adapter_error)?
+            .map(|address| Value::Text(address.ip().to_string()))
+            .collect::<Vec<_>>();
+        addresses.sort_by_key(ToString::to_string);
+        addresses.dedup();
+        if addresses.is_empty() {
+            return Err(ProviderError::Adapter(
+                "hostname resolved to no addresses".to_owned(),
+            ));
         }
+        Ok(ProviderOutcome::result(Value::Array(addresses)))
     }
 
     fn capabilities(&self) -> BTreeSet<String> {
-        ["sample", "calibrate"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        ["resolve".to_owned()].into_iter().collect()
     }
 }
 
@@ -1528,9 +2127,7 @@ fn run_hosted_process(
         let report = vm.run(process, remaining).map_err(error_text)?;
         total = total.saturating_add(report.steps);
         output.extend(report.output);
-        if report.status != ProcessStatus::Suspended
-            || !vm.poll_pending_effect(process).map_err(error_text)?
-        {
+        if report.status != ProcessStatus::Suspended {
             return Ok(RunReport {
                 process,
                 steps: total,
@@ -1538,7 +2135,21 @@ fn run_hosted_process(
                 output,
             });
         }
-        std::thread::sleep(Duration::from_millis(1));
+        if vm.poll_pending_effect(process).map_err(error_text)? {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        if let Some(delay) = vm.time_until_wake(process).map_err(error_text)? {
+            std::thread::sleep(delay);
+            let _ = vm.wake_due_timer(process).map_err(error_text)?;
+            continue;
+        }
+        return Ok(RunReport {
+            process,
+            steps: total,
+            status: report.status,
+            output,
+        });
     }
 }
 
@@ -1591,6 +2202,87 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn detached_terminal_input() -> (LinuxConsole, mpsc::Receiver<()>) {
+        let (start_reader, receiver) = mpsc::channel();
+        (
+            LinuxConsole {
+                input: Arc::new(Mutex::new(LinuxInputState {
+                    owner: None,
+                    line: String::new(),
+                    completed_lines: BTreeMap::new(),
+                    events: BTreeMap::new(),
+                    overflowed: BTreeSet::new(),
+                    eof: false,
+                    reader_error: None,
+                })),
+                running: Arc::new(AtomicBool::new(false)),
+                start_reader,
+                reader: Mutex::new(None),
+                original_termios: Mutex::new(None),
+                terminal: false,
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn console_lines_and_keyboard_capture_share_exclusive_process_lease() {
+        let (terminal, _reader) = detached_terminal_input();
+        let line_process = ObjectId::new();
+        let keyboard_process = ObjectId::new();
+        assert_eq!(terminal.poll_line(line_process, InputMode::Line), Ok(None));
+        assert_eq!(
+            terminal.capture_keyboard(keyboard_process),
+            Err(ProviderError::Pending)
+        );
+
+        terminal.release_process_input(line_process);
+        terminal.capture_keyboard(keyboard_process).unwrap();
+        assert_eq!(terminal.poll_line(line_process, InputMode::Line), Ok(None));
+        terminal.release_process_input(keyboard_process);
+        assert_eq!(
+            terminal.input.lock().unwrap().owner,
+            None,
+            "a dead Process must release terminal input"
+        );
+    }
+
+    #[test]
+    fn terminal_parser_decodes_text_arrows_modifiers_and_function_keys() {
+        let mut parser = InputParser::default();
+        let mut events = Vec::new();
+        for byte in "你".as_bytes() {
+            events.extend(parser.push(*byte));
+        }
+        assert_eq!(events[0].text.as_deref(), Some("你"));
+
+        let mut events = Vec::new();
+        for byte in b"\x1b[1;5A" {
+            events.extend(parser.push(*byte));
+        }
+        assert_eq!(events[0].key, "arrow_up");
+        assert!(events[0].control);
+
+        let mut events = Vec::new();
+        for byte in b"\x1b[24~" {
+            events.extend(parser.push(*byte));
+        }
+        assert_eq!(events[0].key, "f12");
+    }
+
+    #[test]
+    fn standalone_escape_is_reported_after_the_sequence_timeout() {
+        let mut parser = InputParser::default();
+        assert!(parser.push(0x1b).is_empty());
+        assert_eq!(
+            parser
+                .flush_escape_timeout(std::time::Instant::now() + Duration::from_secs(1))
+                .unwrap()
+                .key,
+            "escape"
+        );
+    }
 
     #[test]
     fn host_network_provider_connects_sends_receives_and_closes() {

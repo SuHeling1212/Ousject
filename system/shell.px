@@ -1,19 +1,165 @@
 console = object.find("console")
 compiler = object.find("compiler")
+types = object.find("types")
+authentication = object.find("authentication")
+current_user = authentication.current_user()
+prompt = current_user["name"] + ">"
+context = {}
 
 running = true
 while running {
-    console.println("px>")
+    console.print(prompt + " ")
     source = console.read_line()
+
     if source == "exit" {
         running = false
+    } else if source == "objects" {
+        type_list = types.types()
+        type_index = 0
+        while type_index < #type_list {
+            type_name = type_list[type_index]["name"]
+            available = object.query(type_name)
+            if #available > 0 {
+                console.println(type_name)
+                object_index = 0
+                while object_index < #available {
+                    available_object = object.find(available[object_index])
+                    console.println(available_object.inspect)
+                    console.println(available_object.capabilities)
+                    object_index++
+                }
+            }
+            type_index++
+        }
     } else {
+        round_depth = 0
+        curly_depth = 0
+        square_depth = 0
+        scan_line = source
+        scan_index = 0
+        in_string = false
+        escaped = false
+        in_comment = false
+        continue_slash = #scan_line > 0 and scan_line[#scan_line - 1] == "\\"
+
+        while scan_index < #scan_line {
+            character = scan_line[scan_index]
+            if in_comment {
+                scan_index++
+            } else if in_string {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    in_string = false
+                }
+                scan_index++
+            } else if character == "/" and scan_index + 1 < #scan_line and scan_line[scan_index + 1] == "/" {
+                in_comment = true
+                scan_index++
+            } else if character == "\"" {
+                in_string = true
+                scan_index++
+            } else {
+                if character == "(" {
+                    round_depth++
+                } else if character == ")" {
+                    round_depth--
+                } else if character == "{" {
+                    curly_depth++
+                } else if character == "}" {
+                    curly_depth--
+                } else if character == "[" {
+                    square_depth++
+                } else if character == "]" {
+                    square_depth--
+                }
+                scan_index++
+            }
+        }
+
+        if #source > 0 and source[#source - 1] == "\\" {
+            without_slash = ""
+            copy_index = 0
+            while copy_index < #source - 1 {
+                without_slash = without_slash + source[copy_index]
+                copy_index++
+            }
+            source = without_slash
+        }
+
+        while (round_depth > 0 or curly_depth > 0 or square_depth > 0) or continue_slash {
+            console.print("... ")
+            continuation = console.read_line()
+            explicit_join = #continuation > 0 and continuation[#continuation - 1] == "\\"
+            if explicit_join {
+                without_slash = ""
+                copy_index = 0
+                while copy_index < #continuation - 1 {
+                    without_slash = without_slash + continuation[copy_index]
+                    copy_index++
+                }
+                continuation = without_slash
+            }
+            join_previous = continue_slash
+            continue_slash = explicit_join
+            if join_previous {
+                source = source + continuation
+            } else {
+                source = source + "\n" + continuation
+            }
+
+            scan_line = continuation
+            scan_index = 0
+            in_string = false
+            escaped = false
+            in_comment = false
+            while scan_index < #scan_line {
+                character = scan_line[scan_index]
+                if in_comment {
+                    scan_index++
+                } else if in_string {
+                    if escaped {
+                        escaped = false
+                    } else if character == "\\" {
+                        escaped = true
+                    } else if character == "\"" {
+                        in_string = false
+                    }
+                    scan_index++
+                } else if character == "/" and scan_index + 1 < #scan_line and scan_line[scan_index + 1] == "/" {
+                    in_comment = true
+                    scan_index++
+                } else if character == "\"" {
+                    in_string = true
+                    scan_index++
+                } else {
+                    if character == "(" {
+                        round_depth++
+                    } else if character == ")" {
+                        round_depth--
+                    } else if character == "{" {
+                        curly_depth++
+                    } else if character == "}" {
+                        curly_depth--
+                    } else if character == "[" {
+                        square_depth++
+                    } else if character == "]" {
+                        square_depth--
+                    }
+                    scan_index++
+                }
+            }
+        }
+
         try {
             program_id = compiler.compile(source)
             program = object.find(program_id)
-            process_id = program.execute()
+            process_id = program.execute(context)
             process = object.find(process_id)
             process.wait()
+            context = process.bindings()
         } catch (error) {
             console.println(error)
         }

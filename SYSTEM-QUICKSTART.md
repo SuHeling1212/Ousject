@@ -14,10 +14,10 @@
 当前宿主提供的底层能力包括：
 
 - 启动 `ousject` 应用程序；
-- 发现终端、时钟和块设备适配端点并发布为共享 Device Object；
+- 发现 Console、终端显示/键盘、DNS Resolver 和块存储适配端点；时间通过 `core.time` 服务提供，而不是伪装成 Device；
 - 提供 TCP Socket 的 Network Provider；
 - 通过 `FileSnapshotBackend` 提供文件 I/O 和持久化；
-- 提供时钟，以及 Rust 标准库所依赖的内存分配和同步机制。
+- 提供宿主时钟，以及 Rust 标准库所依赖的内存分配和同步机制。
 
 Praxis、TF、Token VM、Process、Value Object、Scheduler、OMS、权限和原子提交全部由 Ousject 自己定义。持久层通过 `SnapshotBackend` 隔离。Console 必须由硬件适配器发现并注册；单有持久化对象不能执行打印能力。
 
@@ -146,15 +146,15 @@ note = object.create("core.value", 42)
 aaa = object.find("console")
 aaa.println(x + 1)
 aaa.println(note + 1)
-aaa.println(object.type(x))
-aaa.println(object.type(note))
+aaa.println(x.type)
+aaa.println(note.type)
 aaa.println("hello from console")
-object.retire(note)
+note.retire()
 ```
 
-完整示例：`./scripts/ousject run examples/objects.px`。两种赋值都会让变量名绑定一个持久 Object，普通表达式自动读取其 Value。`object.id(x)` 显式取得对象 ID；`b = x` 复制值并创建独立对象，不建立 Link。对象先通过 `object.create/find/query` 创建或发现并绑定名字，之后用 `名字.能力(...)` 调用。上例中 `aaa` 绑定 Console Object，`aaa.println(...)` 调用它的打印能力。
+完整示例：`./scripts/ousject run examples/objects.px`。两种赋值都会让变量名绑定一个持久 Object，普通表达式自动读取其 Value。`x.id` 显式取得对象 ID；`b = x` 复制值并创建独立对象，不建立 Link。对象先通过 `object.create/find/query` 创建或发现并绑定名字，之后读取 `名字.属性` 或调用 `名字.能力(...)`。
 
-`object.retire(note)` 也可以写成 `note.retire()`。它会原子退役该 Object 及其子 Object，同时移除所有变量别名和显式 Link；ObjectId 的 Tombstone 保留且永不复用。事务失败时什么都不会改变。
+`note.retire()` 会原子退役该 Object 及其子 Object，同时移除所有变量别名和显式 Link；ObjectId 的 Tombstone 保留且永不复用。事务失败时什么都不会改变。
 
 ### 5.2 Praxis 语法
 
@@ -266,7 +266,7 @@ func worker() {
 
 child = object.create("core.process", {
     entry: "worker",
-    links: { channel: object.id(channel) }
+    links: { channel: channel.id }
 })
 child.start()
 child.wait()
@@ -300,7 +300,7 @@ authentication.logout(session["token"])
 ./scripts/ousject object-revoke <OBJECT_ID> <SUBJECT_ID> view_value --local
 ```
 
-Praxis 内的授权代码也可使用 `object.grant(...)` 和 `object.revoke(...)`；OMS 以 Process 持久 Subject 执行所有访问检查。
+Praxis 内的授权代码使用 `item.grant(...)` 和 `item.revoke(...)`；OMS 以 Process 持久 Subject 执行所有访问检查。
 
 ---
 

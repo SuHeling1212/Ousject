@@ -1,6 +1,6 @@
 # Praxis 实现状态（0.0.0 / OTF0）
 
-本表只把“能编译、能由 VM 执行并有测试”的功能标为已实现。
+本表只把“已进入 VM 执行路径”的语法/能力标为已实现；自动化测试覆盖范围以测试代码为准。
 
 | 类别 | 已实现语法/能力 | 语义 |
 |---|---|---|
@@ -21,29 +21,37 @@
 
 ```text
 object.create  object.find    object.query
-object.id      object.type    object.parent
-object.status  object.inspect object.capabilities
-object.value   object.replace object.children
-object.links   object.link    object.unlink
-object.grant   object.revoke  object.retire
+name.id        name.type      name.parent
+name.status    name.inspect   name.capabilities
+name.owner     name.version   name.permissions
+name.value     name.replace   name.children
+name.links     name.link      name.unlink
+name.grant     name.revoke    name.retire
 ```
 
-先创建/发现对象并绑定名字，再调用 `name.capability(...)`。旧 `objects.*`、`io.println`、`new` 和隐式打印均被拒绝。
+`object` 只负责创建、发现和查询。获得对象后读取 `name.property` 或调用 `name.capability(...)`。旧 `object.value(name)`、`objects.*`、`io.println`、`new` 和隐式打印均被拒绝。
 
 | Object | 已实现领域能力 |
 |---|---|
-| `core.console` | `println`、`read_line`；旧 `print` 已删除 |
+| `core.console` | `print`（不换行）、`println`、`read_line`、`read_secret`、`size`、`is_interactive` |
+| `core.time` | `now`（Unix 毫秒）、`monotonic`（启动后毫秒）、`sleep`（持久化定时挂起，不阻塞 VM 工作线程） |
+| `core.math` | 数学函数、`random`、`random_integer(min, max)`；另有 `pi/e` |
+| `core.value` / `core.text` | `slice`、`find`、`contains`、`split`、`replace_all`、`trim`、`lower`、`upper` |
+| `net.resolver` | `resolve(hostname)`，返回系统 DNS 解析出的地址数组 |
 | 用户 Class | 源码定义的 public 方法 |
 | `core.program` | `execute()`、`execute(entry)` |
-| `core.process` | `start`、`wait`、`suspend`、`resume`、`terminate` |
-| `core.collection` | `get`、`set`、`insert`、`remove`、`length` |
+| `core.process` | `start`、`wait`、`suspend`、`resume`、`terminate`、`bindings`；并公开 `result`、`error`、运行状态和变量 |
+| `core.collection` | 没有集合专属能力；Array/Map 用索引读写、`#` 取长度，整体更新用通用赋值/`replace` |
 | `core.namespace` | `bind`、`resolve`、`unbind` |
-| `core.channel` | `send`、`receive`、`wait`、`length` |
+| `core.channel` | `send`、`receive`、`wait`；长度使用 `#channel` |
 | `net.endpoint` | `connect`、`listen`、`accept`、`send`、`receive`、`close` |
 | `device.display` | `present`、`configure` |
-| `device.keyboard` | `next_event` |
-| `device.sensor` | `sample`、`calibrate`（当前为时钟） |
-| `device.block_storage` | `load_block`、`store_block` |
+| `device.keyboard` | `capture`、`release`、`next_event`、`poll_event`；结构化按键事件，与 Console 共用独占输入源 |
+| `device.block_storage` | 内核/驱动专用，不授予普通 Praxis Process |
+
+内核调度器不再作为 Praxis 的 `scheduler` 对象暴露；程序通过 `object.query("core.process")` 发现 Process，并调用 Process 自身的 `suspend/resume/terminate`。已结束 Process 保留七天后自动退役。
+
+`core.collection` 的值可以是 Array 或 Map。它们与变量使用同一套值操作：`items[i]` 读取、`items[i] = value` 写入、`#items` 取长度；数组改变长度时用通用 `items.replace([...])` 整体替换。没有 `get/set/length/insert/remove` 集合专属 API。
 
 ## Process 与通信
 

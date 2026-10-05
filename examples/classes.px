@@ -15,4 +15,4 @@ class Counter {
 
 counter = object.create("Counter", { value: twice(5) })
 console.println(counter.add(2))
-console.println(object.type(counter))
+console.println(counter.type)

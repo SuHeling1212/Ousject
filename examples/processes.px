@@ -11,7 +11,7 @@ console = object.find("console")
 channel = object.create("Channel", {})
 child = object.create("core.process", {
     entry: "worker",
-    links: { channel: object.id(channel) }
+    links: { channel: channel.id }
 })
 
 child.start()

@@ -1,6 +1,6 @@
 # Ousject 0.0.0 已实现功能
 
-本文只列已经运行并有测试覆盖的功能。宿主边界见 [PRE-HOST-ACCEPTANCE.md](./PRE-HOST-ACCEPTANCE.md)，性能工作见 [PERFORMANCE-PLAN.md](./PERFORMANCE-PLAN.md)。
+本文列出已经进入 VM 或 Provider 执行路径的功能；自动化测试的具体覆盖范围以测试代码为准。退役对象的 7 天自动清理和元数据保留规则见 [GARBAGE-COLLECTION.md](./GARBAGE-COLLECTION.md)。宿主边界见 [PRE-HOST-ACCEPTANCE.md](./PRE-HOST-ACCEPTANCE.md)，性能工作见 [PERFORMANCE-PLAN.md](./PERFORMANCE-PLAN.md)。
 
 ## 执行链与 Praxis
 
@@ -10,6 +10,7 @@ Praxis → Compiler → OTF0 → Program Object → Process Object / VM → OMS 
 
 - 标量、UTF-8 Text、Array、Map、Record、Error。
 - 算术、比较、短路布尔、长度、索引读写与后缀增减。
+- 可发现的 `core.math` Object：`abs/min/max/clamp`、`sqrt/pow`、`floor/ceil/round/trunc`、三角函数、`atan2`、`hypot`、对数与指数、`random/random_integer`，以及 `pi/e`。
 - `if/else if/else`、`while`、`break/continue`。
 - `func/return`、持久调用帧、`try/catch`。
 - Class 字段/方法、`this`、public/private、单继承、`super.method`、按参数数量重载。
@@ -17,34 +18,80 @@ Praxis → Compiler → OTF0 → Program Object → Process Object / VM → OMS 
 - `import/include`、显式 `link`、显式多 Object `transaction {}`。
 - 普通赋值复制 Value；只有 `link` 显式共享 Object 身份。
 
+数学能力通过 Object 发现和调用：
+
+```praxis
+math = object.find("math")
+radius = math.sqrt(25)
+angle = math.atan2(1, 0)
+console = object.find("console")
+console.println(math.pi)
+```
+
+数学函数只接受有限的整数或浮点数；非法定义域和非有限结果会返回错误。浮点型的舍入函数返回浮点数，整数输入保持整数；`round` 的中点按远离零的方向舍入。
+
+## 常用 API
+
+这些是日常程序最常直接调用的 API：
+
+| 对象 | 能力 | 用途 |
+|---|---|---|
+| `console` | `print`、`println`、`read_line`、`read_secret`、`size`、`is_interactive` | 输出、读取输入、获取终端尺寸和交互状态 |
+| `time` | `now`、`monotonic`、`sleep` | Unix 毫秒时间、单调运行时间、按毫秒等待 |
+| `math` | 数学函数、`random`、`random_integer` | 数值计算和随机数；整数随机范围含两端 |
+| Text Value | `slice`、`find`、`contains`、`split`、`replace_all`、`trim`、`lower`、`upper` | 直接处理文本；`slice` 的位置按 Unicode 字符计 |
+| `resolver` | `resolve` | 使用宿主 DNS 配置把主机名解析为 IP 地址数组 |
+
+```praxis
+console = object.find("console")
+time = object.find("time")
+math = object.find("math")
+resolver = object.find("resolver")
+
+console.println("hello")
+terminal = console.size() // { columns: ..., rows: ... }
+started_ms = time.monotonic()
+random_number = math.random()
+random_dice = math.random_integer(1, 6)
+clean_name = "  Praxis  ".trim().lower()
+addresses = resolver.resolve("example.com")
+```
+
+`time.sleep(milliseconds)` 会持久保存唤醒时间并挂起当前 Process，不会阻塞 VM 工作线程。`console.size()` 在没有可查询的终端尺寸时返回错误；`is_interactive()` 可用于判断当前终端是否支持交互输入/输出。
+
 ## 统一 Object 系统
 
 基础 API：
 
 ```text
 object.create  object.find    object.query
-object.id      object.type    object.parent
-object.status  object.inspect object.capabilities
-object.value   object.replace object.children
-object.links   object.link    object.unlink
-object.grant   object.revoke  object.retire
+name.id        name.type      name.parent
+name.status    name.inspect   name.capabilities
+name.owner     name.version   name.permissions
+name.value     name.replace   name.children
+name.links     name.link      name.unlink
+name.grant     name.revoke    name.retire
 ```
+
+`object` 只负责创建、发现和查询。Process 可通过 `process.value` 查看完整的可读运行状态，通过 `process.variables` 查看变量值，并用 `process.x` 直接读取变量 `x`。系统程序需要传递原始变量绑定时使用 `process.bindings()`。
 
 - 内置与持久动态 Type Descriptor；Schema、创建策略、基础权限和领域能力校验。
 - `core.namespace` 的 `bind/resolve/unbind`，命名任意 Object，不需要核心 File 类型。
-- `core.collection` 的 `get/set/insert/remove/length`。
+- `core.collection` 可保存 Array 或 Map，但不提供集合专属 API；索引读写、长度和整体替换与普通变量一致。
 - `core.program.execute([entry])` 创建 Process。
-- `core.process` 的 `start/wait/suspend/resume/terminate`。
-- `core.channel` 的 `send/receive/wait/length`；消息、挂起和唤醒原子提交。
+- `core.process` 的 `start/wait/suspend/resume/terminate/bindings`，以及可读运行属性、变量、`result` 和 `error`。`wait()` 返回最终状态；子 Process 失败时得到 `"failed"`，错误内容可从 `process.error` 读取。
+- `core.channel` 的 `send/receive/wait`；消息长度用 `#channel`；消息、挂起和唤醒原子提交。
 - `retire` 原子清理对象树、变量别名和显式 Link，并留下不可复用 Tombstone。
 
 ## Provider 与设备
 
 - 通用 `ObjectProvider` 注册与能力分发。
 - `core.effect` 先持久记录请求，再执行 Provider，再原子记录结果和推进 Process。
-- Console `println/read_line`；无输入时仅挂起调用 Process，并以同一持久 Effect 轮询恢复。旧 `print` 已删除。
-- Display `present/configure`、Keyboard `next_event`、Clock Sensor `sample/calibrate`。
-- Block Storage `load_block/store_block`，固定 4096 字节并在确认前同步。
+- Console `print/println/read_line/read_secret/size/is_interactive`；`print` 不添加换行，适合提示符；无输入时仅挂起调用 Process，并以同一持久 Effect 轮询恢复。
+- `core.time` 的 `now/monotonic/sleep`；sleep 记录持久化唤醒时间并挂起 Process，不阻塞 VM 工作线程。
+- Display `present/configure`；Keyboard `capture/release/next_event/poll_event` 返回结构化文本、方向键、功能键和修饰键事件。Console 按行/秘密输入和 Keyboard 共用单一、互斥的终端输入源。
+- Block Storage `load_block/store_block` 仅保留为内核/驱动层接口，不再授予普通 Praxis 用户。
+- 结束的 Process 及其结果保留七天后由内核自动退役；随后对象内容按墓碑的七天策略清理，Program 不会因 Process 结束而被删除。
 - 物理设备由启动时发现并发布；普通 Praxis 不能伪造 Provider-only Object。
 
 Console/Display/Network 等外部世界无法仅靠本地事务保证跨整机崩溃 exactly-once。Effect 意图不会丢；同一启动内重试复用 EffectId。重启后无远端幂等协议的操作采用 at-least-once，可能重复。
@@ -72,11 +119,13 @@ Console/Display/Network 等外部世界无法仅靠本地事务保证跨整机�
 - 每 64 次提交批量生成原子 Checkpoint，减少每次提交重复写快照和同步目录；Checkpoint 失败时仍从 WAL 恢复。
 - `commit_batch` 让多个事务共享一次持久写入/flush；批内任一失败则全部不发布。
 - WAL 增量可逐记录做可逆 RLE 压缩；外层长度与校验和覆盖压缩数据，翻转字节会拒绝恢复。
+- 退役时间随 OMS 状态原子持久化；后台内核服务在满 7 天后回收 Tombstone 内容，永久保留 ObjectId、TypeId、所有者、最终版本、退役状态和退役时间。没有新增手动清理命令。
+- 到期清理以完整快照和校验代际清单原子切换；崩溃恢复只能看到清理前或清理后的完整状态。旧格式 Tombstone 首次打开时从升级时开始计算 7 天，并安全持久化迁移时间。
 - 普通事务只对参与 Shard 获取写锁，其他 Shard 保持一致读锁；退役/重挂因涉及旧 Parent 仍保守写锁全部。
 - VM 按 Program Object 版本缓存已验证/解码的 TF，版本变化自动失效。
 - 同一 Store 单写者锁；干净退出释放，Linux 宿主可识别并回收死进程遗留锁。
 - 恢复时验证 Parent/Child、Type 索引、动态 Type Descriptor 和格式完整性。
-- Tombstone 当前保留原始状态，不做有损回收。
+- Tombstone 内容满 7 天后自动回收，最小元数据和 ObjectId 永久保留；未决 Effect 不会被回收。
 
 ## 内核对象与 Praxis 用户空间
 
