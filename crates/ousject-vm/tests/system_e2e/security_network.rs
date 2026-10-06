@@ -27,7 +27,7 @@ item = "fresh"
     .unwrap();
     let process = vm.create_process(&program).unwrap();
     while vm.process_state(process).unwrap().token_position != retire_position {
-        assert_eq!(vm.run(process, 1).unwrap().status, ProcessStatus::Running);
+        assert_eq!(vm.run(process, 1).unwrap().status, ProcessStatus::Ready);
     }
     let before = vm.process_state(process).unwrap();
     let old_item = before.variables["item"];
@@ -248,12 +248,12 @@ fn shared_channel_atomically_wakes_a_waiter_owned_by_another_subject() {
 
     assert_eq!(
         vm.run(receiver, 100).unwrap().status,
-        ProcessStatus::Suspended
+        ProcessStatus::Waiting
     );
     assert_eq!(vm.run(sender, 100).unwrap().status, ProcessStatus::Halted);
     assert_eq!(
         vm.process_state(receiver).unwrap().status,
-        ProcessStatus::Running
+        ProcessStatus::Ready
     );
     assert_eq!(vm.run(receiver, 100).unwrap().status, ProcessStatus::Halted);
     assert_eq!(

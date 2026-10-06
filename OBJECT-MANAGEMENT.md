@@ -995,3 +995,16 @@ Notify / Reclaim Old Version
 > **统一身份、分片管理、无锁读取、事务修改、持久化先于可见性。**
 
 OMS 统一管理所有 Object，但不会把整个系统压缩成一个中央瓶颈。统一的是 Object 语义、事务边界与恢复规则；具体执行通过 Shard、Per-Core Cache、不可变版本、Copy-on-Write 和 Group Commit 并行完成。
+
+## Hosted Core 当前新增对象
+
+当前实现另注册了 `core.swap_pool`、`core.timer`、`core.audit` 和 `core.audit_event`。它们都使用普通 OMS Object、Version、Link、Capability、事务和 WAL；没有地址映射或第二套共享状态系统。
+
+- SwapPool membership 是 pool 上的 `member:<name>` Link。Attach/detach 不改变 member Object 的 Parent、ObjectId 或生命周期。对 member 的读取/修改仍先检查该 Object 的 Capability，并用其 ObjectVersion 做冲突检测。
+- Timer 的状态和 deadline 持久化。到期状态、等待登记、Process WaitReason 和唤醒在一个 OMS Transaction 中修改；提交失败后 Timer 仍为 Armed，恢复可重试。
+- Channel 消息、收发、等待登记和 Process 状态都是同一组普通 Object 事务。单消息最多 1 MiB，队列最多 1024 条/8 MiB。
+- Process 执行片的 Process Object 与写入 Object 一起提交。Worker lease 的 owner/generation/deadline 持久保存，恢复会推进 generation，旧 Worker 后续写回将因版本/代次不一致而失败。
+- Effect 意图先于外部调用持久化。`manual` 中断恢复为 `unknown`；`retry_idempotent` 使用相同 Effect ID 恢复。OMS 本地提交无法单独保证远端服务 exactly-once。
+- Audit root 和事件对象只由内核写入，事件创建和被审计动作位于同一 OMS Transaction。事件详情不超过 4 KiB；当前没有普通 Subject 可用的全局 Audit 读取 API。
+
+以上实现依赖当前 FileSnapshotBackend 的成功持久写入，不扩展为断电缓存、远端 exactly-once 或宿主硬件可靠性承诺。

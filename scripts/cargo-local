@@ -4,12 +4,16 @@ set -eu
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tool_root="$project_root/.tools/rust/usr"
 
-if [ ! -x "$tool_root/bin/cargo" ]; then
-    echo "local Rust toolchain not found at $tool_root" >&2
-    exit 1
+if [ -x "$tool_root/bin/cargo" ]; then
+    export PATH="$tool_root/bin:$PATH"
+    if [ "$(uname -s)" = Linux ]; then
+        export LD_LIBRARY_PATH="$tool_root/lib/x86_64-linux-gnu:$tool_root/lib/llvm-19/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
 fi
 
-export PATH="$tool_root/bin:$PATH"
-export LD_LIBRARY_PATH="$tool_root/lib/x86_64-linux-gnu:$tool_root/lib/llvm-19/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "Rust Cargo was not found in the bundled toolchain or PATH" >&2
+    exit 1
+fi
 
 exec cargo "$@"

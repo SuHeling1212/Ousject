@@ -2,6 +2,9 @@
 
 use super::*;
 
+const MAX_ACTIVE_CHILD_PROCESSES: usize = 256;
+const MAX_ACTIVE_PROCESSES_PER_SUBJECT: usize = 1_024;
+
 impl VirtualMachine {
     pub(super) fn stage_object_value(
         &self,
@@ -35,14 +38,30 @@ impl VirtualMachine {
         .then(unix_time_millis);
         if target == current_process {
             current_state.status = status;
-            current_state.wake_at_unix_ms = None;
+            if current_state.lease_owner.is_some() {
+                current_state.lease_generation = current_state
+                    .lease_generation
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_state("Worker lease generation overflow"))?;
+            }
+            current_state.lease_owner = None;
+            current_state.lease_deadline_unix_ms = None;
+            current_state.wait_reason = WaitReason::None;
             current_state.ended_at_unix_ms = ended_at_unix_ms;
             return Ok(());
         }
         let view = self.manager.read(self.context, target)?;
         let mut state = decode_process_state(view.state())?;
         state.status = status;
-        state.wake_at_unix_ms = None;
+        if state.lease_owner.is_some() {
+            state.lease_generation = state
+                .lease_generation
+                .checked_add(1)
+                .ok_or_else(|| invalid_state("Worker lease generation overflow"))?;
+        }
+        state.lease_owner = None;
+        state.lease_deadline_unix_ms = None;
+        state.wait_reason = WaitReason::None;
         state.ended_at_unix_ms = ended_at_unix_ms;
         transaction
             .expect(target, view.header().version)
@@ -222,6 +241,12 @@ impl VirtualMachine {
         if type_name == "core.process" {
             return self.prepare_process_create(program_id, initial, parent);
         }
+        if type_name == "core.timer" {
+            return self.prepare_timer_object(initial, parent);
+        }
+        if type_name == "core.swap_pool" {
+            return self.prepare_swap_pool_object(initial, parent);
+        }
         match self
             .manager
             .prepare_create(CreateSpec::new(type_name, initial.clone()).with_parent(parent))
@@ -274,6 +299,7 @@ impl VirtualMachine {
         initial: &Value,
         parent: ObjectId,
     ) -> Result<CreateObject, VmError> {
+        self.enforce_process_limits(Some(parent), self.context.subject)?;
         let (Value::Map(options) | Value::Record(options)) = initial else {
             return Err(VmError::TypeError(
                 "Process creation requires { entry, start?, links? }",
@@ -293,8 +319,7 @@ impl VirtualMachine {
             }
         }
         let program = Program::decode(self.manager.read(self.context, program_id)?.state())?;
-        let (entry, parameters) = find_function(&program, entry_name, 0)?;
-        debug_assert!(parameters.is_empty());
+        let (entry, _) = find_function(&program, entry_name, 0)?;
         let halt = program
             .tokens
             .iter()
@@ -308,13 +333,16 @@ impl VirtualMachine {
             stack: Vec::new(),
             variables: BTreeMap::new(),
             status: if start {
-                ProcessStatus::Running
+                ProcessStatus::Ready
             } else {
                 ProcessStatus::Suspended
             },
+            wait_reason: WaitReason::None,
+            lease_owner: None,
+            lease_generation: 0,
+            lease_deadline_unix_ms: None,
             result: None,
             error: None,
-            wake_at_unix_ms: None,
             ended_at_unix_ms: None,
             frames: vec![CallFrame {
                 return_position: halt,
@@ -345,6 +373,42 @@ impl VirtualMachine {
         Ok(request)
     }
 
+    pub(super) fn enforce_process_limits(
+        &self,
+        parent: Option<ObjectId>,
+        subject: SubjectId,
+    ) -> Result<(), VmError> {
+        let system = AccessContext::new(SYSTEM_SUBJECT);
+        let processes = self
+            .manager
+            .query(system, &ObjectQuery::new().with_type(PROCESS_TYPE))?;
+        let mut active_subject = 0;
+        let mut active_children = 0;
+        for process in processes {
+            let view = self.manager.read(system, process.id)?;
+            let state = decode_process_state(view.state())?;
+            if matches!(
+                state.status,
+                ProcessStatus::Halted | ProcessStatus::Terminated | ProcessStatus::Failed
+            ) {
+                continue;
+            }
+            if state.subject == subject {
+                active_subject += 1;
+            }
+            if parent.is_some_and(|parent| view.header().parent_id == Some(parent)) {
+                active_children += 1;
+            }
+        }
+        if active_children >= MAX_ACTIVE_CHILD_PROCESSES {
+            return Err(VmError::TypeError("Process child limit exceeded"));
+        }
+        if active_subject >= MAX_ACTIVE_PROCESSES_PER_SUBJECT {
+            return Err(VmError::TypeError("Subject Process limit exceeded"));
+        }
+        Ok(())
+    }
+
     pub(super) fn prepare_program_execution(
         &self,
         program: ObjectId,
@@ -358,10 +422,13 @@ impl VirtualMachine {
             token_position: 0,
             stack: Vec::new(),
             variables,
-            status: ProcessStatus::Running,
+            status: ProcessStatus::Ready,
+            wait_reason: WaitReason::None,
+            lease_owner: None,
+            lease_generation: 0,
+            lease_deadline_unix_ms: None,
             result: None,
             error: None,
-            wake_at_unix_ms: None,
             ended_at_unix_ms: None,
             frames: Vec::new(),
             handlers: Vec::new(),

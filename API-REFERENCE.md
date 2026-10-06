@@ -124,7 +124,7 @@ time = object.find("time")
 | `time.monotonic()` | 返回本次启动后的单调毫秒时间 |
 | `time.sleep(milliseconds)` | 让当前 Process 挂起指定时长，到期后由调度器恢复 |
 
-睡眠截止时间和 Process 状态一起原子保存；等待时不占用执行线程，其他 Process 可以继续运行。
+睡眠截止时间、内部持久 Timer 和 Process WaitReason 一起保存；等待时不占用执行线程，其他 Process 可以继续运行。Timer 用系统 wall clock 存 deadline；重启恢复时会唤醒已到期的 Process。
 
 ## 6. Math
 
@@ -206,6 +206,8 @@ Program 由编译器产生，普通程序不能伪造 Provider-only Program。
 | `process.error` | 失败信息 |
 | `process.变量名` | 读取指定变量 |
 
+Process 持久状态包括 `Ready`、`Running`、`Waiting`、`Suspended`、`Halted`、`Terminated`、`Failed`。等待目标以统一 WaitReason 保存，用户通过 Process 管理 API 控制生命周期；Worker lease 字段是内核状态，不是 Praxis capability。
+
 `terminate()` 只终止运行，不会自动退役 Process。
 
 ## 11. Channel
@@ -220,6 +222,22 @@ channel = object.create("core.channel", [])
 | `channel.receive()` | 接收一条消息；没有消息时返回 `null` |
 | `channel.wait()` | 没有消息时挂起当前 Process |
 | `#channel` | 获取当前消息数量 |
+
+Channel 单条消息最多 1 MiB，队列最多 1024 条或 8 MiB 编码状态。send/wakeup 与 receive/dequeue 都和 Process 进度在同一个持久事务中提交。
+
+## 11.1 SwapPool（交换池）
+
+```praxis
+pool = object.create("core.swap_pool", {})
+shared = object.create("core.value", {count: 0})
+pool.attach("state", shared.id)
+member_id = pool.get("state")
+same_object = object.find(member_id)
+same_object.replace({count: 1})
+pool.detach("state")
+```
+
+`attach(name, object_id)`、`detach(name)`、`get(name)`、`contains(name)`、`list()` 管理/查询 membership Link。Attach 不迁移 Parent、不改变 ObjectId；detach 不 retire member。member 自身的 capability 仍单独检查。上限为每池 4096 个成员、每 Subject 64 个池。完整并发及恢复语义见 [SWAPPOOL.md](./SWAPPOOL.md)。
 
 ## 12. Namespace
 
@@ -509,8 +527,10 @@ providers = object.find("providers")
 
 | API | 用途 |
 |---|---|
-| `effect.status()` | 返回 `pending`、`completed` 或 `failed` |
+| `effect.status()` | 返回 `pending`、`running`、`completed`、`failed` 或 `unknown` |
 | `effect.result()` | 返回外部操作结果 |
+
+Interrupted Effect 的恢复策略为 `manual` 或 `retry_idempotent`。Manual 操作结果不确定时不会自动重放；详情见 [EFFECTS.md](./EFFECTS.md)。
 
 ## 22. DNS Resolver
 

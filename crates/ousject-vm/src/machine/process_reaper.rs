@@ -230,7 +230,10 @@ fn collect_expired_process_tree(
         }
         if view.header().type_id == CORE_EFFECT_TYPE {
             let effect = EffectRecord::decode(view.state())?;
-            if effect.status == ousject_provider::EffectStatus::Pending {
+            if matches!(
+                effect.status,
+                EffectStatus::Pending | EffectStatus::Running | EffectStatus::Unknown
+            ) {
                 return Ok(None);
             }
         }

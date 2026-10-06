@@ -1,17 +1,24 @@
 # Ousject 0.0.0 状态
 
-当前里程碑：**Hosted pre-kernel system core**。
+当前里程碑：**Hosted Ousject Core**。当前仓库已包含 Module Registry 收尾、持久协作调度与 Process 恢复、Channel、SwapPool、Effect、Timer、最小 Audit、资源限制，以及 Package SHA 和安装/运行隔离流程。
 
-当前实现继续使用 OTF0/版本号 0：持久 Process、协作调度、统一 Object/Type/Provider、用户会话与权限、Namespace/Channel IPC、跨 Shard 原子提交、WAL/Checkpoint 恢复和 Effect Intent。Console 行读取与键盘结构化事件共享独占终端输入源；定时 sleep 以非阻塞 Process 挂起实现；结束 Process 的结果保留七天后自动退役。已退役 Object 的内容再经七天自动清理，最小元数据保留；没有手动 GC/checkpoint Praxis 命令。
+调度器统一运行终端与普通 Process。Process 状态、等待原因、工作租约代次和执行片中的 Object 修改持久保存。等待输入、IPC、Effect 或 Timer 的 Process 不占执行 Worker；重启恢复 Ready/Waiting 状态并使旧 Worker 代次失效。每个执行片最多 4096 Token 或 20ms。
 
-这不是 Linux 发行版。Ousject Process、权限、事务和对象模型由本项目实现；Linux 当前只启动这个应用并提供可替换的硬件/文件 API。真正脱离宿主仍需要 Boot、内存/中断/多核、网络栈和正式驱动，详见 [PRE-HOST-ACCEPTANCE.md](./PRE-HOST-ACCEPTANCE.md)。
+Channel 保存消息并将 send/receive 与等待者或 Process 位置原子提交。SwapPool 以持久 Link 共享现有 Object 身份，不共享内存地址；成员仍受 Object 自身权限和版本冲突规则保护。Timer 到期可在重启时恢复。Effect 对不确定的手动策略操作记为 `unknown`，只对明确幂等的操作使用同一 Effect ID 重试。Audit 是内核追加式事件对象，不向普通 Subject 发布读取能力。
 
-正确性保证和已知外部交付边界见 [IMPLEMENTED-FEATURES.md](./IMPLEMENTED-FEATURES.md)。退役对象保留与回收规则见 [GARBAGE-COLLECTION.md](./GARBAGE-COLLECTION.md)。下一步优化计划见 [PERFORMANCE-PLAN.md](./PERFORMANCE-PLAN.md)。
+Module Library 在调用者 Process 和 Subject 中执行；Manifest 能力声明不会授予调用者没有的权限。独立 Service Module、Kernel Extension ABI 和真实硬件驱动仍不属于当前 Hosted Core。Package 内容身份由 coordinate 与 SHA-256 锁定，高权限运行需 `local` 显式批准清单声明的能力。
 
-本地验证：
+本轮所述系统仍由 Linux/Rust 应用启动。它不包含 Bootloader、页表、物理内存管理、中断、裸机多核启动、网络栈或正式硬件驱动。详见 [PRE-HOST-ACCEPTANCE.md](./PRE-HOST-ACCEPTANCE.md)。
+
+执行状态和恢复规则见 [PROCESS-RUNTIME.md](./PROCESS-RUNTIME.md)、[SCHEDULER.md](./SCHEDULER.md)、[IPC.md](./IPC.md)、[SWAPPOOL.md](./SWAPPOOL.md)、[EFFECTS.md](./EFFECTS.md) 和 [TIMERS.md](./TIMERS.md)。Package 计划仍记录当前功能及未实现的发布边界，见 [PACKAGE-MANAGER-COMPLETE-PLAN.md](./PACKAGE-MANAGER-COMPLETE-PLAN.md)。
+
+最终验收命令：
 
 ```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ./scripts/check-system
 ```
 
-项目工具链位于 `.tools/rust`，可用 `scripts/cargo-local`。版本号和 OTF/OPS/OVL/OMS/WAL Magic 在正式发布前保持 0。
+格式版本仍为预发布版本 0。

@@ -3,7 +3,21 @@
 use super::package_support::*;
 use super::*;
 
+struct PackageClosureState<'a> {
+    registry_view: &'a ObjectView,
+    visiting: BTreeSet<ObjectId>,
+    visited: BTreeSet<ObjectId>,
+    coordinates: BTreeMap<String, String>,
+    packages: Vec<ResolvedPackage>,
+}
+
 impl VirtualMachine {
+    // Resolve and validate the full immutable closure before staging its links,
+    // installations, and default selection in the caller's transaction.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "package installation stages one validated dependency closure"
+    )]
     pub(super) fn install_package(
         &self,
         owner: SubjectId,
@@ -16,17 +30,15 @@ impl VirtualMachine {
         if registry_view.header().type_id != CORE_PACKAGE_REGISTRY_TYPE {
             return Err(VmError::TypeError("Object is not the Package Registry"));
         }
-        let mut closure = Vec::new();
-        self.resolve_package_closure(
-            &registry_view,
-            root_package,
-            None,
-            0,
-            &mut BTreeSet::new(),
-            &mut BTreeSet::new(),
-            &mut BTreeMap::new(),
-            &mut closure,
-        )?;
+        let mut closure_state = PackageClosureState {
+            registry_view: &registry_view,
+            visiting: BTreeSet::new(),
+            visited: BTreeSet::new(),
+            coordinates: BTreeMap::new(),
+            packages: Vec::new(),
+        };
+        self.resolve_package_closure(root_package, None, 0, &mut closure_state)?;
+        let closure = closure_state.packages;
         let mut dependency_sources = BTreeMap::new();
         let mut bundled_module_count = 0_usize;
         for package in &closure {
@@ -153,12 +165,17 @@ impl VirtualMachine {
                 .with_link("package", package.package)
                 .with_grant(owner, Capability::Inspect)
                 .with_grant(owner, Capability::ViewValue)
-                .with_grant(owner, Capability::Invoke);
+                .with_grant(owner, Capability::ReplaceValue)
+                .with_grant(owner, Capability::Reparent)
+                .with_grant(owner, Capability::Invoke)
+                .with_grant(owner, Capability::Retire);
                 request.capabilities = [
                     Capability::CreateChild,
                     Capability::Inspect,
                     Capability::Link,
                     Capability::ViewValue,
+                    Capability::ReplaceValue,
+                    Capability::Reparent,
                     Capability::Invoke,
                     Capability::Retire,
                 ]
@@ -221,7 +238,8 @@ impl VirtualMachine {
                             .with_parent(installation)
                             .with_link("package", package.package)
                             .with_grant(owner, Capability::Inspect)
-                            .with_grant(owner, Capability::ViewValue);
+                            .with_grant(owner, Capability::ViewValue)
+                            .with_grant(owner, Capability::Retire);
                     module_request.capabilities = [
                         Capability::Inspect,
                         Capability::ViewValue,
@@ -293,16 +311,12 @@ impl VirtualMachine {
         Ok(root_installation)
     }
 
-    pub(super) fn resolve_package_closure(
+    fn resolve_package_closure(
         &self,
-        registry_view: &ObjectView,
         package: ObjectId,
         expected: Option<&PackageDependency>,
         depth: usize,
-        visiting: &mut BTreeSet<ObjectId>,
-        visited: &mut BTreeSet<ObjectId>,
-        coordinates: &mut BTreeMap<String, String>,
-        closure: &mut Vec<ResolvedPackage>,
+        state: &mut PackageClosureState<'_>,
     ) -> Result<(), VmError> {
         let system = AccessContext::new(SYSTEM_SUBJECT);
         let artifact_view = self.manager.read(system, package)?;
@@ -321,16 +335,16 @@ impl VirtualMachine {
                 "Package SHA-256 does not match its content",
             ));
         }
-        let manifest = match artifact_fields.get("manifest") {
-            Some(Value::Record(manifest)) => manifest,
-            _ => return Err(invalid_state("Package has no Manifest")),
+        let Some(Value::Record(manifest)) = artifact_fields.get("manifest") else {
+            return Err(invalid_state("Package has no Manifest"));
         };
         let coordinate = package_coordinate(manifest)?;
-        if registry_view
+        if state
+            .registry_view
             .links()
             .get(&format!("coordinate:{coordinate}"))
             != Some(&package)
-            || registry_view.links().get(&format!("package:{hash}")) != Some(&package)
+            || state.registry_view.links().get(&format!("package:{hash}")) != Some(&package)
         {
             return Err(VmError::Provider(
                 "Package is not registered under its immutable coordinate and SHA-256".to_owned(),
@@ -343,7 +357,7 @@ impl VirtualMachine {
                 "Package dependency does not match its locked coordinate and SHA-256".to_owned(),
             ));
         }
-        if let Some(previous_hash) = coordinates.insert(coordinate.clone(), hash.clone()) {
+        if let Some(previous_hash) = state.coordinates.insert(coordinate.clone(), hash.clone()) {
             if previous_hash != hash {
                 return Err(VmError::Provider(
                     "Package dependency graph contains conflicting versions of one coordinate"
@@ -351,42 +365,34 @@ impl VirtualMachine {
                 ));
             }
         }
-        if visited.contains(&package) {
+        if state.visited.contains(&package) {
             return Ok(());
         }
         if depth > MAX_PACKAGE_DEPENDENCY_DEPTH {
             return Err(VmError::TypeError("Package dependency depth exceeds 64"));
         }
-        if !visiting.insert(package) {
+        if !state.visiting.insert(package) {
             return Err(VmError::Provider(
                 "Package dependency cycle detected".to_owned(),
             ));
         }
-        if visiting.len() + visited.len() > MAX_PACKAGE_DEPENDENCIES {
+        if state.visiting.len() + state.visited.len() > MAX_PACKAGE_DEPENDENCIES {
             return Err(VmError::TypeError(
                 "Package dependency closure exceeds 256 Packages",
             ));
         }
         let dependencies = parse_package_dependencies(manifest.get("dependencies"))?;
         for dependency in &dependencies {
-            let dependency_artifact = registry_view
+            let dependency_artifact = state
+                .registry_view
                 .links()
                 .get(&format!("coordinate:{}", dependency.coordinate))
                 .copied()
                 .ok_or_else(|| VmError::MissingKey(dependency.coordinate.clone()))?;
-            self.resolve_package_closure(
-                registry_view,
-                dependency_artifact,
-                Some(dependency),
-                depth + 1,
-                visiting,
-                visited,
-                coordinates,
-                closure,
-            )?;
+            self.resolve_package_closure(dependency_artifact, Some(dependency), depth + 1, state)?;
         }
-        visiting.remove(&package);
-        visited.insert(package);
+        state.visiting.remove(&package);
+        state.visited.insert(package);
         let modules = match manifest.get("modules") {
             Some(Value::Record(modules)) => modules.clone(),
             _ => return Err(invalid_state("Package Manifest modules are malformed")),
@@ -395,7 +401,7 @@ impl VirtualMachine {
             .get("kind")
             .cloned()
             .ok_or_else(|| invalid_state("Package Manifest has no kind"))?;
-        closure.push(ResolvedPackage {
+        state.packages.push(ResolvedPackage {
             package,
             coordinate,
             sha256: hash,
@@ -403,7 +409,7 @@ impl VirtualMachine {
             modules,
             dependencies,
         });
-        if closure.len() > MAX_PACKAGE_DEPENDENCIES {
+        if state.packages.len() > MAX_PACKAGE_DEPENDENCIES {
             return Err(VmError::TypeError(
                 "Package dependency closure exceeds 256 Packages",
             ));
@@ -694,9 +700,8 @@ impl VirtualMachine {
         let Value::Record(artifact_fields) = self.manager.value(system, artifact)? else {
             return Err(invalid_state("Package is malformed"));
         };
-        let expected_artifact_hash = match module_fields.get("package_sha256") {
-            Some(Value::Text(hash)) => hash,
-            _ => return Err(invalid_state("Package Module has no Package hash")),
+        let Some(Value::Text(expected_artifact_hash)) = module_fields.get("package_sha256") else {
+            return Err(invalid_state("Package Module has no Package hash"));
         };
         if artifact_fields.get("sha256") != Some(&Value::Text(expected_artifact_hash.clone()))
             || artifact_manifest_hash(&Value::Record(artifact_fields.clone()))?
@@ -706,17 +711,14 @@ impl VirtualMachine {
                 "Package changed after installation".to_owned(),
             ));
         }
-        let manifest = match artifact_fields.get("manifest") {
-            Some(Value::Record(manifest)) => manifest,
-            _ => return Err(invalid_state("Package has no Manifest")),
+        let Some(Value::Record(manifest)) = artifact_fields.get("manifest") else {
+            return Err(invalid_state("Package has no Manifest"));
         };
-        let name = match module_fields.get("name") {
-            Some(Value::Text(name)) => name,
-            _ => return Err(invalid_state("Package Module has no name")),
+        let Some(Value::Text(name)) = module_fields.get("name") else {
+            return Err(invalid_state("Package Module has no name"));
         };
-        let modules = match manifest.get("modules") {
-            Some(Value::Record(modules)) => modules,
-            _ => return Err(invalid_state("Package Manifest modules are malformed")),
+        let Some(Value::Record(modules)) = manifest.get("modules") else {
+            return Err(invalid_state("Package Manifest modules are malformed"));
         };
         let component = modules
             .get(name)
@@ -724,13 +726,11 @@ impl VirtualMachine {
         let Value::Record(component) = component else {
             return Err(invalid_state("Package Module is malformed"));
         };
-        let source = match component.get("source") {
-            Some(Value::Text(source)) => source,
-            _ => return Err(invalid_state("Package Module has no source")),
+        let Some(Value::Text(source)) = component.get("source") else {
+            return Err(invalid_state("Package Module has no source"));
         };
-        let expected_source_hash = match module_fields.get("source_sha256") {
-            Some(Value::Text(hash)) => hash,
-            _ => return Err(invalid_state("Package Module has no source hash")),
+        let Some(Value::Text(expected_source_hash)) = module_fields.get("source_sha256") else {
+            return Err(invalid_state("Package Module has no source hash"));
         };
         if component.get("source_sha256") != Some(&Value::Text(expected_source_hash.clone()))
             || package_sha256(source.as_bytes()) != *expected_source_hash
@@ -893,6 +893,12 @@ impl VirtualMachine {
         )
     }
 
+    // Recursive verification keeps each dependency's coordinate, SHA, reverse
+    // links, and active source state under the same validation path.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "recursive installation verification shares one invariant path"
+    )]
     fn verify_package_installation_recursive(
         &self,
         owner: SubjectId,
@@ -1103,8 +1109,9 @@ impl VirtualMachine {
         &self,
         owner: SubjectId,
         installation: ObjectId,
+        package_subject: Option<SubjectId>,
         transaction: &mut Transaction,
-    ) -> Result<ObjectId, VmError> {
+    ) -> Result<(ObjectId, bool), VmError> {
         let system = AccessContext::new(SYSTEM_SUBJECT);
         let installation_view = self.manager.read(system, installation)?;
         if installation_view.header().type_id != CORE_PACKAGE_INSTALLATION_TYPE
@@ -1126,7 +1133,7 @@ impl VirtualMachine {
             ));
         }
         if let Some(data) = data_objects.first() {
-            return Ok(data.id);
+            return Ok((data.id, false));
         }
 
         let data = ObjectId::new();
@@ -1135,18 +1142,27 @@ impl VirtualMachine {
             .with_parent(installation)
             .with_grant(owner, Capability::Inspect)
             .with_grant(owner, Capability::ViewValue)
-            .with_grant(owner, Capability::ReplaceValue);
+            .with_grant(owner, Capability::ReplaceValue)
+            .with_grant(owner, Capability::Retire);
+        if let Some(subject) = package_subject.filter(|subject| *subject != owner) {
+            request = request
+                .with_grant(subject, Capability::Inspect)
+                .with_grant(subject, Capability::ViewValue)
+                .with_grant(subject, Capability::ReplaceValue);
+        }
         request.capabilities = [
             Capability::Inspect,
             Capability::ViewValue,
             Capability::ReplaceValue,
+            Capability::ManagePolicy,
+            Capability::Retire,
         ]
         .into_iter()
         .collect();
         transaction
             .expect(installation, installation_view.header().version)
             .create(request);
-        Ok(data)
+        Ok((data, true))
     }
 
     pub(super) fn package_data_info(
@@ -1281,7 +1297,7 @@ impl VirtualMachine {
         &self,
         owner: SubjectId,
         installation: ObjectId,
-        snapshot: Value,
+        snapshot: &Value,
         transaction: &mut Transaction,
     ) -> Result<(), VmError> {
         let installation_view = self.ensure_package_installation_owner(owner, installation)?;
@@ -1307,11 +1323,13 @@ impl VirtualMachine {
             .with_parent(installation)
             .with_grant(owner, Capability::Inspect)
             .with_grant(owner, Capability::ViewValue)
-            .with_grant(owner, Capability::ReplaceValue);
+            .with_grant(owner, Capability::ReplaceValue)
+            .with_grant(owner, Capability::Retire);
         request.capabilities = [
             Capability::Inspect,
             Capability::ViewValue,
             Capability::ReplaceValue,
+            Capability::Retire,
         ]
         .into_iter()
         .collect();
@@ -1476,11 +1494,17 @@ impl VirtualMachine {
         ))
     }
 
+    // Application setup binds Process, Subject, resources, capabilities, and
+    // package version before publishing the runnable instance.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "application startup stages interdependent security state"
+    )]
     pub(super) fn run_package_application(
         &self,
         owner: SubjectId,
         installation: ObjectId,
-        arguments: Value,
+        arguments: &Value,
         requested_capabilities: &[String],
         transaction: &mut Transaction,
     ) -> Result<ObjectId, VmError> {
@@ -1573,6 +1597,16 @@ impl VirtualMachine {
         let resources_id = ObjectId::new();
         let subject_object = ObjectId::new();
         let process = ObjectId::new();
+        let (package_data, package_data_created) =
+            self.package_data(owner, installation, Some(package_subject), transaction)?;
+        if !package_data_created {
+            let data_version = self.manager.inspect(system, package_data)?.version;
+            transaction
+                .expect(package_data, data_version)
+                .grant(package_data, package_subject, Capability::Inspect)
+                .grant(package_data, package_subject, Capability::ViewValue)
+                .grant(package_data, package_subject, Capability::ReplaceValue);
+        }
         let mut module_request = CreateObject::new(
             CORE_PACKAGE_INSTANCE_TYPE,
             Value::Record(BTreeMap::from([
@@ -1605,13 +1639,15 @@ impl VirtualMachine {
         .with_link("package", artifact)
         .with_grant(owner, Capability::Inspect)
         .with_grant(owner, Capability::ViewValue)
-        .with_grant(owner, Capability::Invoke);
+        .with_grant(owner, Capability::Invoke)
+        .with_grant(owner, Capability::Reparent);
         module_request.capabilities = [
             Capability::CreateChild,
             Capability::Inspect,
             Capability::Link,
             Capability::ViewValue,
             Capability::Invoke,
+            Capability::Reparent,
             Capability::Retire,
         ]
         .into_iter()
@@ -1672,20 +1708,6 @@ impl VirtualMachine {
             .create(resources_request)
             .create(subject_request);
 
-        let package_data = self.package_data(owner, installation, transaction)?;
-        let data_version = self
-            .manager
-            .inspect(system, package_data)
-            .ok()
-            .map(|h| h.version);
-        if let Some(version) = data_version {
-            transaction.expect(package_data, version);
-        }
-        transaction
-            .grant(package_data, package_subject, Capability::Inspect)
-            .grant(package_data, package_subject, Capability::ViewValue)
-            .grant(package_data, package_subject, Capability::ReplaceValue);
-
         let mut granted_services = BTreeSet::new();
         for capability in &grants {
             for target in self.package_capability_targets(capability)? {
@@ -1707,10 +1729,13 @@ impl VirtualMachine {
             token_position: entrypoint,
             stack: Vec::new(),
             variables: BTreeMap::from([("arguments".to_owned(), arguments_id)]),
-            status: ProcessStatus::Running,
+            status: ProcessStatus::Ready,
+            wait_reason: WaitReason::None,
+            lease_owner: None,
+            lease_generation: 0,
+            lease_deadline_unix_ms: None,
             result: None,
             error: None,
-            wake_at_unix_ms: None,
             ended_at_unix_ms: None,
             frames: vec![CallFrame {
                 return_position: halt,
@@ -1734,6 +1759,7 @@ impl VirtualMachine {
             .with_grant(owner, Capability::Inspect)
             .with_grant(owner, Capability::ViewValue)
             .with_grant(owner, Capability::Invoke)
+            .with_grant(owner, Capability::Reparent)
             .with_grant(owner, Capability::Retire)
             .with_grant(package_subject, Capability::Inspect)
             .with_grant(package_subject, Capability::ViewValue)
@@ -1741,6 +1767,7 @@ impl VirtualMachine {
             .with_grant(package_subject, Capability::CreateChild)
             .with_grant(package_subject, Capability::Invoke)
             .with_grant(package_subject, Capability::Link)
+            .with_grant(package_subject, Capability::Reparent)
             .with_grant(package_subject, Capability::Retire);
         if let Some(console) = self.console_provider {
             process_request = process_request.with_link("console", console);
@@ -1755,6 +1782,7 @@ impl VirtualMachine {
             Capability::CreateChild,
             Capability::Invoke,
             Capability::Link,
+            Capability::Reparent,
             Capability::Retire,
         ]
         .into_iter()
@@ -1791,9 +1819,8 @@ impl VirtualMachine {
         let Value::Record(current_fields) = current else {
             return Err(invalid_state("Package Installation is malformed"));
         };
-        let current_coordinate = match current_fields.get("coordinate") {
-            Some(Value::Text(coordinate)) => coordinate,
-            _ => return Err(invalid_state("Package Installation has no coordinate")),
+        let Some(Value::Text(current_coordinate)) = current_fields.get("coordinate") else {
+            return Err(invalid_state("Package Installation has no coordinate"));
         };
         let target_value = self
             .manager
@@ -1911,6 +1938,10 @@ impl VirtualMachine {
         Ok(target)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "restore validates and rebuilds one retired installation"
+    )]
     pub(super) fn restore_package(
         &self,
         owner: SubjectId,
@@ -2031,11 +2062,20 @@ impl VirtualMachine {
                     "retired Package Data exceeds the 8 MiB restore limit",
                 ));
             }
-            let data_request = CreateObject::new(CORE_PACKAGE_DATA_TYPE, encoded_data)
+            let mut data_request = CreateObject::new(CORE_PACKAGE_DATA_TYPE, encoded_data)
                 .with_parent(installation)
                 .with_grant(owner, Capability::Inspect)
                 .with_grant(owner, Capability::ViewValue)
-                .with_grant(owner, Capability::ReplaceValue);
+                .with_grant(owner, Capability::ReplaceValue)
+                .with_grant(owner, Capability::Retire);
+            data_request.capabilities = [
+                Capability::Inspect,
+                Capability::ViewValue,
+                Capability::ReplaceValue,
+                Capability::Retire,
+            ]
+            .into_iter()
+            .collect();
             transaction.create(data_request);
         }
         transaction
@@ -2044,6 +2084,12 @@ impl VirtualMachine {
         Ok(installation)
     }
 
+    // Export invocation binds a fresh Process to a verified immutable package
+    // version and checks caller capabilities before it becomes runnable.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "export startup stages interdependent security state"
+    )]
     pub(super) fn run_package_export(
         &self,
         owner: SubjectId,
@@ -2141,6 +2187,7 @@ impl VirtualMachine {
             None => Value::Record(BTreeMap::new()),
             _ => return Err(invalid_state("Package Manifest resources are malformed")),
         };
+        let (package_data, _) = self.package_data(owner, installation, None, transaction)?;
         let mut instance_request = CreateObject::new(
             CORE_PACKAGE_INSTANCE_TYPE,
             Value::Record(BTreeMap::from([
@@ -2171,13 +2218,15 @@ impl VirtualMachine {
         .with_link("package", artifact)
         .with_grant(owner, Capability::Inspect)
         .with_grant(owner, Capability::ViewValue)
-        .with_grant(owner, Capability::Invoke);
+        .with_grant(owner, Capability::Invoke)
+        .with_grant(owner, Capability::Reparent);
         instance_request.capabilities = [
             Capability::CreateChild,
             Capability::Inspect,
             Capability::Link,
             Capability::ViewValue,
             Capability::Invoke,
+            Capability::Reparent,
             Capability::Retire,
         ]
         .into_iter()
@@ -2225,15 +2274,6 @@ impl VirtualMachine {
             .create(resources_request)
             .create(subject_request);
 
-        let package_data = self.package_data(owner, installation, transaction)?;
-        if let Ok(header) = self.manager.inspect(system, package_data) {
-            transaction.expect(package_data, header.version);
-        }
-        transaction
-            .grant(package_data, subject, Capability::Inspect)
-            .grant(package_data, subject, Capability::ViewValue)
-            .grant(package_data, subject, Capability::ReplaceValue);
-
         let mut locals = BTreeMap::new();
         for ((parameter, argument), object) in parameters.iter().zip(arguments).zip(&argument_ids) {
             let request = CreateObject::new(CORE_VALUE_TYPE, argument.encode()?)
@@ -2251,10 +2291,13 @@ impl VirtualMachine {
             token_position: entrypoint,
             stack: Vec::new(),
             variables: BTreeMap::from([("arguments".to_owned(), arguments_id)]),
-            status: ProcessStatus::Running,
+            status: ProcessStatus::Ready,
+            wait_reason: WaitReason::None,
+            lease_owner: None,
+            lease_generation: 0,
+            lease_deadline_unix_ms: None,
             result: None,
             error: None,
-            wake_at_unix_ms: None,
             ended_at_unix_ms: None,
             frames: vec![CallFrame {
                 return_position: halt,
@@ -2472,6 +2515,10 @@ impl VirtualMachine {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "uninstall validates reverse references before atomic retirement"
+    )]
     pub(super) fn uninstall_package(
         &self,
         process: ObjectId,
@@ -2525,26 +2572,30 @@ impl VirtualMachine {
         for child in installation_view.children() {
             let module_view = self.manager.read(system, *child)?;
             if module_view.header().type_id == CORE_PACKAGE_INSTANCE_TYPE {
-                if let Ok(instance_value) = Value::decode(module_view.state()) {
-                    if let Value::Record(instance) = instance_value {
-                        if let Some(Value::Text(process_id)) = instance.get("process") {
-                            if let Ok(process_id) = process_id.parse::<ObjectId>() {
-                                if let Ok(process_view) = self.manager.read(system, process_id) {
-                                    if process_view.header().type_id == PROCESS_TYPE {
-                                        let state = decode_process_state(process_view.state())?;
-                                        if matches!(
-                                            state.status,
-                                            ProcessStatus::Running | ProcessStatus::Suspended
-                                        ) {
-                                            return Err(VmError::Provider(
-                                                "Package has an active Application Process"
-                                                    .to_owned(),
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                let Ok(Value::Record(instance)) = Value::decode(module_view.state()) else {
+                    continue;
+                };
+                let Some(Value::Text(process_id)) = instance.get("process") else {
+                    continue;
+                };
+                let Ok(process_id) = process_id.parse::<ObjectId>() else {
+                    continue;
+                };
+                let Ok(process_view) = self.manager.read(system, process_id) else {
+                    continue;
+                };
+                if process_view.header().type_id == PROCESS_TYPE {
+                    let state = decode_process_state(process_view.state())?;
+                    if matches!(
+                        state.status,
+                        ProcessStatus::Running
+                            | ProcessStatus::Ready
+                            | ProcessStatus::Waiting
+                            | ProcessStatus::Suspended
+                    ) {
+                        return Err(VmError::Provider(
+                            "Package has an active Application Process".to_owned(),
+                        ));
                     }
                 }
                 continue;
@@ -2675,7 +2726,10 @@ impl VirtualMachine {
                                 if process_view.header().type_id == PROCESS_TYPE
                                     && matches!(
                                         decode_process_state(process_view.state())?.status,
-                                        ProcessStatus::Running | ProcessStatus::Suspended
+                                        ProcessStatus::Running
+                                            | ProcessStatus::Ready
+                                            | ProcessStatus::Waiting
+                                            | ProcessStatus::Suspended
                                     )
                                 {
                                     return Ok(false);
@@ -2785,7 +2839,8 @@ impl VirtualMachine {
             .create(
                 CreateObject::new(CORE_NAMESPACE_TYPE, value.encode()?)
                     .with_id(index)
-                    .with_parent(registry),
+                    .with_parent(registry)
+                    .with_grant(owner, Capability::Reparent),
             )
             .set_link(registry, package_user_index_key(owner), index);
         Ok((index, ObjectVersion::default(), true))

@@ -26,7 +26,9 @@ fn is_catchable(error: &VmError) -> bool {
         | VmError::Value(_)
         | VmError::InvalidProcessState(_)
         | VmError::TokenPositionOutOfRange(_)
-        | VmError::StepLimitExceeded(_) => false,
+        | VmError::StepLimitExceeded(_)
+        | VmError::WorkerLeaseBusy(_)
+        | VmError::WorkerLeaseExpired(_) => false,
     }
 }
 
@@ -46,6 +48,8 @@ fn error_value(error: &VmError) -> Value {
         VmError::InvalidProcessState(_) => "invalid_process_state",
         VmError::TokenPositionOutOfRange(_) => "token_position_out_of_range",
         VmError::StepLimitExceeded(_) => "step_limit_exceeded",
+        VmError::WorkerLeaseBusy(_) => "worker_lease_busy",
+        VmError::WorkerLeaseExpired(_) => "worker_lease_expired",
     };
     Value::Error {
         code: code.to_owned(),

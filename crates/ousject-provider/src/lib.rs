@@ -141,6 +141,12 @@ pub trait ObjectProvider: fmt::Debug + Send + Sync {
     /// Releases any boot-scoped resources leased by a Process that ended.
     fn process_ended(&self, _process: ObjectId) {}
 
+    /// Controls what the VM may do when the host restarts after this Provider
+    /// began an external operation but before its result was committed.
+    fn effect_recovery_policy(&self, _capability: &str) -> EffectRecoveryPolicy {
+        EffectRecoveryPolicy::Manual
+    }
+
     fn capabilities(&self) -> BTreeSet<String>;
 
     /// Resolves a boot-scoped opaque secret token. Providers that do not own
@@ -234,16 +240,35 @@ impl ProviderRegistry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectStatus {
     Pending,
+    Running,
     Completed,
     Failed,
+    Unknown,
 }
 
 impl EffectStatus {
     const fn name(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectRecoveryPolicy {
+    Manual,
+    RetryIdempotent,
+}
+
+impl EffectRecoveryPolicy {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::RetryIdempotent => "retry_idempotent",
         }
     }
 }
@@ -256,6 +281,7 @@ pub struct EffectRecord {
     pub capability: String,
     pub arguments: Vec<Value>,
     pub status: EffectStatus,
+    pub recovery_policy: EffectRecoveryPolicy,
     pub result: Option<Value>,
     pub error: Option<String>,
 }
@@ -269,22 +295,73 @@ impl EffectRecord {
         capability: impl Into<String>,
         arguments: Vec<Value>,
     ) -> Self {
+        Self::pending_with_policy(
+            process,
+            target,
+            token_position,
+            capability,
+            arguments,
+            EffectRecoveryPolicy::Manual,
+        )
+    }
+
+    #[must_use]
+    pub fn pending_with_policy(
+        process: ObjectId,
+        target: ObjectId,
+        token_position: u32,
+        capability: impl Into<String>,
+        arguments: Vec<Value>,
+        recovery_policy: EffectRecoveryPolicy,
+    ) -> Self {
         Self {
             process,
             target,
             token_position,
             capability: capability.into(),
-            arguments,
+            arguments: arguments.into_iter().map(redact_secret_value).collect(),
             status: EffectStatus::Pending,
+            recovery_policy,
             result: None,
             error: None,
         }
     }
 
+    /// Replaces opaque runtime Secret handles before arguments enter durable
+    /// Effect state. Providers receive the original call arguments separately.
+    #[must_use]
+    pub fn redact_arguments(arguments: &[Value]) -> Vec<Value> {
+        arguments.iter().cloned().map(redact_secret_value).collect()
+    }
+
+    #[must_use]
+    pub fn running(mut self) -> Self {
+        self.status = EffectStatus::Running;
+        self.result = None;
+        self.error = None;
+        self
+    }
+
+    #[must_use]
+    pub fn unknown(mut self) -> Self {
+        self.status = EffectStatus::Unknown;
+        self.result = None;
+        self.error = None;
+        self
+    }
+
+    #[must_use]
+    pub fn retry(mut self) -> Self {
+        self.status = EffectStatus::Pending;
+        self.result = None;
+        self.error = None;
+        self
+    }
+
     #[must_use]
     pub fn complete(mut self, result: Value) -> Self {
         self.status = EffectStatus::Completed;
-        self.result = Some(result);
+        self.result = Some(redact_secret_value(result));
         self.error = None;
         self
     }
@@ -333,6 +410,10 @@ impl EffectRecord {
             "error".to_owned(),
             self.error.clone().map_or(Value::Null, Value::Text),
         );
+        fields.insert(
+            "recovery_policy".to_owned(),
+            Value::Text(self.recovery_policy.name().to_owned()),
+        );
         Value::Record(fields)
     }
 
@@ -359,9 +440,19 @@ impl EffectRecord {
         };
         let status = match text(&fields, "status")? {
             "pending" => EffectStatus::Pending,
+            "running" => EffectStatus::Running,
             "completed" => EffectStatus::Completed,
             "failed" => EffectStatus::Failed,
+            "unknown" => EffectStatus::Unknown,
             _ => return Err(ProviderError::EffectState("invalid Effect status")),
+        };
+        let recovery_policy = match fields.get("recovery_policy") {
+            None => EffectRecoveryPolicy::Manual,
+            Some(Value::Text(value)) if value == "manual" => EffectRecoveryPolicy::Manual,
+            Some(Value::Text(value)) if value == "retry_idempotent" => {
+                EffectRecoveryPolicy::RetryIdempotent
+            }
+            _ => return Err(ProviderError::EffectState("invalid Effect recovery policy")),
         };
         Ok(Self {
             process,
@@ -370,6 +461,7 @@ impl EffectRecord {
             capability: text(&fields, "capability")?.to_owned(),
             arguments: arguments.clone(),
             status,
+            recovery_policy,
             result: match fields.get("result") {
                 None | Some(Value::Null) => None,
                 Some(value) => Some(value.clone()),
@@ -391,6 +483,28 @@ impl EffectRecord {
         Ok(CreateObject::new(CORE_EFFECT_TYPE, self.encode()?)
             .with_id(id)
             .with_parent(self.process))
+    }
+}
+
+fn redact_secret_value(value: Value) -> Value {
+    match value {
+        Value::Text(text) if text.starts_with("secret:") => {
+            Value::Text("[redacted-secret]".to_owned())
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(redact_secret_value).collect()),
+        Value::Map(fields) => Value::Map(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, redact_secret_value(value)))
+                .collect(),
+        ),
+        Value::Record(fields) => Value::Record(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, redact_secret_value(value)))
+                .collect(),
+        ),
+        other => other,
     }
 }
 
@@ -423,5 +537,39 @@ mod tests {
         )
         .complete(Value::Integer(3));
         assert_eq!(EffectRecord::decode(&effect.encode().unwrap()), Ok(effect));
+    }
+
+    #[test]
+    fn effect_arguments_and_results_redact_nested_secret_handles() {
+        let secret = Value::Text("secret:credential-value".to_owned());
+        let effect = EffectRecord::pending(
+            ObjectId::new(),
+            ObjectId::new(),
+            7,
+            "send",
+            vec![Value::Record(BTreeMap::from([(
+                "payload".to_owned(),
+                Value::Array(vec![secret.clone()]),
+            )]))],
+        )
+        .complete(Value::Map(BTreeMap::from([("result".to_owned(), secret)])));
+
+        let redacted = Value::Text("[redacted-secret]".to_owned());
+        assert_eq!(
+            effect.arguments,
+            [Value::Record(BTreeMap::from([(
+                "payload".to_owned(),
+                Value::Array(vec![redacted.clone()]),
+            )]))]
+        );
+        assert_eq!(
+            effect.result,
+            Some(Value::Map(BTreeMap::from([(
+                "result".to_owned(),
+                redacted
+            )])))
+        );
+        let bytes = effect.encode().unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("credential-value"));
     }
 }

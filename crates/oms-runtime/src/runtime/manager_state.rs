@@ -58,7 +58,10 @@ impl PerformanceCounters {
         for (bucket, count) in self.latency_buckets.iter().enumerate() {
             seen = seen.saturating_add(count.load(Ordering::Relaxed));
             if seen >= rank {
-                return 1_u64.checked_shl(bucket as u32).unwrap_or(u64::MAX);
+                return u32::try_from(bucket)
+                    .ok()
+                    .and_then(|bucket| 1_u64.checked_shl(bucket))
+                    .unwrap_or(u64::MAX);
             }
         }
         u64::MAX

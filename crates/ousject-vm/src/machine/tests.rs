@@ -28,9 +28,12 @@ mod tests {
             frames: Vec::new(),
             handlers: Vec::new(),
             status: ProcessStatus::Running,
+            wait_reason: WaitReason::None,
+            lease_owner: None,
+            lease_generation: 0,
+            lease_deadline_unix_ms: None,
             result: None,
             error: None,
-            wake_at_unix_ms: None,
             ended_at_unix_ms: None,
         };
         assert_eq!(
@@ -48,10 +51,10 @@ mod tests {
         .unwrap();
         let process = vm.create_process(&program).unwrap();
         let report = vm.run(process, 1_000).unwrap();
-        assert_eq!(report.status, ProcessStatus::Suspended);
+        assert_eq!(report.status, ProcessStatus::Waiting);
         let state = vm.process_state(process).unwrap();
-        assert!(state.wake_at_unix_ms.is_some());
-        assert_eq!(state.status, ProcessStatus::Suspended);
+        assert!(timer_deadline(&state.wait_reason).is_some());
+        assert_eq!(state.status, ProcessStatus::Waiting);
         assert!(!vm.wake_due_timer(process).unwrap());
     }
 
@@ -198,7 +201,7 @@ mod tests {
         let second_console = manager.read(context, second).unwrap().links()["console"];
         assert_eq!(first_console, second_console);
 
-        assert_eq!(vm.run(first, 2).unwrap().status, ProcessStatus::Running);
+        assert_eq!(vm.run(first, 2).unwrap().status, ProcessStatus::Ready);
         let disconnected = VirtualMachine::new(manager);
         assert_eq!(
             disconnected.run(first, 10),
@@ -214,7 +217,7 @@ mod tests {
             tokens: vec![Token::Jump(0), Token::Halt],
         };
         let process = vm.create_process(&program).unwrap();
-        assert_eq!(vm.run(process, 5).unwrap().status, ProcessStatus::Running);
+        assert_eq!(vm.run(process, 5).unwrap().status, ProcessStatus::Ready);
         assert_eq!(vm.process_state(process).unwrap().token_position, 0);
     }
 
@@ -262,7 +265,7 @@ mod tests {
             let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
             let vm = vm_with_console(manager);
             let process = vm.create_process(&program).unwrap();
-            assert_eq!(vm.run(process, 5).unwrap().status, ProcessStatus::Running);
+            assert_eq!(vm.run(process, 5).unwrap().status, ProcessStatus::Ready);
             process
         };
 

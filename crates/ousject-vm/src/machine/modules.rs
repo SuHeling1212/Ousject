@@ -40,16 +40,7 @@ impl VirtualMachine {
             }
         }
 
-        let mut capabilities = BTreeSet::new();
-        for capability in requested_capabilities {
-            let Value::Text(capability) = capability else {
-                return Err(VmError::TypeError("module capabilities must be Text"));
-            };
-            if capability.is_empty() || capability.len() > 128 {
-                return Err(VmError::TypeError("invalid module capability name"));
-            }
-            capabilities.insert(capability.clone());
-        }
+        let capabilities = normalize_module_capabilities(requested_capabilities)?;
 
         let dependencies = self.module_dependency_ids(requested_dependencies, Some(name))?;
         let install_source = format!("import \"{INSTALL_ROOT_MODULE}\"");
@@ -97,6 +88,20 @@ impl VirtualMachine {
         let mut transaction = self.manager.begin(self.context);
         transaction.create(module_request).create(program_request);
         self.stage_dependent_links(&mut transaction, &dependencies, module)?;
+        self.stage_audit_event(
+            subject,
+            "module.install",
+            module,
+            Value::Record(BTreeMap::from([
+                ("name".to_owned(), Value::Text(name.to_owned())),
+                ("version".to_owned(), Value::Text(version.to_owned())),
+                (
+                    "source_sha256".to_owned(),
+                    Value::Text(source_sha256(source)),
+                ),
+            ])),
+            &mut transaction,
+        )?;
         self.manager.commit(transaction)?;
         Ok(module)
     }
@@ -139,12 +144,11 @@ impl VirtualMachine {
             if fields.get("name") == Some(&Value::Text(name.to_owned()))
                 && fields.get("version") == Some(&Value::Text(version.to_owned()))
                 && fields.get("status") != Some(&Value::Text("retired".to_owned()))
+                && found.replace(header.id).is_some()
             {
-                if found.replace(header.id).is_some() {
-                    return Err(VmError::Provider(format!(
-                        "more than one Module is installed at {name}/{version}"
-                    )));
-                }
+                return Err(VmError::Provider(format!(
+                    "more than one Module is installed at {name}/{version}"
+                )));
             }
         }
         found.ok_or_else(|| VmError::Provider(format!("Module not found: {name}/{version}")))
@@ -242,6 +246,13 @@ impl VirtualMachine {
         transaction
             .expect(module, view.header().version)
             .update_state(module, Value::Record(fields).encode()?);
+        self.stage_audit_event(
+            subject,
+            "module.uninstall",
+            module,
+            Value::Record(BTreeMap::new()),
+            transaction,
+        )?;
         self.retire_object(process, process_state, module, transaction)
     }
 
@@ -274,6 +285,17 @@ impl VirtualMachine {
         transaction
             .expect(module, view.header().version)
             .update_state(module, Value::Record(fields).encode()?);
+        self.stage_audit_event(
+            subject,
+            if enabled {
+                "module.enable"
+            } else {
+                "module.disable"
+            },
+            module,
+            Value::Record(BTreeMap::new()),
+            &mut transaction,
+        )?;
         self.manager.commit(transaction)?;
         Ok(())
     }
@@ -293,16 +315,7 @@ impl VirtualMachine {
         if version.is_empty() || version.len() > 64 || source.len() > 1024 * 1024 {
             return Err(VmError::TypeError("invalid Module version or source size"));
         }
-        let mut capabilities = BTreeSet::new();
-        for capability in requested_capabilities {
-            let Value::Text(capability) = capability else {
-                return Err(VmError::TypeError("module capabilities must be Text"));
-            };
-            if capability.is_empty() || capability.len() > 128 {
-                return Err(VmError::TypeError("invalid module capability name"));
-            }
-            capabilities.insert(capability.clone());
-        }
+        let capabilities = normalize_module_capabilities(requested_capabilities)?;
         let view = self.manager.read(self.context, module)?;
         if view.header().type_id != CORE_MODULE_TYPE {
             return Err(VmError::TypeError("Object is not a Praxis Module"));
@@ -324,26 +337,7 @@ impl VirtualMachine {
                 "Module upgrade must use a different version",
             ));
         }
-        for candidate in self.manager.query(
-            self.context,
-            &ObjectQuery::new().with_type(CORE_MODULE_TYPE),
-        )? {
-            if candidate.id == module {
-                continue;
-            }
-            let Value::Record(candidate_fields) = self.manager.value(self.context, candidate.id)?
-            else {
-                continue;
-            };
-            if candidate_fields.get("name") == Some(&Value::Text(old_name.to_owned()))
-                && candidate_fields.get("version") == Some(&Value::Text(version.to_owned()))
-                && candidate_fields.get("status") != Some(&Value::Text("retired".to_owned()))
-            {
-                return Err(VmError::Provider(format!(
-                    "Module version already exists: {old_name}/{version}"
-                )));
-            }
-        }
+        self.ensure_module_version_available(module, old_name, version)?;
         let dependencies = match requested_dependencies {
             Some(values) => self.module_dependency_ids(values, Some(old_name))?,
             None => self.module_dependency_ids_from_record(&fields, Some(old_name))?,
@@ -396,6 +390,20 @@ impl VirtualMachine {
             .create(module_request)
             .create(program_request);
         self.stage_dependent_links(&mut transaction, &dependencies, new_module)?;
+        self.stage_audit_event(
+            subject,
+            "module.upgrade",
+            new_module,
+            Value::Record(BTreeMap::from([
+                ("previous".to_owned(), Value::Text(module.to_string())),
+                ("version".to_owned(), Value::Text(version.to_owned())),
+                (
+                    "source_sha256".to_owned(),
+                    Value::Text(source_sha256(source)),
+                ),
+            ])),
+            &mut transaction,
+        )?;
         self.manager.commit(transaction)?;
         Ok(new_module)
     }
@@ -456,6 +464,16 @@ impl VirtualMachine {
             .expect(target, target_view.header().version)
             .update_state(current, Value::Record(current_fields).encode()?)
             .update_state(target, Value::Record(target_fields).encode()?);
+        self.stage_audit_event(
+            subject,
+            "module.rollback",
+            current,
+            Value::Record(BTreeMap::from([(
+                "restored".to_owned(),
+                Value::Text(target.to_string()),
+            )])),
+            &mut transaction,
+        )?;
         self.manager.commit(transaction)?;
         Ok(())
     }
@@ -616,6 +634,49 @@ impl VirtualMachine {
     ) -> Result<(String, String), String> {
         self.module_source_from_dependencies(name, importer, &[])
     }
+
+    fn ensure_module_version_available(
+        &self,
+        current: ObjectId,
+        name: &str,
+        version: &str,
+    ) -> Result<(), VmError> {
+        for candidate in self.manager.query(
+            self.context,
+            &ObjectQuery::new().with_type(CORE_MODULE_TYPE),
+        )? {
+            if candidate.id == current {
+                continue;
+            }
+            let Value::Record(fields) = self.manager.value(self.context, candidate.id)? else {
+                continue;
+            };
+            if fields.get("name") == Some(&Value::Text(name.to_owned()))
+                && fields.get("version") == Some(&Value::Text(version.to_owned()))
+                && fields.get("status") != Some(&Value::Text("retired".to_owned()))
+            {
+                return Err(VmError::Provider(format!(
+                    "Module version already exists: {name}/{version}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn normalize_module_capabilities(values: &[Value]) -> Result<BTreeSet<String>, VmError> {
+    values
+        .iter()
+        .map(|value| {
+            let Value::Text(capability) = value else {
+                return Err(VmError::TypeError("module capabilities must be Text"));
+            };
+            if capability.is_empty() || capability.len() > 128 {
+                return Err(VmError::TypeError("invalid module capability name"));
+            }
+            Ok(capability.clone())
+        })
+        .collect()
 }
 
 fn record_text<'a>(fields: &'a BTreeMap<String, Value>, key: &str) -> Result<&'a str, VmError> {

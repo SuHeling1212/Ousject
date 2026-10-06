@@ -123,14 +123,15 @@ fn execute_collection_token(token: &Token, stack: &mut Vec<Value>) -> Result<(),
             if (0..count).any(|index| !matches!(&stack[start + index * 2], Value::Text(_))) {
                 return Err(VmError::TypeError("map key must be text"));
             }
-            let mut items = stack.split_off(start);
+            let items = stack.split_off(start);
             let mut values = BTreeMap::new();
-            while !items.is_empty() {
-                let value = items.pop().expect("validated map value");
-                let Value::Text(key) = items.pop().expect("validated map key") else {
+            // Match the previous stack-pop order for duplicate keys: the first
+            // pair in source order wins.
+            for pair in items.chunks_exact(2).rev() {
+                let Value::Text(key) = &pair[0] else {
                     unreachable!("map keys are validated before consuming the stack")
                 };
-                values.insert(key, value);
+                values.insert(key.clone(), pair[1].clone());
             }
             stack.push(Value::Map(values));
         }

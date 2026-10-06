@@ -62,7 +62,7 @@ fn console_input_suspends_only_the_waiting_process_and_reuses_its_effect() {
     let process = vm.create_process(&program).unwrap();
 
     let waiting = vm.run(process, 1_000).unwrap();
-    assert_eq!(waiting.status, ProcessStatus::Suspended);
+    assert_eq!(waiting.status, ProcessStatus::Waiting);
     let pending_effect = vm
         .manager()
         .read(AccessContext::new(SYSTEM_SUBJECT), process)
@@ -101,13 +101,10 @@ fn two_console_waiters_keep_distinct_effects_and_inputs() {
     .unwrap();
     let first = vm.create_process(&program).unwrap();
     let second = vm.create_process(&program).unwrap();
-    assert_eq!(
-        vm.run(first, 1_000).unwrap().status,
-        ProcessStatus::Suspended
-    );
+    assert_eq!(vm.run(first, 1_000).unwrap().status, ProcessStatus::Waiting);
     assert_eq!(
         vm.run(second, 1_000).unwrap().status,
-        ProcessStatus::Suspended
+        ProcessStatus::Waiting
     );
     let context = AccessContext::new(SYSTEM_SUBJECT);
     let first_effect = vm.manager().read(context, first).unwrap().links()["$effect"];
@@ -148,7 +145,7 @@ fn pending_console_input_recovers_after_store_reopen() {
         process = vm.create_process(&program).unwrap();
         assert_eq!(
             vm.run(process, 1_000).unwrap().status,
-            ProcessStatus::Suspended
+            ProcessStatus::Waiting
         );
     }
 

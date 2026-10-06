@@ -318,6 +318,7 @@ name = "oms-runtime"
 version = "0.0.0"
 dependencies = [
  "im",
+ "nix",
  "oms-shard",
  "oms-types",
 ]

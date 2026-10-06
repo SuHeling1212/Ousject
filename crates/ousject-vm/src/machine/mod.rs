@@ -23,6 +23,7 @@ use ousject_auth::{AuthService, UserIdentity};
 use ousject_provider::{
     EffectRecord, ObjectProvider, ProviderError, ProviderOutcome, ProviderRegistry,
 };
+pub use ousject_provider::{EffectRecoveryPolicy, EffectStatus};
 use praxis_compiler::{
     compile_interactive_with_contextual_loader, compile_program, compile_with_contextual_loader,
 };
@@ -43,6 +44,7 @@ pub const INSTANCE_TYPE: TypeId = CORE_INSTANCE_TYPE;
 const PROCESS_MAGIC: &[u8; 4] = b"OPS0";
 const PROCESS_RESULT_EXTENSION: &[u8; 4] = b"PRX0";
 const PROCESS_RUNTIME_EXTENSION: &[u8; 4] = b"PXT0";
+const PROCESS_SCHEDULER_EXTENSION: &[u8; 4] = b"PSX0";
 const PROCESS_RETENTION_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const MAX_STATE_ITEMS: usize = 1_000_000;
 type ProgramCache = BTreeMap<ObjectId, (oms_types::ObjectVersion, Arc<Program>)>;
@@ -51,6 +53,7 @@ type PackageVerificationCache = BTreeMap<ObjectId, (ObjectVersion, ObjectVersion
 include!("types.rs");
 include!("providers.rs");
 include!("vm_type.rs");
+mod audit;
 mod boot;
 mod calls;
 mod instruction;
@@ -66,7 +69,9 @@ mod package_support;
 mod process_objects;
 mod provider_dispatch;
 mod registry;
+mod swap_pool;
 mod terminal_session;
+mod timer;
 mod transaction;
 include!("bindings.rs");
 include!("scheduler.rs");

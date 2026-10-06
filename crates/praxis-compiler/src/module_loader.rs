@@ -26,6 +26,11 @@ pub fn compile(source: &str) -> Result<Program, CompileError> {
 
 /// Compiles a complete executable Praxis program. The root source must contain
 /// exactly one parameterless `main()` and may contain only declarations at top level.
+///
+/// # Errors
+///
+/// Returns a positioned error when the source violates the executable program
+/// structure or contains invalid Praxis syntax.
 pub fn compile_program(source: &str) -> Result<Program, CompileError> {
     if source.lines().any(|line| parse_directive(line).is_some()) {
         return Err(CompileError {
@@ -102,6 +107,10 @@ pub fn compile_with_loader(
 
 /// Compiles a complete executable Praxis program after recursively expanding
 /// imported source modules.
+///
+/// # Errors
+///
+/// Returns a positioned compiler error, loader error or module-cycle error.
 pub fn compile_program_with_loader(
     source: &str,
     mut loader: impl FnMut(&str) -> Result<String, String>,
@@ -112,6 +121,10 @@ pub fn compile_program_with_loader(
 }
 
 /// Context-aware form of [`compile_program_with_loader`].
+///
+/// # Errors
+///
+/// Returns a positioned compiler error, loader error or module-cycle error.
 pub fn compile_program_with_contextual_loader(
     source: &str,
     mut loader: impl FnMut(&str, Option<&str>) -> Result<(String, String), String>,
@@ -198,10 +211,8 @@ fn parse_directive(line: &str) -> Option<(DirectiveKind, String)> {
     let trimmed = line.trim();
     let (kind, rest) = if let Some(rest) = trimmed.strip_prefix("import") {
         (DirectiveKind::Import, rest)
-    } else if let Some(rest) = trimmed.strip_prefix("include") {
-        (DirectiveKind::Include, rest)
     } else {
-        return None;
+        (DirectiveKind::Include, trimmed.strip_prefix("include")?)
     };
     if !rest.starts_with(char::is_whitespace) {
         return None;

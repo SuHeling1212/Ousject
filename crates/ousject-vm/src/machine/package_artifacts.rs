@@ -4,7 +4,21 @@ use super::package_support::*;
 use super::*;
 use praxis_compiler::{compile_program_with_contextual_loader, compile_with_contextual_loader};
 
+struct PackageDependencySources<'a> {
+    registry: &'a ObjectView,
+    visiting: BTreeSet<String>,
+    visited: BTreeSet<String>,
+    sources: BTreeMap<String, String>,
+    total_source_bytes: usize,
+}
+
 impl VirtualMachine {
+    // Keep source limits, dependency locking, compilation, SHA calculation, and
+    // immutable registry publication reviewable as one ordered package build.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "package build invariants span one ordered workflow"
+    )]
     pub(super) fn build_package_artifact(
         &self,
         subject: SubjectId,
@@ -61,9 +75,8 @@ impl VirtualMachine {
         let module_values = fields.get("modules").ok_or(VmError::TypeError(
             "Package specification is missing modules",
         ))?;
-        let module_fields = match module_values {
-            Value::Map(fields) | Value::Record(fields) => fields,
-            _ => return Err(VmError::TypeError("Package modules must be a Map")),
+        let (Value::Map(module_fields) | Value::Record(module_fields)) = module_values else {
+            return Err(VmError::TypeError("Package modules must be a Map"));
         };
         if module_fields.is_empty() || module_fields.len() > 256 {
             return Err(VmError::TypeError(
@@ -512,49 +525,41 @@ impl VirtualMachine {
         let registry_view = self
             .manager
             .read(AccessContext::new(SYSTEM_SUBJECT), registry)?;
-        let mut visiting = BTreeSet::new();
-        let mut visited = BTreeSet::new();
-        let mut sources = BTreeMap::new();
-        let mut total_source_bytes = 0_usize;
+        let mut state = PackageDependencySources {
+            registry: &registry_view,
+            visiting: BTreeSet::new(),
+            visited: BTreeSet::new(),
+            sources: BTreeMap::new(),
+            total_source_bytes: 0,
+        };
         for dependency in &dependencies {
-            self.collect_dependency_sources(
-                &registry_view,
-                dependency,
-                1,
-                &mut visiting,
-                &mut visited,
-                &mut sources,
-                &mut total_source_bytes,
-            )?;
+            self.collect_dependency_sources(dependency, 1, &mut state)?;
         }
-        Ok(sources)
+        Ok(state.sources)
     }
 
     fn collect_dependency_sources(
         &self,
-        registry: &ObjectView,
         expected: &PackageDependency,
         depth: usize,
-        visiting: &mut BTreeSet<String>,
-        visited: &mut BTreeSet<String>,
-        sources: &mut BTreeMap<String, String>,
-        total_source_bytes: &mut usize,
+        state: &mut PackageDependencySources<'_>,
     ) -> Result<(), VmError> {
-        if visited.contains(&expected.coordinate) {
+        if state.visited.contains(&expected.coordinate) {
             return Ok(());
         }
         if depth > MAX_PACKAGE_DEPENDENCY_DEPTH {
             return Err(VmError::TypeError("Package dependency depth exceeds 64"));
         }
-        if !visiting.insert(expected.coordinate.clone()) {
+        if !state.visiting.insert(expected.coordinate.clone()) {
             return Err(VmError::TypeError("Package dependency cycle detected"));
         }
-        if visiting.len() + visited.len() > MAX_PACKAGE_DEPENDENCIES {
+        if state.visiting.len() + state.visited.len() > MAX_PACKAGE_DEPENDENCIES {
             return Err(VmError::TypeError(
                 "Package dependency closure exceeds 256 Packages",
             ));
         }
-        let artifact = registry
+        let artifact = state
+            .registry
             .links()
             .get(&format!("coordinate:{}", expected.coordinate))
             .copied()
@@ -569,7 +574,8 @@ impl VirtualMachine {
         };
         if fields.get("sha256") != Some(&Value::Text(expected.sha256.clone()))
             || artifact_manifest_hash(&Value::Record(fields.clone()))? != expected.sha256
-            || registry
+            || state
+                .registry
                 .links()
                 .get(&format!("package:{}", expected.sha256))
                 != Some(&artifact)
@@ -611,39 +617,32 @@ impl VirtualMachine {
                     "Package dependency Module source is malformed",
                 ));
             };
-            *total_source_bytes =
-                total_source_bytes
+            state.total_source_bytes =
+                state
+                    .total_source_bytes
                     .checked_add(source.len())
                     .ok_or(VmError::TypeError(
                         "Package dependency sources are too large",
                     ))?;
             if package_sha256(source.as_bytes()) != *source_hash
                 || source.len() > MAX_PACKAGE_MODULE_BYTES
-                || *total_source_bytes > MAX_PACKAGE_SOURCE_BYTES
-                || sources.len() >= 256
+                || state.total_source_bytes > MAX_PACKAGE_SOURCE_BYTES
+                || state.sources.len() >= 256
             {
                 return Err(VmError::TypeError(
                     "Package dependency sources exceed their validation limits",
                 ));
             }
             let identity = package_module_import_name(&expected.coordinate, module_name);
-            if sources.insert(identity, source.clone()).is_some() {
+            if state.sources.insert(identity, source.clone()).is_some() {
                 return Err(VmError::TypeError("duplicate Package dependency module"));
             }
         }
         for dependency in &dependencies {
-            self.collect_dependency_sources(
-                registry,
-                dependency,
-                depth + 1,
-                visiting,
-                visited,
-                sources,
-                total_source_bytes,
-            )?;
+            self.collect_dependency_sources(dependency, depth + 1, state)?;
         }
-        visiting.remove(&expected.coordinate);
-        visited.insert(expected.coordinate.clone());
+        state.visiting.remove(&expected.coordinate);
+        state.visited.insert(expected.coordinate.clone());
         Ok(())
     }
 
@@ -718,9 +717,8 @@ impl VirtualMachine {
                     "Package dependency Package hash is invalid",
                 ));
             }
-            let manifest = match artifact_fields.get("manifest") {
-                Some(Value::Record(manifest)) => manifest,
-                _ => return Err(invalid_state("Package dependency Manifest is malformed")),
+            let Some(Value::Record(manifest)) = artifact_fields.get("manifest") else {
+                return Err(invalid_state("Package dependency Manifest is malformed"));
             };
             let coordinate = package_coordinate(manifest)?;
             if coordinate == self_coordinate {
@@ -859,6 +857,12 @@ impl VirtualMachine {
         self.verify_package_artifact_with_dependency_sources(package, None)
     }
 
+    // Verification deliberately checks the manifest, embedded programs,
+    // dependencies, and content hash before returning a single trusted result.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "package verification is one ordered integrity check"
+    )]
     pub(super) fn verify_package_artifact_with_dependency_sources(
         &self,
         package: ObjectId,
@@ -894,9 +898,8 @@ impl VirtualMachine {
         let Value::Record(fields) = value else {
             return Ok(false);
         };
-        let manifest = match fields.get("manifest") {
-            Some(Value::Record(manifest)) => manifest,
-            _ => return Ok(false),
+        let Some(Value::Record(manifest)) = fields.get("manifest") else {
+            return Ok(false);
         };
         if manifest.get("format_version") != Some(&Value::Integer(0))
             || manifest.get("praxis_language") != Some(&Value::Integer(0))
@@ -916,16 +919,14 @@ impl VirtualMachine {
         {
             return Ok(false);
         }
-        let expected = match fields.get("sha256") {
-            Some(Value::Text(expected)) => expected,
-            _ => return Ok(false),
+        let Some(Value::Text(expected)) = fields.get("sha256") else {
+            return Ok(false);
         };
         if package_sha256(&Value::Record(manifest.clone()).encode()?) != *expected {
             return Ok(false);
         }
-        let modules = match manifest.get("modules") {
-            Some(Value::Record(modules)) => modules,
-            _ => return Ok(false),
+        let Some(Value::Record(modules)) = manifest.get("modules") else {
+            return Ok(false);
         };
         if modules.is_empty() || modules.len() > 256 {
             return Ok(false);
@@ -968,9 +969,8 @@ impl VirtualMachine {
             Some(Value::Text(kind)) if matches!(kind.as_str(), "library" | "application") => kind,
             _ => return Ok(false),
         };
-        let dependencies = match parse_package_dependencies(manifest.get("dependencies")) {
-            Ok(dependencies) => dependencies,
-            Err(_) => return Ok(false),
+        let Ok(dependencies) = parse_package_dependencies(manifest.get("dependencies")) else {
+            return Ok(false);
         };
         let package_coordinate = format!("{namespace}/{name}/{version}");
         if dependencies

@@ -10,6 +10,8 @@ fn encode_process_state(state: &ProcessState) -> Result<Vec<u8>, VmError> {
         ProcessStatus::Halted => 2,
         ProcessStatus::Terminated => 3,
         ProcessStatus::Failed => 4,
+        ProcessStatus::Ready => 5,
+        ProcessStatus::Waiting => 6,
     });
     write_u32(&mut bytes, state_len(state.stack.len())?);
     for value in &state.stack {
@@ -55,9 +57,58 @@ fn encode_process_state(state: &ProcessState) -> Result<Vec<u8>, VmError> {
     encode_optional_value(&mut bytes, state.result.as_ref())?;
     encode_optional_value(&mut bytes, state.error.as_ref())?;
     bytes.extend_from_slice(PROCESS_RUNTIME_EXTENSION);
-    encode_optional_u64(&mut bytes, state.wake_at_unix_ms);
+    encode_optional_u64(&mut bytes, timer_deadline(&state.wait_reason));
     encode_optional_u64(&mut bytes, state.ended_at_unix_ms);
+    bytes.extend_from_slice(PROCESS_SCHEDULER_EXTENSION);
+    encode_wait_reason(&mut bytes, &state.wait_reason);
+    match state.lease_owner {
+        Some(owner) => {
+            bytes.push(1);
+            write_u128(&mut bytes, owner.as_u128());
+        }
+        None => bytes.push(0),
+    }
+    write_u64(&mut bytes, state.lease_generation);
+    encode_optional_u64(&mut bytes, state.lease_deadline_unix_ms);
     Ok(bytes)
+}
+
+fn encode_wait_reason(bytes: &mut Vec<u8>, reason: &WaitReason) {
+    match reason {
+        WaitReason::None => bytes.push(0),
+        WaitReason::Timer {
+            timer,
+            deadline_unix_ms,
+        } => {
+            bytes.push(1);
+            match timer {
+                Some(timer) => {
+                    bytes.push(1);
+                    write_u128(bytes, timer.as_u128());
+                }
+                None => bytes.push(0),
+            }
+            write_u64(bytes, *deadline_unix_ms);
+        }
+        WaitReason::Ipc(object) => encode_wait_object(bytes, 2, *object),
+        WaitReason::Effect(object) => encode_wait_object(bytes, 3, *object),
+        WaitReason::Input(object) => encode_wait_object(bytes, 4, *object),
+        WaitReason::Process(object) => encode_wait_object(bytes, 5, *object),
+    }
+}
+
+fn encode_wait_object(bytes: &mut Vec<u8>, tag: u8, object: ObjectId) {
+    bytes.push(tag);
+    write_u128(bytes, object.as_u128());
+}
+
+fn timer_deadline(reason: &WaitReason) -> Option<u64> {
+    match reason {
+        WaitReason::Timer {
+            deadline_unix_ms, ..
+        } => Some(*deadline_unix_ms),
+        _ => None,
+    }
 }
 
 fn encode_optional_value(bytes: &mut Vec<u8>, value: Option<&Value>) -> Result<(), VmError> {

@@ -92,7 +92,7 @@ fn object_essential_value(view: &oms_runtime::ObjectView) -> Result<Value, VmErr
         ),
         (
             "wake_at_unix_ms".to_owned(),
-            process.wake_at_unix_ms.map_or(Value::Null, |value| {
+            timer_deadline(&process.wait_reason).map_or(Value::Null, |value| {
                 Value::Integer(i64::try_from(value).unwrap_or(i64::MAX))
             }),
         ),

@@ -315,7 +315,7 @@ impl VirtualMachine {
                 let process = self.run_package_application(
                     current_state.subject,
                     object,
-                    Value::Array(Vec::new()),
+                    &Value::Array(Vec::new()),
                     &[],
                     transaction,
                 )?;
@@ -336,7 +336,7 @@ impl VirtualMachine {
                 let process = self.run_package_application(
                     current_state.subject,
                     object,
-                    arguments.clone(),
+                    arguments,
                     &[],
                     transaction,
                 )?;
@@ -364,7 +364,7 @@ impl VirtualMachine {
                 let process = self.run_package_application(
                     current_state.subject,
                     object,
-                    arguments.clone(),
+                    arguments,
                     &capabilities,
                     transaction,
                 )?;
@@ -426,7 +426,8 @@ impl VirtualMachine {
             }
             (CORE_PACKAGE_INSTALLATION_TYPE, "data", []) => Ok((
                 Value::Text(
-                    self.package_data(current_state.subject, object, transaction)?
+                    self.package_data(current_state.subject, object, None, transaction)?
+                        .0
                         .to_string(),
                 ),
                 None,
@@ -451,16 +452,11 @@ impl VirtualMachine {
                 None,
             )),
             (CORE_PACKAGE_INSTALLATION_TYPE, "data_import", [snapshot]) => {
-                self.package_data_import(
-                    current_state.subject,
-                    object,
-                    snapshot.clone(),
-                    transaction,
-                )?;
+                self.package_data_import(current_state.subject, object, snapshot, transaction)?;
                 Ok((Value::Null, None))
             }
             (CORE_PACKAGE_INSTALLATION_TYPE, "data_clear", []) => {
-                self.package_data_import(current_state.subject, object, Value::Null, transaction)?;
+                self.package_data_import(current_state.subject, object, &Value::Null, transaction)?;
                 Ok((Value::Null, None))
             }
             (CORE_PACKAGE_INSTALLATION_TYPE, "uninstall", []) => {
@@ -983,9 +979,11 @@ impl VirtualMachine {
                 let record =
                     EffectRecord::decode(self.manager.read(self.context, object)?.state())?;
                 let status = match record.status {
-                    ousject_provider::EffectStatus::Pending => "pending",
-                    ousject_provider::EffectStatus::Completed => "completed",
-                    ousject_provider::EffectStatus::Failed => "failed",
+                    EffectStatus::Pending => "pending",
+                    EffectStatus::Running => "running",
+                    EffectStatus::Completed => "completed",
+                    EffectStatus::Failed => "failed",
+                    EffectStatus::Unknown => "unknown",
                 };
                 Ok((Value::Text(status.to_owned()), None))
             }
@@ -993,6 +991,81 @@ impl VirtualMachine {
                 let record =
                     EffectRecord::decode(self.manager.read(self.context, object)?.state())?;
                 Ok((record.result.unwrap_or(Value::Null), None))
+            }
+            (CORE_EFFECT_TYPE, "retry", []) => {
+                if current_state.subject != SYSTEM_SUBJECT {
+                    return Err(VmError::TypeError("only local can retry an unknown Effect"));
+                }
+                let effect_view = self
+                    .manager
+                    .read(AccessContext::new(SYSTEM_SUBJECT), object)?;
+                let record = EffectRecord::decode(effect_view.state())?;
+                if record.status != EffectStatus::Unknown {
+                    return Err(VmError::TypeError("only an unknown Effect can be retried"));
+                }
+                let process_view = self
+                    .manager
+                    .read(AccessContext::new(SYSTEM_SUBJECT), record.process)?;
+                let process_id = record.process;
+                let mut waiting = decode_process_state(process_view.state())?;
+                waiting.status = ProcessStatus::Ready;
+                waiting.wait_reason = WaitReason::None;
+                waiting.lease_owner = None;
+                waiting.lease_deadline_unix_ms = None;
+                let updated = record.retry();
+                transaction
+                    .expect(object, effect_view.header().version)
+                    .expect(process_id, process_view.header().version)
+                    .update_state(object, updated.encode().map_err(VmError::from)?)
+                    .update_state(process_id, encode_process_state(&waiting)?);
+                self.stage_audit_event(
+                    current_state.subject,
+                    "effect.pending",
+                    object,
+                    Value::Record(BTreeMap::new()),
+                    transaction,
+                )?;
+                Ok((Value::Null, None))
+            }
+            (CORE_EFFECT_TYPE, "resolve", [result]) => {
+                if current_state.subject != SYSTEM_SUBJECT {
+                    return Err(VmError::TypeError(
+                        "only local can resolve an unknown Effect",
+                    ));
+                }
+                let effect_view = self
+                    .manager
+                    .read(AccessContext::new(SYSTEM_SUBJECT), object)?;
+                let record = EffectRecord::decode(effect_view.state())?;
+                if record.status != EffectStatus::Unknown {
+                    return Err(VmError::TypeError("only an unknown Effect can be resolved"));
+                }
+                let process_view = self
+                    .manager
+                    .read(AccessContext::new(SYSTEM_SUBJECT), record.process)?;
+                let process_id = record.process;
+                let mut waiting = decode_process_state(process_view.state())?;
+                waiting.status = ProcessStatus::Ready;
+                waiting.wait_reason = WaitReason::None;
+                waiting.lease_owner = None;
+                waiting.lease_deadline_unix_ms = None;
+                let updated = record.complete(result.clone());
+                transaction
+                    .expect(object, effect_view.header().version)
+                    .expect(process_id, process_view.header().version)
+                    .update_state(object, updated.encode().map_err(VmError::from)?)
+                    .update_state(process_id, encode_process_state(&waiting)?);
+                self.stage_audit_event(
+                    current_state.subject,
+                    "effect.completed",
+                    object,
+                    Value::Record(BTreeMap::from([(
+                        "resolution".to_owned(),
+                        Value::Text("manual".to_owned()),
+                    )])),
+                    transaction,
+                )?;
+                Ok((Value::Null, None))
             }
             (CORE_SESSION_TYPE, "revoke", []) => {
                 transaction.expect(object, header.version).tombstone(object);
@@ -1007,7 +1080,18 @@ impl VirtualMachine {
                     current_process,
                     current_state,
                     object,
-                    ProcessStatus::Running,
+                    ProcessStatus::Ready,
+                    transaction,
+                )?;
+                self.stage_audit_event(
+                    current_state.subject,
+                    if capability == "start" {
+                        "process.start"
+                    } else {
+                        "process.resume"
+                    },
+                    object,
+                    Value::Record(BTreeMap::new()),
                     transaction,
                 )?;
                 Ok((Value::Null, None))
@@ -1020,6 +1104,13 @@ impl VirtualMachine {
                     ProcessStatus::Suspended,
                     transaction,
                 )?;
+                self.stage_audit_event(
+                    current_state.subject,
+                    "process.suspend",
+                    object,
+                    Value::Record(BTreeMap::new()),
+                    transaction,
+                )?;
                 Ok((Value::Null, None))
             }
             (PROCESS_TYPE, "terminate", []) => {
@@ -1028,6 +1119,13 @@ impl VirtualMachine {
                     current_state,
                     object,
                     ProcessStatus::Terminated,
+                    transaction,
+                )?;
+                self.stage_audit_event(
+                    current_state.subject,
+                    "process.terminate",
+                    object,
+                    Value::Record(BTreeMap::new()),
                     transaction,
                 )?;
                 Ok((Value::Null, None))
@@ -1124,12 +1222,32 @@ impl VirtualMachine {
                     .remove_link(object, name.clone());
                 Ok((Value::Null, None))
             }
+            (oms_types::CORE_SWAP_POOL_TYPE, _, _) => {
+                self.invoke_swap_pool(object, capability, arguments, transaction)
+            }
+            (oms_types::CORE_TIMER_TYPE, _, _) => self.invoke_timer(
+                current_process,
+                current_state,
+                object,
+                capability,
+                arguments,
+                transaction,
+            ),
             (CORE_CHANNEL_TYPE, "send", [value]) => {
                 let view = self.manager.read(self.context, object)?;
                 let Value::Array(mut messages) = self.manager.value(self.context, object)? else {
                     return Err(VmError::TypeError("Channel state must be an Array"));
                 };
+                if value.encode()?.len() > 1_048_576 {
+                    return Err(VmError::TypeError("Channel message exceeds 1 MiB"));
+                }
+                if messages.len() >= 1_024 {
+                    return Err(VmError::TypeError("Channel queue is full"));
+                }
                 messages.push(value.clone());
+                if Value::Array(messages.clone()).encode()?.len() > 8 * 1_048_576 {
+                    return Err(VmError::TypeError("Channel queue exceeds 8 MiB"));
+                }
                 self.stage_object_value(object, &Value::Array(messages.clone()), transaction)?;
                 for (name, waiter) in view
                     .links()
@@ -1146,8 +1264,19 @@ impl VirtualMachine {
                         continue;
                     }
                     let mut process_state = decode_process_state(process_view.state())?;
-                    if process_state.status == ProcessStatus::Suspended {
-                        process_state.status = ProcessStatus::Running;
+                    if process_state.status == ProcessStatus::Waiting
+                        && process_state.wait_reason == WaitReason::Ipc(object)
+                    {
+                        process_state.status = ProcessStatus::Ready;
+                        process_state.wait_reason = WaitReason::None;
+                        if process_state.lease_owner.is_some() {
+                            process_state.lease_generation = process_state
+                                .lease_generation
+                                .checked_add(1)
+                                .ok_or_else(|| invalid_state("Worker lease generation overflow"))?;
+                        }
+                        process_state.lease_owner = None;
+                        process_state.lease_deadline_unix_ms = None;
                         transaction
                             .expect(*waiter, process_view.header().version)
                             .update_state(*waiter, encode_process_state(&process_state)?);
@@ -1189,7 +1318,8 @@ impl VirtualMachine {
                         current_process,
                     );
                     transaction.set_link(current_process, "$waiting_on", object);
-                    current_state.status = ProcessStatus::Suspended;
+                    current_state.status = ProcessStatus::Waiting;
+                    current_state.wait_reason = WaitReason::Ipc(object);
                 }
                 Ok((Value::Null, None))
             }

@@ -161,7 +161,11 @@ impl ObjectProvider for HostNetworkProvider {
                     .map_err(|_| ProviderError::Unavailable)?
                     .remove(&object)
                 {
-                    stream.shutdown(Shutdown::Both).map_err(adapter_error)?;
+                    match stream.shutdown(Shutdown::Both) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}
+                        Err(error) => return Err(adapter_error(error)),
+                    }
                 }
                 ProviderOutcome::result(Value::Null)
                     .with_state(network_state("tcp", "closed", None))

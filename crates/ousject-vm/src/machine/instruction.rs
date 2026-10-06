@@ -22,11 +22,21 @@ impl VirtualMachine {
         process: ObjectId,
         mut state: ProcessState,
         instruction_limit: u64,
+        lease: WorkerLease,
     ) -> Result<(Option<String>, u64), VmError> {
         const MAX_SLICE_INSTRUCTIONS: u64 = 4096;
         const MAX_SLICE_TIME: Duration = Duration::from_millis(20);
 
         let process_view = self.manager.read(self.context, process)?;
+        if state.status != ProcessStatus::Running
+            || state.lease_owner != Some(lease.owner)
+            || state.lease_generation != lease.generation
+            || state
+                .lease_deadline_unix_ms
+                .is_none_or(|deadline| deadline <= unix_time_millis())
+        {
+            return Err(VmError::WorkerLeaseExpired(process));
+        }
         let mut process_version = process_view.header().version;
         let program = self.program(state.program)?;
         let instruction_limit = instruction_limit.clamp(1, MAX_SLICE_INSTRUCTIONS);
@@ -63,6 +73,17 @@ impl VirtualMachine {
                                 // preserve that pending intent and report the
                                 // original failure for an idempotent retry.
                                 return Err(error);
+                            }
+                            if current.header().version != process_version {
+                                let committed_state = decode_process_state(current.state())?;
+                                return self.finish_step_error(
+                                    process,
+                                    current.header().version,
+                                    committed_state,
+                                    pending,
+                                    error,
+                                    executed.saturating_add(1),
+                                );
                             }
                             return self.finish_step_error(
                                 process,
@@ -115,7 +136,7 @@ impl VirtualMachine {
         if is_catchable(&error) {
             state.status = ProcessStatus::Failed;
             state.error = Some(error_value(&error));
-            state.wake_at_unix_ms = None;
+            state.wait_reason = WaitReason::None;
             state.ended_at_unix_ms = Some(unix_time_millis());
             self.flush_pending(process, process_version, &state, &mut pending)?;
             self.notify_process_ended(process)?;
@@ -205,6 +226,10 @@ impl VirtualMachine {
             .checked_add(1)
             .ok_or(VmError::TokenPositionOutOfRange(state.token_position))?;
 
+        if execute_control_token(state, &token, next)? {
+            return Ok(true);
+        }
+
         match token {
             Token::ObjectCall { method, arguments } => {
                 return self
@@ -224,43 +249,20 @@ impl VirtualMachine {
                 let binding = binding_id(state, &name)?;
                 state.stack.push(Value::Text(binding.to_string()));
             }
-            Token::Add | Token::Subtract | Token::Multiply | Token::Divide | Token::Modulo => {
-                let start = state
-                    .stack
-                    .len()
-                    .checked_sub(2)
-                    .ok_or(VmError::StackUnderflow)?;
-                let result = arithmetic_ref(&token, &state.stack[start], &state.stack[start + 1])?;
-                state.stack.truncate(start);
-                state.stack.push(result);
-            }
-            Token::Equal
+            Token::Add
+            | Token::Subtract
+            | Token::Multiply
+            | Token::Divide
+            | Token::Modulo
+            | Token::Equal
             | Token::NotEqual
             | Token::Less
             | Token::LessEqual
             | Token::Greater
-            | Token::GreaterEqual => {
-                let start = state
-                    .stack
-                    .len()
-                    .checked_sub(2)
-                    .ok_or(VmError::StackUnderflow)?;
-                let result = compare(&token, &state.stack[start], &state.stack[start + 1])?;
-                state.stack.truncate(start);
-                state.stack.push(Value::Bool(result));
-            }
+            | Token::GreaterEqual => execute_binary_pure_token(state, &token)?,
             Token::Not => {
                 let value = state.stack.pop().ok_or(VmError::StackUnderflow)?;
                 state.stack.push(Value::Bool(!value.is_truthy()));
-            }
-            Token::Jump(target) => {
-                state.token_position = target;
-                return Ok(true);
-            }
-            Token::JumpIfFalse(target) => {
-                let condition = state.stack.pop().ok_or(VmError::StackUnderflow)?;
-                state.token_position = if condition.is_truthy() { next } else { target };
-                return Ok(true);
             }
             Token::Pop => {
                 state.stack.pop().ok_or(VmError::StackUnderflow)?;
@@ -294,52 +296,6 @@ impl VirtualMachine {
             Token::BindLink { name, target } => {
                 let target = binding_id(state, &target)?;
                 bind_name(state, name, target);
-            }
-            Token::DefineFunction { end, .. }
-            | Token::DefineClass { end, .. }
-            | Token::DefineMethod { end, .. } => {
-                state.token_position = end;
-                return Ok(true);
-            }
-            Token::Return => {
-                let frame = state
-                    .frames
-                    .last()
-                    .ok_or(VmError::TypeError("return outside function"))?;
-                let stack_base =
-                    usize::try_from(frame.stack_base).map_err(|_| VmError::StackUnderflow)?;
-                let return_position = frame.return_position;
-                if state.stack.is_empty() {
-                    return Err(VmError::StackUnderflow);
-                }
-                let result = state.stack.pop().expect("return stack was checked");
-                state.frames.pop();
-                state.stack.truncate(stack_base);
-                state.stack.push(result);
-                state.token_position = return_position;
-                state.handlers.retain(|handler| {
-                    usize::try_from(handler.frame_depth)
-                        .is_ok_and(|depth| depth <= state.frames.len())
-                });
-                return Ok(true);
-            }
-            Token::BeginTry { catch, error, .. } => {
-                state.handlers.push(ExceptionHandler {
-                    catch_position: catch,
-                    error_name: error,
-                    frame_depth: u32::try_from(state.frames.len())
-                        .map_err(|_| invalid_state("too many call frames"))?,
-                    stack_base: u32::try_from(state.stack.len())
-                        .map_err(|_| invalid_state("stack is too large"))?,
-                });
-            }
-            Token::EndTry { end } => {
-                state
-                    .handlers
-                    .pop()
-                    .ok_or(VmError::TypeError("try handler stack is empty"))?;
-                state.token_position = end;
-                return Ok(true);
             }
             _ => return Ok(false),
         }
@@ -377,9 +333,9 @@ impl VirtualMachine {
         if type_id != expected_type {
             return Ok(false);
         }
-        let provider = match self.providers.get(type_id) {
-            Ok(provider) => provider,
-            Err(_) => return Ok(false),
+
+        let Ok(provider) = self.providers.get(type_id) else {
+            return Ok(false);
         };
         if !provider.ephemeral_capabilities().contains(method) {
             return Ok(false);
@@ -743,7 +699,7 @@ impl VirtualMachine {
                 state.status = ProcessStatus::Halted;
                 state.result = state.stack.last().cloned();
                 state.error = None;
-                state.wake_at_unix_ms = None;
+                state.wait_reason = WaitReason::None;
                 state.ended_at_unix_ms = Some(unix_time_millis());
                 state.token_position = next;
                 self.commit_process(process, process_view.header().version, &state)?;
@@ -752,4 +708,79 @@ impl VirtualMachine {
             }
         }
     }
+}
+
+fn execute_control_token(
+    state: &mut ProcessState,
+    token: &Token,
+    next: u32,
+) -> Result<bool, VmError> {
+    match token {
+        Token::Jump(target) => state.token_position = *target,
+        Token::JumpIfFalse(target) => {
+            let condition = state.stack.pop().ok_or(VmError::StackUnderflow)?;
+            state.token_position = if condition.is_truthy() { next } else { *target };
+        }
+        Token::DefineFunction { end, .. }
+        | Token::DefineClass { end, .. }
+        | Token::DefineMethod { end, .. } => state.token_position = *end,
+        Token::Return => {
+            let frame = state
+                .frames
+                .last()
+                .ok_or(VmError::TypeError("return outside function"))?;
+            let stack_base =
+                usize::try_from(frame.stack_base).map_err(|_| VmError::StackUnderflow)?;
+            let return_position = frame.return_position;
+            let result = state.stack.pop().ok_or(VmError::StackUnderflow)?;
+            state.frames.pop();
+            state.stack.truncate(stack_base);
+            state.stack.push(result);
+            state.token_position = return_position;
+            state.handlers.retain(|handler| {
+                usize::try_from(handler.frame_depth).is_ok_and(|depth| depth <= state.frames.len())
+            });
+        }
+        Token::BeginTry { catch, error, .. } => {
+            state.handlers.push(ExceptionHandler {
+                catch_position: *catch,
+                error_name: error.clone(),
+                frame_depth: u32::try_from(state.frames.len())
+                    .map_err(|_| invalid_state("too many call frames"))?,
+                stack_base: u32::try_from(state.stack.len())
+                    .map_err(|_| invalid_state("stack is too large"))?,
+            });
+            state.token_position = next;
+        }
+        Token::EndTry { end } => {
+            state
+                .handlers
+                .pop()
+                .ok_or(VmError::TypeError("try handler stack is empty"))?;
+            state.token_position = *end;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn execute_binary_pure_token(state: &mut ProcessState, token: &Token) -> Result<(), VmError> {
+    let start = state
+        .stack
+        .len()
+        .checked_sub(2)
+        .ok_or(VmError::StackUnderflow)?;
+    if matches!(
+        token,
+        Token::Add | Token::Subtract | Token::Multiply | Token::Divide | Token::Modulo
+    ) {
+        let result = arithmetic_ref(token, &state.stack[start], &state.stack[start + 1])?;
+        state.stack.truncate(start);
+        state.stack.push(result);
+    } else {
+        let result = compare(token, &state.stack[start], &state.stack[start + 1])?;
+        state.stack.truncate(start);
+        state.stack.push(Value::Bool(result));
+    }
+    Ok(())
 }

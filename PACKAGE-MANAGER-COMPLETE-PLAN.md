@@ -1,6 +1,8 @@
 # Ousject 完整包管理器实施计划
 
-状态：按用户要求已收窄为“可用的简单包管理”。本地构建、导入/导出、安装、精确依赖、运行、升级/回滚、卸载/恢复已接通；市场索引、搜索和可续传下载已接通。市场安装只接受 Ousject Package。尚未运行测试（用户此前要求不要主动运行测试）。
+状态：范围收窄为“可用的简单包管理”。本地构建、导入/导出、安装、精确依赖、运行、升级/回滚、卸载/恢复已接通；市场索引、搜索和可续传下载已接通。市场安装只接受 Ousject Package。测试验收命令由 [STATUS.md](STATUS.md) 记录。
+
+2026-10-07 Hosted Core 验收新增端到端覆盖：Package 构建、Bytes 导出/导入、依赖闭包和 coordinate/SHA 锁、安装校验、Manifest Export 调用、私有 Data、升级/回滚/卸载/恢复；升级和回滚提交故障会验证 Process 位置与已提交 Installation 集合不变。Application 测试还验证升级后运行 Process 仍使用旧 Package SHA 与旧 Program。本文第 17 节列的是完整发布清单，超出本轮 Hosted Core 验收范围的条目仍是后续工作。
 
 ## 当前有效范围（2026-10）
 
@@ -28,9 +30,9 @@
 
 ### 当前基线
 
-已经具备：本地 Package 构建与验证、Bytes 导入/导出、坐标和 SHA 索引、每用户 Installation、Package Module、Terminal Session 精确导入、私有 Data、资源读取、原子依赖安装、Application Process 启动、升级/回滚、卸载和七天恢复。Market 客户端已接入 CilExec Market v1 的索引、搜索、详情和分块续传下载。CilExec 的 SQLite/FCL 包格式与 Ousject 的 TF/Praxis Package 不兼容，因此不能直接安装。
+已经具备：本地 Package 构建与验证、Bytes 导入/导出、coordinate 和 SHA 索引、每用户 Installation、Package Module、Terminal Session 精确导入、私有 Data、资源读取、原子依赖安装、Application Process 启动、Export、升级/回滚、卸载和七天恢复。Market 客户端已接入 CilExec Market v1 的索引、搜索、详情和分块续传下载。CilExec 的 SQLite/FCL 包格式与 Ousject 的 TF/Praxis Package 不兼容，因此不能直接安装。
 
-成功的构建、导入、安装、运行、Export、升级、回滚、卸载和恢复已写入不可变审计 Object。Application 以独立 Package Subject 运行；`run(arguments, grants)` 只发放 Manifest 已声明且调用者明确列出的能力，并逐次校验具体方法。原始磁盘和共享 Network Endpoint 暂不授予 Application。当前剩余事项限于大于 15 MiB 制品的分块对象读取、Ousject Package 发布端和恢复验收。签名、系统扩展包、独立 Service 运行时、安装 UI 和迁移框架依用户要求不在本轮范围。
+Package 变更写入不可变 `core.package_audit` Object。Application 以独立 Package Subject 运行；`run(arguments, grants)` 只发放 Manifest 已声明且调用者明确列出的能力，并逐次校验具体方法。原始磁盘和共享 Network Endpoint 暂不授予 Application。CilExec SQLite/FCL 格式转换、远程 Ousject 发布端、签名、系统扩展包、独立 Service 运行时、安装 UI 和迁移框架不在本轮范围。
 
 ## 2. 最终使用方式
 
@@ -453,7 +455,7 @@ Repository、下载缓存和外部回执永远不是本机安装状态的权威�
 
 ## 16. 实施阶段
 
-### 阶段 1：修正构建体验和内容格式（核心功能已实现；验收和文档继续完善）
+### 阶段 1：修正构建体验和内容格式（核心功能已实现并验收）
 
 - 增加 `modules.find(name, version)`。
 - `packages.build()` 接受 Module/Program/Object，不再接受嵌入源码字符串作为正式接口。
@@ -462,9 +464,9 @@ Repository、下载缓存和外部回执永远不是本机安装状态的权威�
 - 增加 `crypto.sha256(value)` PX 能力。
 - 统一当前代码中的 `version`/`release` 命名为 `version`。
 
-完成标准：用户不用复制源码字符串即可构建 Library 和 Application；相同对象输入得到相同 SHA。Module/Program 输入、资源快照、Export 声明检查和 SHA API 已实现；验收覆盖尚待执行。
+完成标准：用户不用复制源码字符串即可构建 Library 和 Application；相同对象输入得到相同 SHA。Module/Program 输入、资源快照、Export 声明检查和 SHA API 已实现；端到端用例验证 Package 字节往返和 `verify()`。
 
-### 阶段 2：精确依赖闭包和完整安装验证（核心实现完成；验收未做）
+### 阶段 2：精确依赖闭包和完整安装验证（核心实现完成；基础闭包验收通过）
 
 - [x] Builder 从 Package/Installation 自动生成坐标和 SHA 锁。
 - [x] 实现依赖图、环检测、冲突检测和数量限制。
@@ -472,9 +474,9 @@ Repository、下载缓存和外部回执永远不是本机安装状态的权威�
 - [x] `installation.verify()` 覆盖直接依赖、Module、Package、资源和索引。
 - [x] 卸载检查活动反向依赖。
 
-尚需完成：对安装提交冲突、错误数据和崩溃恢复进行验收；后续阶段仍有多项能力未实现。
+端到端用例验证依赖随 Package 安装、依赖坐标/SHA 与依赖 Package 一致，并在升级/回滚持久提交失败时检查 Installation 集合和 Process 位置。并发安装冲突、恶意错误数据与所有安装阶段断电点仍属于扩展发布清单。
 
-### 阶段 3：Application 和 Process 版本绑定（核心实现完成；验收未做）
+### 阶段 3：Application 和 Process 版本绑定（核心实现与版本固定验收完成）
 
 - [x] 实现 `installation.run()`。
 - [x] 增加 Package Subject、Package Instance 和 Process 精确 Package Link。
@@ -482,9 +484,9 @@ Repository、下载缓存和外部回执永远不是本机安装状态的权威�
 - [x] Process 作为持久 Process 由现有调度器恢复。
 - [x] 活动实例阻止卸载对应版本。
 
-完成标准：Application 可以启动、停止并在重启后恢复；升级后旧 Process 仍执行旧代码。
+完成标准：Application 可以启动并绑定安装时的 Package/SHA/Program；端到端用例在升级后继续运行旧 Process，并核对它执行旧 Program。进程重启恢复由 Hosted Process Recovery 覆盖。
 
-### 阶段 4：权限强制和 Export（核心授权已实现；审计与 Service 尚未实现）
+### 阶段 4：权限强制和 Export（核心授权、Export 与审计已实现）
 
 - [x] Application 启动时把用户明确批准的 capability 名称映射为本机 Object Capability。
 - [x] `installation.permissions()` 返回声明能力和本机可授予状态，供 PX Shell/未来 UI 展示。
@@ -493,7 +495,7 @@ Repository、下载缓存和外部回执永远不是本机安装状态的权威�
 - [x] 每次外部能力调用都检查具体方法；`console.println` 不会隐含允许 `console.read_line`。
 - [x] 没有按 Application 隔离的 Provider 时，拒绝授予共享 Network Endpoint 和原始 Block Storage。
 - [x] 实现 Export 名称分派：调用 Installation 导出方法会创建绑定固定 Program 的 Process；Library Export 以调用者身份运行。
-- [ ] 增加返回值/调用链审计对象，并支持 Application/Service Subject 下的异步 Export。
+- [ ] 支持 Service Subject 下的异步 Export；独立 Service 运行时不在当前 Hosted Library/Application 范围。
 - [x] 成功变更与 Process 创建在同一事务中建立不可变审计记录；`packages.audit()` 使用持久索引查询。
 - [x] Library 继续只使用调用者权限。
 
@@ -508,7 +510,7 @@ Repository、下载缓存和外部回执永远不是本机安装状态的权威�
 - [x] 实现 7 天内恢复安装与 Data；到期后依赖 OMS 自动清理 payload。
 - 保留永久元数据和审计。
 
-完成标准：迁移失败不改变旧数据；回滚不覆盖新数据；误卸载可在保留期内恢复。
+完成标准：迁移框架仍未实现；已实现的版本切换不覆盖其他版本 Data，端到端用例验证 Data 保存、卸载和七天内恢复。
 
 ### 阶段 6：精简 Market 客户端（索引和下载已实现；格式转换未实现）
 
@@ -542,7 +544,9 @@ Effect 化外部请求和按坐标自动获取不是这次精简实现的一部�
 
 完成标准：所有验收矩阵通过，文档只把真实完成的能力标为已实现。
 
-## 17. 必须覆盖的验收场景
+## 17. 完整包管理器的扩展发布清单
+
+下列场景记录超出当前 Hosted Core 验收的完整发布要求。本轮已有覆盖范围见本文开头、阶段 1–5 与 `PRE-HOST-ACCEPTANCE.md`；未执行的条目不应描述为已验收。
 
 1. 同样输入重复构建得到相同 SHA 和同一个 Package。
 2. 改动一个字符、一个资源或一个依赖后 SHA 改变。

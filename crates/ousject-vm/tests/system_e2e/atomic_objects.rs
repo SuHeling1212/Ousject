@@ -10,7 +10,7 @@ fn praxis_object_creation_and_process_advance_are_atomic() {
     let process = vm
         .create_process(&compile("item = object.create(\"core.text\", \"x\")").unwrap())
         .unwrap();
-    assert_eq!(vm.run(process, 2).unwrap().status, ProcessStatus::Running);
+    assert_eq!(vm.run(process, 2).unwrap().status, ProcessStatus::Ready);
     let before = vm.process_state(process).unwrap();
     let count = vm.manager().stats().unwrap().object_count;
     backend.fail_next.store(true, Ordering::SeqCst);
@@ -46,7 +46,7 @@ fn praxis_object_replacement_and_process_advance_are_atomic() {
         vm.run(process, u64::try_from(replace_position).unwrap())
             .unwrap()
             .status,
-        ProcessStatus::Running
+        ProcessStatus::Ready
     );
     let item = vm.process_state(process).unwrap().variables["item"];
     let before = vm.process_state(process).unwrap();
@@ -137,7 +137,7 @@ transaction {
     .unwrap();
     let process = vm.create_process(&program).unwrap();
     while vm.process_state(process).unwrap().token_position != transaction_position {
-        assert_eq!(vm.run(process, 1).unwrap().status, ProcessStatus::Running);
+        assert_eq!(vm.run(process, 1).unwrap().status, ProcessStatus::Ready);
     }
     let bindings = vm.process_state(process).unwrap().variables;
     let source = bindings["source"];

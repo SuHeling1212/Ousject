@@ -132,83 +132,129 @@ fn require_expected(
     }
 }
 
+struct ApplyState<'a> {
+    access: AccessContext,
+    expected: &'a BTreeMap<ObjectId, ObjectVersion>,
+    changed: &'a mut BTreeSet<ObjectId>,
+    created: &'a mut BTreeSet<ObjectId>,
+    relationships_changed: &'a mut BTreeSet<(ObjectId, ObjectId, bool)>,
+    cycle_starts: &'a mut BTreeSet<ObjectId>,
+}
+
+struct AppliedTransactions {
+    results: Vec<CommitResult>,
+    changed: BTreeSet<ObjectId>,
+    tombstone_deadlines: Vec<u64>,
+}
+
+fn apply_transactions(
+    candidate: &mut ShardState,
+    transactions: Vec<Transaction>,
+    types: &TypeRegistry,
+) -> Result<AppliedTransactions, OmsError> {
+    let mut results = Vec::with_capacity(transactions.len());
+    let mut tombstone_deadlines = Vec::new();
+    let mut batch_changed = BTreeSet::new();
+    for transaction in transactions {
+        validate_expected(candidate, &transaction.expected)?;
+        let mut changed = BTreeSet::new();
+        let mut created = BTreeSet::new();
+        let mut relationships_changed = BTreeSet::new();
+        let mut cycle_starts = BTreeSet::new();
+        {
+            let mut apply = ApplyState {
+                access: transaction.context,
+                expected: &transaction.expected,
+                changed: &mut changed,
+                created: &mut created,
+                relationships_changed: &mut relationships_changed,
+                cycle_starts: &mut cycle_starts,
+            };
+            for operation in transaction.operations {
+                apply_operation(candidate, operation, &mut apply)?;
+            }
+        }
+
+        validate_parent_changes(candidate, &relationships_changed, &cycle_starts)?;
+        validate_created_type_index(candidate, &created)?;
+        if changed.iter().any(|object| {
+            candidate
+                .objects
+                .get(object)
+                .is_some_and(|record| record.header.type_id == TYPE_DESCRIPTOR_TYPE)
+        }) {
+            validate_dynamic_types(candidate, types)?;
+        }
+
+        let mut versions = BTreeMap::new();
+        for &object in &changed {
+            let record = candidate
+                .objects
+                .get_mut(&object)
+                .ok_or(OmsError::NotFound(object))?;
+            if let Some(deadline) = tombstone_reap_deadline(record) {
+                tombstone_deadlines.push(deadline);
+            }
+            if !created.contains(&object) {
+                record.header.version = record
+                    .header
+                    .version
+                    .checked_next()
+                    .ok_or(OmsError::VersionExhausted(object))?;
+            }
+            versions.insert(object, record.header.version);
+            batch_changed.insert(object);
+        }
+        results.push(CommitResult {
+            transaction_id: transaction.id,
+            versions,
+        });
+    }
+    Ok(AppliedTransactions {
+        results,
+        changed: batch_changed,
+        tombstone_deadlines,
+    })
+}
+
 fn apply_operation(
     state: &mut ShardState,
-    context: AccessContext,
     operation: Operation,
-    expected: &BTreeMap<ObjectId, ObjectVersion>,
-    changed: &mut BTreeSet<ObjectId>,
-    created: &mut BTreeSet<ObjectId>,
-    relationships_changed: &mut BTreeSet<(ObjectId, ObjectId, bool)>,
-    cycle_starts: &mut BTreeSet<ObjectId>,
+    apply: &mut ApplyState<'_>,
 ) -> Result<(), OmsError> {
     match operation {
-        Operation::Create(request) => apply_create(
-            state,
-            context,
-            request,
-            expected,
-            changed,
-            created,
-            relationships_changed,
-        ),
+        Operation::Create(request) => apply_create(state, request, apply),
         Operation::UpdateState {
             object,
             state: data,
-        } => apply_update(state, context, object, data, expected, changed),
+        } => apply_update(state, object, data, apply),
         Operation::SetLink {
             source,
             name,
             target,
-        } => apply_set_link(
-            state, context, source, name, target, expected, changed, created,
-        ),
-        Operation::RemoveLink { source, name } => {
-            apply_remove_link(state, context, source, &name, expected, changed)
+        } => apply_set_link(state, source, name, target, apply),
+        Operation::RemoveLink { source, name } => apply_remove_link(state, source, &name, apply),
+        Operation::Reparent { child, new_parent } => {
+            apply_reparent(state, child, new_parent, apply)
         }
-        Operation::Reparent { child, new_parent } => apply_reparent(
-            state,
-            context,
-            child,
-            new_parent,
-            expected,
-            changed,
-            relationships_changed,
-            cycle_starts,
-        ),
         Operation::Grant {
             object,
             subject,
             capability,
-        } => apply_grant(
-            state, context, object, subject, capability, expected, changed,
-        ),
+        } => apply_grant(state, object, subject, capability, apply),
         Operation::Revoke {
             object,
             subject,
             capability,
-        } => apply_revoke(
-            state, context, object, subject, capability, expected, changed,
-        ),
-        Operation::Tombstone { object } => apply_tombstone(
-            state,
-            context,
-            object,
-            expected,
-            changed,
-            relationships_changed,
-        ),
+        } => apply_revoke(state, object, subject, capability, apply),
+        Operation::Tombstone { object } => apply_tombstone(state, object, apply),
     }
 }
 
 fn apply_create(
     state: &mut ShardState,
-    context: AccessContext,
     request: CreateObject,
-    expected: &BTreeMap<ObjectId, ObjectVersion>,
-    changed: &mut BTreeSet<ObjectId>,
-    created: &mut BTreeSet<ObjectId>,
-    relationships_changed: &mut BTreeSet<(ObjectId, ObjectId, bool)>,
+    apply: &mut ApplyState<'_>,
 ) -> Result<(), OmsError> {
     if state.objects.contains_key(&request.id) {
         return Err(OmsError::InvalidOperation("ObjectId already exists"));
@@ -227,14 +273,14 @@ fn apply_create(
         }
     }
     if let Some(parent) = request.parent {
-        if !created.contains(&parent) {
-            require_expected(expected, parent)?;
+        if !apply.created.contains(&parent) {
+            require_expected(apply.expected, parent)?;
         }
         let parent_record = active_record_mut(state, parent)?;
-        parent_record.require(context, Capability::CreateChild)?;
+        parent_record.require(apply.access, Capability::CreateChild)?;
         parent_record.children.insert(request.id);
-        changed.insert(parent);
-        relationships_changed.insert((parent, request.id, true));
+        apply.changed.insert(parent);
+        apply.relationships_changed.insert((parent, request.id, true));
     }
     let id = request.id;
     let type_id = request.type_id;
@@ -254,45 +300,40 @@ fn apply_create(
             links: request.links,
             capabilities: request.capabilities,
             policy: AccessPolicy {
-                owner: context.subject,
+                owner: apply.access.subject,
                 grants: request.initial_grants,
             },
         },
     );
     state.by_type.entry(type_id).or_default().insert(id);
-    changed.insert(id);
-    created.insert(id);
+    apply.changed.insert(id);
+    apply.created.insert(id);
     Ok(())
 }
 
 fn apply_update(
     state: &mut ShardState,
-    context: AccessContext,
     object: ObjectId,
     data: Vec<u8>,
-    expected: &BTreeMap<ObjectId, ObjectVersion>,
-    changed: &mut BTreeSet<ObjectId>,
+    apply: &mut ApplyState<'_>,
 ) -> Result<(), OmsError> {
-    require_expected(expected, object)?;
+    require_expected(apply.expected, object)?;
     let record = active_record_mut(state, object)?;
-    record.require(context, Capability::ReplaceValue)?;
+    record.require(apply.access, Capability::ReplaceValue)?;
     record.state = Arc::from(data);
-    changed.insert(object);
+    apply.changed.insert(object);
     Ok(())
 }
 
 fn apply_set_link(
     state: &mut ShardState,
-    context: AccessContext,
     source: ObjectId,
     name: String,
     target: ObjectId,
-    expected: &BTreeMap<ObjectId, ObjectVersion>,
-    changed: &mut BTreeSet<ObjectId>,
-    created: &BTreeSet<ObjectId>,
+    apply: &mut ApplyState<'_>,
 ) -> Result<(), OmsError> {
-    if !created.contains(&source) {
-        require_expected(expected, source)?;
+    if !apply.created.contains(&source) {
+        require_expected(apply.expected, source)?;
     }
     if name.is_empty() {
         return Err(OmsError::InvalidOperation("link name cannot be empty"));
@@ -302,79 +343,71 @@ fn apply_set_link(
     if record.header.type_id == CORE_NAMESPACE_TYPE {
         validate_name(&name)?;
     }
-    record.require(context, Capability::Link)?;
+    record.require(apply.access, Capability::Link)?;
     record.links.insert(name, target);
-    changed.insert(source);
+    apply.changed.insert(source);
     Ok(())
 }
 
 fn apply_remove_link(
     state: &mut ShardState,
-    context: AccessContext,
     source: ObjectId,
     name: &str,
-    expected: &BTreeMap<ObjectId, ObjectVersion>,
-    changed: &mut BTreeSet<ObjectId>,
+    apply: &mut ApplyState<'_>,
 ) -> Result<(), OmsError> {
-    require_expected(expected, source)?;
+    require_expected(apply.expected, source)?;
     let record = active_record_mut(state, source)?;
     if record.header.type_id == CORE_NAMESPACE_TYPE {
         validate_name(name)?;
     }
-    record.require(context, Capability::Link)?;
+    record.require(apply.access, Capability::Link)?;
     record.links.remove(name);
-    changed.insert(source);
+    apply.changed.insert(source);
     Ok(())
 }
 
 fn apply_reparent(
     state: &mut ShardState,
-    context: AccessContext,
     child: ObjectId,
     new_parent: Option<ObjectId>,
-    expected: &BTreeMap<ObjectId, ObjectVersion>,
-    changed: &mut BTreeSet<ObjectId>,
-    relationships_changed: &mut BTreeSet<(ObjectId, ObjectId, bool)>,
-    cycle_starts: &mut BTreeSet<ObjectId>,
+    apply: &mut ApplyState<'_>,
 ) -> Result<(), OmsError> {
-    require_expected(expected, child)?;
+    require_expected(apply.expected, child)?;
     let old_parent = active_record(state, child)?.header.parent_id;
-    active_record(state, child)?.require(context, Capability::Reparent)?;
+    active_record(state, child)?.require(apply.access, Capability::Reparent)?;
 
     if let Some(parent) = old_parent {
-        require_expected(expected, parent)?;
+        require_expected(apply.expected, parent)?;
         let parent_record = active_record_mut(state, parent)?;
-        parent_record.require(context, Capability::Reparent)?;
+        parent_record.require(apply.access, Capability::Reparent)?;
         parent_record.children.remove(&child);
-        changed.insert(parent);
-        relationships_changed.insert((parent, child, false));
+        apply.changed.insert(parent);
+        apply.relationships_changed.insert((parent, child, false));
     }
     if let Some(parent) = new_parent {
-        require_expected(expected, parent)?;
+        require_expected(apply.expected, parent)?;
         let parent_record = active_record_mut(state, parent)?;
-        parent_record.require(context, Capability::Reparent)?;
+        parent_record.require(apply.access, Capability::Reparent)?;
         parent_record.children.insert(child);
-        changed.insert(parent);
-        relationships_changed.insert((parent, child, true));
+        apply.changed.insert(parent);
+        apply.relationships_changed.insert((parent, child, true));
     }
     active_record_mut(state, child)?.header.parent_id = new_parent;
-    changed.insert(child);
-    cycle_starts.insert(child);
+    apply.changed.insert(child);
+    apply.cycle_starts.insert(child);
     Ok(())
 }
 
 fn apply_grant(
     state: &mut ShardState,
-    context: AccessContext,
     object: ObjectId,
     subject: SubjectId,
     capability: Capability,
-    expected: &BTreeMap<ObjectId, ObjectVersion>,
-    changed: &mut BTreeSet<ObjectId>,
+    apply: &mut ApplyState<'_>,
 ) -> Result<(), OmsError> {
-    require_expected(expected, object)?;
+    require_expected(apply.expected, object)?;
     let record = active_record_mut(state, object)?;
-    record.require(context, Capability::ManagePolicy)?;
+    record.require(apply.access, Capability::ManagePolicy)?;
     if !record.capabilities.contains(&capability) {
         return Err(OmsError::InvalidOperation(
             "cannot grant a capability unsupported by the object",
@@ -386,41 +419,36 @@ fn apply_grant(
         .entry(subject)
         .or_default()
         .insert(capability);
-    changed.insert(object);
+    apply.changed.insert(object);
     Ok(())
 }
 
 fn apply_revoke(
     state: &mut ShardState,
-    context: AccessContext,
     object: ObjectId,
     subject: SubjectId,
     capability: Capability,
-    expected: &BTreeMap<ObjectId, ObjectVersion>,
-    changed: &mut BTreeSet<ObjectId>,
+    apply: &mut ApplyState<'_>,
 ) -> Result<(), OmsError> {
-    require_expected(expected, object)?;
+    require_expected(apply.expected, object)?;
     let record = active_record_mut(state, object)?;
-    record.require(context, Capability::ManagePolicy)?;
+    record.require(apply.access, Capability::ManagePolicy)?;
     if let Some(capabilities) = record.policy.grants.get_mut(&subject) {
         capabilities.remove(&capability);
         if capabilities.is_empty() {
             record.policy.grants.remove(&subject);
         }
     }
-    changed.insert(object);
+    apply.changed.insert(object);
     Ok(())
 }
 
 fn apply_tombstone(
     state: &mut ShardState,
-    context: AccessContext,
     object: ObjectId,
-    expected: &BTreeMap<ObjectId, ObjectVersion>,
-    changed: &mut BTreeSet<ObjectId>,
-    relationships_changed: &mut BTreeSet<(ObjectId, ObjectId, bool)>,
+    apply: &mut ApplyState<'_>,
 ) -> Result<(), OmsError> {
-    require_expected(expected, object)?;
+    require_expected(apply.expected, object)?;
     let object_record = active_record(state, object)?;
     if !object_record.children.is_empty() {
         return Err(OmsError::InvalidOperation(
@@ -428,7 +456,7 @@ fn apply_tombstone(
         ));
     }
     let parent = object_record.header.parent_id;
-    object_record.require(context, Capability::Retire)?;
+    object_record.require(apply.access, Capability::Retire)?;
     if unresolved_effect_state(object_record.header.type_id, &object_record.state) {
         return Err(OmsError::InvalidOperation(
             "an unresolved Effect cannot be tombstoned",
@@ -436,18 +464,18 @@ fn apply_tombstone(
     }
     let retired_at_unix_ms = unix_time_millis()?;
     if let Some(parent) = parent {
-        require_expected(expected, parent)?;
+        require_expected(apply.expected, parent)?;
         let parent_record = active_record_mut(state, parent)?;
-        parent_record.require(context, Capability::Reparent)?;
+        parent_record.require(apply.access, Capability::Reparent)?;
         parent_record.children.remove(&object);
-        changed.insert(parent);
-        relationships_changed.insert((parent, object, false));
+        apply.changed.insert(parent);
+        apply.relationships_changed.insert((parent, object, false));
     }
     let record = active_record_mut(state, object)?;
     record.header.parent_id = None;
     record.header.lifecycle = LifecycleState::Tombstoned;
     record.retired_at_unix_ms = Some(retired_at_unix_ms);
-    changed.insert(object);
+    apply.changed.insert(object);
     Ok(())
 }
 

@@ -37,12 +37,21 @@ impl VirtualMachine {
                 let deadline = unix_time_millis()
                     .checked_add(milliseconds)
                     .ok_or(VmError::TypeError("sleep deadline is too large"))?;
+                let mut timer = self.prepare_sleep_timer(process, deadline)?;
+                let timer_id = timer.id;
+                timer.links.insert(format!("$wait:{process}"), process);
                 state.stack.push(Value::Null);
                 state.token_position = next;
-                state.status = ProcessStatus::Suspended;
-                state.wake_at_unix_ms = Some(deadline);
+                state.status = ProcessStatus::Waiting;
+                state.wait_reason = WaitReason::Timer {
+                    timer: Some(timer_id),
+                    deadline_unix_ms: deadline,
+                };
                 state.ended_at_unix_ms = None;
-                transaction.update_state(process, encode_process_state(state)?);
+                transaction
+                    .create(timer)
+                    .set_link(process, "$timer", timer_id)
+                    .update_state(process, encode_process_state(state)?);
                 self.manager.commit(transaction)?;
                 return Ok(None);
             }
@@ -67,6 +76,13 @@ impl VirtualMachine {
                 // Waking a registered waiter is a scheduler action. The caller
                 // is checked above, then the trusted VM may update Processes
                 // owned by other Subjects in the same atomic commit.
+                transaction = self.manager.begin(AccessContext::new(SYSTEM_SUBJECT));
+                transaction.expect(process, version);
+            } else if (receiver_type == PROCESS_TYPE
+                && matches!(method, "start" | "resume" | "suspend" | "terminate"))
+                || (receiver_type == CORE_EFFECT_TYPE && matches!(method, "retry" | "resolve"))
+                || matches!(method, "grant" | "revoke")
+            {
                 transaction = self.manager.begin(AccessContext::new(SYSTEM_SUBJECT));
                 transaction.expect(process, version);
             }

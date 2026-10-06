@@ -4,8 +4,13 @@ use oms_types::{
     CORE_SESSION_TYPE, CORE_TERMINAL_SESSION_TYPE, CORE_VALUE_TYPE, Capability, LifecycleState,
     NET_ENDPOINT_TYPE, ObjectId, OmsError, SubjectId, TypeId,
 };
-use ousject_provider::{EffectRecord, ObjectProvider, ProviderError, ProviderOutcome};
-use ousject_vm::{ConsoleProvider, ProcessStatus, SYSTEM_SUBJECT, VirtualMachine, VmError};
+use ousject_provider::{
+    EffectRecord, EffectRecoveryPolicy, EffectStatus, ObjectProvider, ProviderError,
+    ProviderOutcome,
+};
+use ousject_vm::{
+    ConsoleProvider, CooperativeScheduler, ProcessStatus, SYSTEM_SUBJECT, VirtualMachine, VmError,
+};
 use praxis_compiler::{compile, compile_program};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -28,10 +33,13 @@ fn vm_with_console(manager: Arc<InMemoryObjectManager>) -> VirtualMachine {
 }
 
 mod atomic_objects;
+mod audit;
 mod durable_effects;
 mod input_console;
+mod ipc_recovery;
 mod language;
 mod math;
+mod package_lifecycle;
 mod persistent_terminal;
 mod recovery;
 mod security_network;
@@ -40,3 +48,4 @@ use durable_effects::FaultBackend;
 use input_console::InputConsole;
 mod services;
 mod shell_auth;
+mod swap_pool;

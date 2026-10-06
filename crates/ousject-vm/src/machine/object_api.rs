@@ -461,16 +461,33 @@ impl VirtualMachine {
                 let subject = subject
                     .parse::<SubjectId>()
                     .map_err(|_| VmError::TypeError("invalid hexadecimal SubjectId"))?;
-                let Value::Text(capability) = &args[1] else {
+                let Value::Text(capability_name) = &args[1] else {
                     return Err(VmError::TypeError("capability name must be text"));
                 };
-                let capability = capability_from_name(capability)?;
+                let capability = capability_from_name(capability_name)?;
                 transaction.expect(object, view.header().version);
                 if method == "grant" {
                     transaction.grant(object, subject, capability);
                 } else {
                     transaction.revoke(object, subject, capability);
                 }
+                self.stage_audit_event(
+                    self.context.subject,
+                    if method == "grant" {
+                        "permission.grant"
+                    } else {
+                        "permission.revoke"
+                    },
+                    object,
+                    Value::Record(BTreeMap::from([
+                        ("subject".to_owned(), Value::Text(subject.to_string())),
+                        (
+                            "capability".to_owned(),
+                            Value::Text(capability_name.clone()),
+                        ),
+                    ])),
+                    transaction,
+                )?;
                 Ok(Value::Null)
             }
             _ => Err(VmError::TypeError("invalid Object method or arguments")),

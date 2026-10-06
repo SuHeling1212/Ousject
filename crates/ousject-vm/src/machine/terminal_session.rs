@@ -51,9 +51,12 @@ impl VirtualMachine {
             stack: Vec::new(),
             variables,
             status: ProcessStatus::Halted,
+            wait_reason: WaitReason::None,
+            lease_owner: None,
+            lease_generation: 0,
+            lease_deadline_unix_ms: None,
             result: None,
             error: None,
-            wake_at_unix_ms: None,
             ended_at_unix_ms: Some(unix_time_millis()),
             frames: Vec::new(),
             handlers: Vec::new(),
@@ -127,7 +130,10 @@ impl VirtualMachine {
         }
         if matches!(
             process_state.status,
-            ProcessStatus::Running | ProcessStatus::Suspended
+            ProcessStatus::Running
+                | ProcessStatus::Ready
+                | ProcessStatus::Waiting
+                | ProcessStatus::Suspended
         ) {
             return Err(VmError::TypeError(
                 "Terminal Session Process is still active",
@@ -154,16 +160,16 @@ impl VirtualMachine {
         .map_err(|error| VmError::Provider(error.to_string()))?;
         let start = append_interactive_program(&mut program, submitted)?;
         process_state.token_position = start;
-        process_state.status = ProcessStatus::Running;
+        process_state.status = ProcessStatus::Ready;
+        process_state.wait_reason = WaitReason::None;
         process_state.result = None;
         process_state.error = None;
-        process_state.wake_at_unix_ms = None;
         process_state.ended_at_unix_ms = None;
 
         let Some(Value::Array(mut history)) = fields.remove("history") else {
             return Err(invalid_state("Terminal Session history is malformed"));
         };
-        history.push(Value::Text(source.to_owned()));
+        history.push(Value::Text(sanitize_terminal_history_source(source)));
         if history.len() > 100 {
             history.remove(0);
         }
@@ -311,7 +317,10 @@ impl VirtualMachine {
         if process != current_process
             && matches!(
                 process_state.status,
-                ProcessStatus::Running | ProcessStatus::Suspended
+                ProcessStatus::Running
+                    | ProcessStatus::Ready
+                    | ProcessStatus::Waiting
+                    | ProcessStatus::Suspended
             )
         {
             return Err(VmError::TypeError(
@@ -367,7 +376,7 @@ impl VirtualMachine {
         process_state.handlers.clear();
         process_state.result = None;
         process_state.error = None;
-        process_state.wake_at_unix_ms = None;
+        process_state.wait_reason = WaitReason::None;
         process_state.ended_at_unix_ms = Some(unix_time_millis());
         if process == current_process {
             *current_state = process_state;
@@ -395,7 +404,10 @@ impl VirtualMachine {
         let view = self.manager.read(self.context, session)?;
         let mut fields = terminal_record(view.state())?;
         Self::validate_terminal_session_owner(&fields, owner)?;
-        fields.insert("pending_input".to_owned(), Value::Text(source.to_owned()));
+        fields.insert(
+            "pending_input".to_owned(),
+            Value::Text(sanitize_terminal_history_source(source)),
+        );
         transaction
             .expect(session, view.header().version)
             .update_state(session, Value::Record(fields).encode()?);
@@ -462,7 +474,7 @@ impl VirtualMachine {
         process_state.handlers.clear();
         process_state.result = None;
         process_state.error = None;
-        process_state.wake_at_unix_ms = None;
+        process_state.wait_reason = WaitReason::None;
         process_state.ended_at_unix_ms = Some(unix_time_millis());
         fields.insert("pending_input".to_owned(), Value::Text(String::new()));
         transaction
@@ -495,7 +507,7 @@ impl VirtualMachine {
         process_state.handlers.clear();
         process_state.result = None;
         process_state.error = None;
-        process_state.wake_at_unix_ms = None;
+        process_state.wait_reason = WaitReason::None;
         process_state.ended_at_unix_ms = Some(unix_time_millis());
         fields.insert("pending_input".to_owned(), Value::Text(String::new()));
         let mut transaction = self.manager.begin(self.context);
@@ -677,4 +689,46 @@ fn relocate_terminal_token(
         _ => {}
     }
     Ok(())
+}
+
+fn sanitize_terminal_history_source(source: &str) -> String {
+    let normalized = source.to_ascii_lowercase();
+    let sensitive_markers = [
+        "password",
+        "passphrase",
+        "credential",
+        "read_secret",
+        "initialize_local(",
+        "create_user(",
+        "login(",
+        "change_password(",
+        "private_key",
+        "secret:",
+    ];
+    if sensitive_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        "<redacted sensitive input>".to_owned()
+    } else {
+        source.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_terminal_history_source;
+
+    #[test]
+    fn terminal_history_redacts_secret_bearing_submissions() {
+        let sanitized = sanitize_terminal_history_source(
+            "authentication.login(\"alice\", \"private-password\")",
+        );
+        assert_eq!(sanitized, "<redacted sensitive input>");
+        assert!(!sanitized.contains("private-password"));
+        assert_eq!(
+            sanitize_terminal_history_source("console.println(\"safe\")"),
+            "console.println(\"safe\")"
+        );
+    }
 }

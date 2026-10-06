@@ -137,6 +137,34 @@ impl TypeRegistry {
                 &["send", "receive", "wait"],
             ),
             type_descriptor(
+                oms_types::CORE_SWAP_POOL_TYPE,
+                "core.swap_pool",
+                ValueSchema::Record,
+                CreationPolicy::Public,
+                &["attach", "detach", "get", "list", "contains"],
+            ),
+            type_descriptor(
+                oms_types::CORE_TIMER_TYPE,
+                "core.timer",
+                ValueSchema::Record,
+                CreationPolicy::Public,
+                &["arm", "wait", "cancel", "status"],
+            ),
+            type_descriptor(
+                oms_types::CORE_AUDIT_TYPE,
+                "core.audit",
+                ValueSchema::Record,
+                CreationPolicy::ProviderOnly,
+                &[],
+            ),
+            type_descriptor(
+                oms_types::CORE_AUDIT_EVENT_TYPE,
+                "core.audit_event",
+                ValueSchema::Record,
+                CreationPolicy::ProviderOnly,
+                &[],
+            ),
+            type_descriptor(
                 CORE_NAMESPACE_TYPE,
                 "core.namespace",
                 ValueSchema::Record,
@@ -190,7 +218,7 @@ impl TypeRegistry {
                 "core.effect",
                 ValueSchema::Record,
                 CreationPolicy::ProviderOnly,
-                &["status", "result"],
+                &["status", "result", "retry", "resolve"],
             ),
             type_descriptor(
                 CORE_CONSOLE_TYPE,

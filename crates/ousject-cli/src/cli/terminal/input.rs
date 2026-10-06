@@ -27,8 +27,7 @@ pub(super) fn input_reader(
             }
             let should_read = input
                 .lock()
-                .map(|state| state.owner.is_some() || !state.interrupt_watchers.is_empty())
-                .unwrap_or(false);
+                .is_ok_and(|state| state.owner.is_some() || !state.interrupt_watchers.is_empty());
             if !should_read {
                 parser.clear_pending();
                 break;

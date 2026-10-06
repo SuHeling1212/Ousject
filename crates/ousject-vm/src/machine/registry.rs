@@ -140,8 +140,11 @@ impl VirtualMachine {
             }
             if view.header().type_id == CORE_EFFECT_TYPE {
                 let effect = EffectRecord::decode(view.state())?;
-                if effect.status == ousject_provider::EffectStatus::Pending {
-                    return Err(VmError::TypeError("a pending Effect cannot be retired"));
+                if matches!(
+                    effect.status,
+                    EffectStatus::Pending | EffectStatus::Running | EffectStatus::Unknown
+                ) {
+                    return Err(VmError::TypeError("an unresolved Effect cannot be retired"));
                 }
             }
             discovery_order.push(object);
@@ -277,7 +280,10 @@ impl VirtualMachine {
                         }
                         return Ok(Value::Text("halted".to_owned()));
                     }
-                    if report.status == ProcessStatus::Suspended {
+                    if matches!(
+                        report.status,
+                        ProcessStatus::Waiting | ProcessStatus::Suspended
+                    ) {
                         if self.poll_pending_effect(process)? {
                             std::thread::sleep(std::time::Duration::from_millis(10));
                             continue;
@@ -288,6 +294,9 @@ impl VirtualMachine {
                             continue;
                         }
                         return Ok(Value::Text("suspended".to_owned()));
+                    }
+                    if report.status == ProcessStatus::Ready {
+                        continue;
                     }
                     if report.status != ProcessStatus::Running {
                         return Ok(Value::Text(process_status_name(report.status).to_owned()));

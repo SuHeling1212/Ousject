@@ -48,10 +48,14 @@
 | `core.session` (`1104`) | record / provider_only | `revoke` |
 | `core.effect` (`1105`) | record / provider_only | `status, result` |
 | `core.channel` (`1106`) | collection / public | `send, receive, wait`；正常初值为 `[]` |
+| `core.swap_pool` (`1122`) | record / public | `attach, detach, get, list, contains`；持久 Object membership Links |
+| `core.timer` (`1123`) | record / public | `arm, wait, cancel, status`；持久 deadline |
+| `core.audit` (`1124`) | record / provider_only | 内核追加式审计根，不发布普通 Praxis 读取 capability |
+| `core.audit_event` (`1125`) | record / provider_only | 追加式动作、Actor、Target、时间及受限详情 |
 | `core.system` (`1107`) | record / provider_only | `status, health_check, shutdown, restart` |
 | `core.authentication` (`1108`) | record / provider_only | `local_initialized, initialize_local, login, logout, current_user, change_password` |
 | `core.user_registry` (`1109`) | record / provider_only | `create_user, users, disable_user` |
-| `core.scheduler` (`110a`) | record / provider_only | **只有类型描述；当前未发布可供 Praxis 调用的调度器对象** |
+| `core.scheduler` (`110a`) | record / provider_only | **只有类型描述；调度器为内核机制，不发布 Praxis 调用对象** |
 | `core.compiler` (`110b`) | record / provider_only | `compile, validate, disassemble` |
 | `core.type_registry` (`110c`) | record / provider_only | `register, types, descriptor` |
 | `core.provider_registry` (`110d`) | record / provider_only | `providers, devices` |
@@ -122,7 +126,7 @@ Shard 路由由 ObjectId 固定决定；查找/访问先路由到 Shard。程序
 | 函数/Class | `DefineFunction, CallFunction, Return, DefineClass, DefineMethod, SuperCall` |
 | 异常/事务 | `BeginTry, EndTry, Transaction, CommitTransaction` |
 
-一个 Process 是 `core.process` Object，状态包含 Program ID、SubjectId、当前 Token 位置、值栈、变量名→ObjectId、运行状态、结果、错误、唤醒时间、结束时间、函数帧及异常处理栈。状态有 `Running`、`Suspended`、`Halted`、`Terminated`、`Failed`。程序是 `core.program` Object，内容是 TF；Process 引用 Program，二者不是同一个 Object。启动新程序可由编译、`program.execute(...)` 或当前 Program 内 `object.create("core.process", {entry: "函数名", start: true, links: {}})` 的受控内核路径完成；`entry` 必须是零参数函数，`start` 默认为 `false`，`links` 可省略。每次执行 Token 时同步更新 Process 状态与必要的变量/对象；错误可进入 `catch`，未捕获则标记 `Failed` 并保存错误。`Halt` 保存结果和结束时间。步数上限让未完成 Process 可从持久 Token 位置恢复。
+一个 Process 是 `core.process` Object，状态包含 Program ID、SubjectId、当前 Token 位置、值栈、变量名→ObjectId、运行状态、统一 WaitReason、结果、错误、结束时间、函数帧及异常处理栈。运行状态为 `Ready`、`Running`、`Waiting`、`Suspended`、`Halted`、`Terminated`、`Failed`。程序是 `core.program` Object，内容是 TF；Process 引用 Program，二者不是同一个 Object。启动新程序可由编译、`program.execute(...)` 或当前 Program 内 `object.create("core.process", {entry: "函数名", start: true, links: {}})` 的受控内核路径完成；`entry` 必须是零参数函数，`start` 默认为 `false`，`links` 可省略。每个执行片的 Process 状态和 Object 修改共同提交；错误可进入 `catch`，未捕获则标记 `Failed` 并保存错误。`Halt` 保存结果和结束时间。步数上限让未完成 Process 可从持久 Token 位置恢复。
 
 变量在顶层属于 Process；函数参数/局部名字存于调用帧，未在当前帧找到时可读 Process 顶层变量。普通赋值首次创建 `core.value` 子对象，再次赋值替换原对象内容。`this`/`super` 在方法帧指向实例。一个 Process 可通过被授予权限的另一个 Process 的 `variables`、`bindings()` 和 `process.变量名` 查看状态，但不能绕过对象授权。
 
@@ -239,7 +243,7 @@ Class 定义写入 TF 中，并非 `core.type` 注册项。`object.create("类�
 | `modules` | `find(name,version)` | 仅 `local`；返回精确版本 Module Object ID，重复或不存在时报错 |
 | `packages` | `build(spec)`、`packages()`、`search(query)`、`find(coordinate)`、`info(id)`、`verify(id)`、`install(id)`、`installed()`、`require(coordinate)`、`restore(retired_id)`、`audit()` | 本地 Package、原子依赖安装、默认版本、保留期恢复和不可变审计 |
 | Package Installation | `info()`、`verify()`、`module(name)`、`resource(name)`、`permissions()`、`data()`、`run(args,grants)`、`upgrade(package)`、`rollback(target)`、`uninstall()` | 固定版本应用、权限预览、资源、数据与依赖生命周期；Manifest Export 是动态方法 |
-| Effect | `status()`、`result()` | `pending/completed/failed` 状态与结果 |
+| Effect | `status()`、`result()` | `pending/running/completed/failed/unknown` 状态；`manual` 或 `retry_idempotent` 恢复 |
 
 已发布的内核服务名字是 `system`、`authentication`、`users`、`compiler`、`types`、`providers`、`store`、`math`、`crypto`、`time`、`modules`、`packages`、`resolver`；发现到 system Namespace 后还有 `programs` 名字。`console` 单独由硬件发现发布。**没有**已发布的 `scheduler` 服务；进程控制在 Process 自身。
 
@@ -261,9 +265,17 @@ Class 定义写入 TF 中，并非 `core.type` 注册项。`object.create("类�
 
 `ObjectProvider` 必须给出 TypeId、`create`、`invoke`、`capabilities`；还可实现 `user_creatable`、按 Process 的 `invoke_for_process`、Process 结束通知与秘密 token 解析。注册表每 Type 只接收一个活动 Provider。`ProviderOutcome` 返回结果、可选的新对象状态和要创建的对象。
 
-调用外部能力时，VM 先把 `core.effect` 的 **pending 意图**、目标/参数/Token 位置和 Process 的 `$effect` Link 原子持久化，再调用 Provider。完成后把结果、目标状态、新对象、Process 下一指令与 Effect 的 `completed` 状态一起提交；失败写 `failed`。Provider 可返回 `Pending`，VM 保留原调用现场并挂起等待重试；恢复时核对同一 Effect 是否匹配调用。Effect Object 可事后查询。这个机制防止本地状态出现半笔对象提交，并给 Provider 稳定幂等键。**远端系统若不支持幂等，跨整机崩溃无法承诺外部操作 exactly once。**
+调用外部能力时，VM 先把 `core.effect` 的 **pending 意图**、目标/参数/Token 位置和 Process 的 `$effect` Link 原子持久化，再调用 Provider。完成后把结果、目标状态、新对象、Process 下一指令与 Effect 的 `completed` 状态一起提交；失败写 `failed`。恢复策略为 `manual` 或 `retry_idempotent`：前者将中断且结果不确定的调用改为 `unknown`，后者用原 Effect ID 重试。Effect Object 可事后查询。这个机制防止本地状态出现半笔对象提交，并给 Provider 稳定幂等键。**远端系统若不支持幂等，跨整机崩溃无法承诺外部操作 exactly once。**
 
 当前硬件适配的事实来源是 Linux 宿主：stdout/stdin 与终端原始输入、TCP socket、系统 DNS、块存储文件适配、`/dev/urandom`。内核对象语义不依赖 Linux 文件是用户可见的“万物皆文件”模型；对象持久化文件是现阶段存储后端。
+
+### Hosted Process 与持久辅助对象
+
+Process 存储 `Ready/Running/Waiting/Suspended/Halted/Terminated/Failed` 状态，等待时存一个 `WaitReason`（Timer、IPC、Effect、Input 或 Process）。协作调度器按 round-robin 给每个 Process 最多 4096 Token 或 20ms 的执行片。Worker lease 包含 owner、generation、deadline；Store 恢复时清理旧 lease 并推进 generation。Process 位置和每片 Object 变化使用同一个 OMS Transaction。
+
+Channel 单条消息最多 1 MiB、队列 1024 条/8 MiB；发送唤醒与消息入队原子，接收与 Process 进度共同提交。SwapPool 通过 `member:<name>` Link 引用现有 Object，不改变 ObjectId/Parent，不共享地址；成员仍由其本身的 capabilities、version 和正常 OMS transaction 控制。SwapPool 每池最多 4096 个成员，每 Subject 最多 64 个池。
+
+持久 Timer 保存一次性 deadline，恢复会处理已过期 Timer。`time.sleep()` 创建内部 Timer 并把 Process 设为 Waiting；睡眠不会占 Worker。Effect 恢复对 manual 的不确定调用保留 `unknown`，只有 `retry_idempotent` 策略会以同一 Effect ID 重试。Audit 根和 event 只由内核追加，最多 4 KiB details；普通 Subject 没有全局 Audit 读取权限。
 
 ## 8. Rust 开发接口与启动适配
 
@@ -289,7 +301,7 @@ Class 定义写入 TF 中，并非 `core.type` 注册项。`object.create("类�
 - 错误类别包括编译位置错误、TF/Value 格式错误、对象不存在、版本冲突、权限拒绝、Schema 不匹配、非法生命周期、存储损坏/占用、VM 类型/索引/未定义变量/除零错误、Provider 未安装/等待/失败和认证错误。`try/catch` 处理 VM 执行错误；存储失败不会把半笔对象状态发布为已成功。
 - Type 已声明 ≠ Provider 已安装 ≠ 已发现实例 ≠ 当前 Subject 有 `invoke` 权限。`core.scheduler`、`device.sensor` 是最明显例子。
 - 目前运行路径仍由 Linux 进程启动、调度执行线程和访问硬件；这里的“内核”是 Ousject 自身实现的对象/执行/授权/持久化层，尚不是独立引导的硬件内核。
-- 所有存储持久性声明以当前 `FileSnapshotBackend` 成功返回为前提；宿主硬件、文件系统、远端网络的不可恢复故障不在对象事务保证范围内。Provider 的外部效果无法单靠本地 WAL 获得跨崩溃 exactly once。
+- 所有存储持久性声明以当前 `FileSnapshotBackend` 成功返回为前提；宿主硬件、文件系统、远端网络的不可恢复故障不在对象事务保证范围内。Provider 的外部效果无法单靠本地 WAL 获得跨崩溃 exactly once；manual 策略留下 `unknown`，retry-idempotent 策略依赖 Provider 遵守相同 Effect ID 的幂等契约。
 - Praxis 当前无任意顶层表达式语句、中文标识符、`for`、`new`、内建打印函数或 `io.println`。程序需发现 Console Object 并调用能力；输入设备实例取决于真实终端。
 
 ## 10. 源码索引

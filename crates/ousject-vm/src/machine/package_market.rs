@@ -362,7 +362,7 @@ impl VirtualMachine {
         &self,
         owner: SubjectId,
         market: ObjectId,
-    ) -> Result<Option<(ObjectId, ObjectView, BTreeMap<String, Value>)>, VmError> {
+    ) -> Result<Option<MarketConfiguration>, VmError> {
         let system = AccessContext::new(SYSTEM_SUBJECT);
         let root = self.manager.read(system, market)?;
         if root.header().type_id != CORE_PACKAGE_MARKET_TYPE {
@@ -451,6 +451,8 @@ impl VirtualMachine {
                     "Market index has an invalid Package record",
                 ));
             }
+            let bytes = i64::try_from(record.bytes)
+                .map_err(|_| VmError::TypeError("Market Package size is out of range"))?;
             records.push(Value::Record(BTreeMap::from([
                 ("namespace".to_owned(), Value::Text(record.namespace)),
                 ("name".to_owned(), Value::Text(record.name)),
@@ -459,7 +461,7 @@ impl VirtualMachine {
                 ("coordinate".to_owned(), Value::Text(coordinate)),
                 ("sha256".to_owned(), Value::Text(record.sha256)),
                 ("download".to_owned(), Value::Text(record.download)),
-                ("bytes".to_owned(), Value::Integer(record.bytes as i64)),
+                ("bytes".to_owned(), Value::Integer(bytes)),
                 (
                     "dependencies".to_owned(),
                     Value::Array(
@@ -483,7 +485,8 @@ impl VirtualMachine {
                 ),
             ])));
         }
-        let count = records.len();
+        let count = i64::try_from(records.len())
+            .map_err(|_| VmError::TypeError("Market Package count is out of range"))?;
         fields.insert("index".to_owned(), Value::Array(records));
         fields.insert(
             "updated_at_unix_ms".to_owned(),
@@ -498,7 +501,7 @@ impl VirtualMachine {
             .update_state(config, Value::Record(fields).encode()?);
         Ok(Value::Record(BTreeMap::from([(
             "packages".to_owned(),
-            Value::Integer(count as i64),
+            Value::Integer(count),
         )])))
     }
 
@@ -599,6 +602,12 @@ impl VirtualMachine {
         Ok(Value::Array(result))
     }
 
+    // Resume, validate, and persist each range before publishing the completed
+    // SHA-addressed artifact; this is one bounded transfer state machine.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "range download integrity depends on ordered state transitions"
+    )]
     fn download_market_package(
         &self,
         owner: SubjectId,
@@ -629,9 +638,8 @@ impl VirtualMachine {
                 "Market Package exceeds Ousject's 15 MiB single-object transfer limit",
             ));
         }
-        let origin = match config_fields.get("origin") {
-            Some(Value::Text(origin)) => origin,
-            _ => return Err(invalid_state("Market origin is missing")),
+        let Some(Value::Text(origin)) = config_fields.get("origin") else {
+            return Err(invalid_state("Market origin is missing"));
         };
         let completed_key = format!("download:{sha256}");
         if let Some(existing) = config_view.links().get(&completed_key).copied() {
@@ -647,9 +655,8 @@ impl VirtualMachine {
         }
 
         let partial_key = format!("partial:{sha256}");
-        let download_path = match record.get("download") {
-            Some(Value::Text(path)) => path,
-            _ => return Err(invalid_state("Market download path is missing")),
+        let Some(Value::Text(download_path)) = record.get("download") else {
+            return Err(invalid_state("Market download path is missing"));
         };
         let url = format!("{origin}{download_path}");
         let mut existing_id = config_view.links().get(&partial_key).copied();
@@ -659,10 +666,13 @@ impl VirtualMachine {
             let value = self.manager.value(system, id)?;
             if let Value::Record(fields) = value {
                 if fields.get("sha256") == Some(&Value::Text(sha256.to_owned()))
-                    && fields.get("size") == Some(&Value::Integer(size as i64))
+                    && fields.get("size")
+                        == Some(&Value::Integer(i64::try_from(size).map_err(|_| {
+                            invalid_state("Market Package size is out of range")
+                        })?))
                 {
                     if let Some(Value::Bytes(bytes)) = fields.get("data") {
-                        data = bytes.clone();
+                        data.clone_from(bytes);
                     }
                     if let Some(Value::Text(value)) = fields.get("etag") {
                         etag = Some(value.clone());
@@ -685,16 +695,16 @@ impl VirtualMachine {
             if response.status == 200 && offset > 0 {
                 data.clear();
                 etag = None;
-                self.persist_market_download_chunk(
+                self.persist_market_download_chunk(MarketDownloadChunk {
                     owner,
                     config,
-                    &partial_key,
+                    partial_key: &partial_key,
                     sha256,
                     size,
-                    &data,
-                    etag.as_deref(),
-                    &mut existing_id,
-                )?;
+                    data: &data,
+                    etag: etag.as_deref(),
+                    object: &mut existing_id,
+                })?;
                 continue;
             }
             if response.status != 206 && !(response.status == 200 && offset == 0) {
@@ -731,50 +741,56 @@ impl VirtualMachine {
                 }
                 data.extend_from_slice(&response.bytes);
             }
-            self.persist_market_download_chunk(
+            self.persist_market_download_chunk(MarketDownloadChunk {
                 owner,
                 config,
-                &partial_key,
+                partial_key: &partial_key,
                 sha256,
                 size,
-                &data,
-                etag.as_deref(),
-                &mut existing_id,
-            )?;
+                data: &data,
+                etag: etag.as_deref(),
+                object: &mut existing_id,
+            })?;
         }
         if data.len() != size || package_sha256(&data) != sha256 {
             return Err(VmError::TypeError("downloaded Package SHA-256 is invalid"));
         }
-        self.complete_market_download(
+        self.complete_market_download(CompletedMarketDownload {
             owner,
             config,
-            &partial_key,
-            &completed_key,
+            partial_key,
+            completed_key,
+            sha256: sha256.to_owned(),
+            size,
+            data,
+            etag,
+            object: existing_id,
+        })
+    }
+
+    fn persist_market_download_chunk(&self, chunk: MarketDownloadChunk<'_>) -> Result<(), VmError> {
+        let MarketDownloadChunk {
+            owner,
+            config,
+            partial_key,
             sha256,
             size,
             data,
             etag,
-            existing_id,
-        )
-    }
-
-    fn persist_market_download_chunk(
-        &self,
-        owner: SubjectId,
-        config: ObjectId,
-        partial_key: &str,
-        sha256: &str,
-        size: usize,
-        data: &[u8],
-        etag: Option<&str>,
-        object: &mut Option<ObjectId>,
-    ) -> Result<(), VmError> {
+            object,
+        } = chunk;
         let system = AccessContext::new(SYSTEM_SUBJECT);
         let config_view = self.manager.read(system, config)?;
         let state = Value::Record(BTreeMap::from([
             ("owner".to_owned(), Value::Text(owner.to_string())),
             ("sha256".to_owned(), Value::Text(sha256.to_owned())),
-            ("size".to_owned(), Value::Integer(size as i64)),
+            (
+                "size".to_owned(),
+                Value::Integer(
+                    i64::try_from(size)
+                        .map_err(|_| invalid_state("Market Package size is out of range"))?,
+                ),
+            ),
             ("data".to_owned(), Value::Bytes(data.to_vec())),
             (
                 "etag".to_owned(),
@@ -815,16 +831,19 @@ impl VirtualMachine {
 
     fn complete_market_download(
         &self,
-        owner: SubjectId,
-        config: ObjectId,
-        partial_key: &str,
-        completed_key: &str,
-        sha256: &str,
-        size: usize,
-        data: Vec<u8>,
-        etag: Option<String>,
-        object: Option<ObjectId>,
+        download: CompletedMarketDownload,
     ) -> Result<ObjectId, VmError> {
+        let CompletedMarketDownload {
+            owner,
+            config,
+            partial_key,
+            completed_key,
+            sha256,
+            size,
+            data,
+            etag,
+            object,
+        } = download;
         let Some(object) = object else {
             return Err(invalid_state(
                 "Market download did not persist its first chunk",
@@ -835,8 +854,14 @@ impl VirtualMachine {
         let object_view = self.manager.read(system, object)?;
         let state = Value::Record(BTreeMap::from([
             ("owner".to_owned(), Value::Text(owner.to_string())),
-            ("sha256".to_owned(), Value::Text(sha256.to_owned())),
-            ("size".to_owned(), Value::Integer(size as i64)),
+            ("sha256".to_owned(), Value::Text(sha256)),
+            (
+                "size".to_owned(),
+                Value::Integer(
+                    i64::try_from(size)
+                        .map_err(|_| invalid_state("Market Package size is out of range"))?,
+                ),
+            ),
             ("data".to_owned(), Value::Bytes(data)),
             ("etag".to_owned(), etag.map_or(Value::Null, Value::Text)),
             ("status".to_owned(), Value::Text("complete".to_owned())),
@@ -852,6 +877,11 @@ impl VirtualMachine {
         Ok(object)
     }
 
+    // Market coordinates and SHA locks are checked recursively before import.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "market closure import is one recursive integrity workflow"
+    )]
     fn install_market_closure(
         &self,
         owner: SubjectId,
@@ -923,13 +953,10 @@ impl VirtualMachine {
         let Some(Value::Bytes(bytes)) = download_fields.get("data") else {
             return Err(invalid_state("Market Package download has no content"));
         };
-        let manifest = match Value::decode(bytes) {
-            Ok(Value::Record(manifest)) => manifest,
-            _ => {
-                return Err(VmError::TypeError(
-                    "download is not an Ousject Package; CilExec SQLite packages need a format converter",
-                ));
-            }
+        let Ok(Value::Record(manifest)) = Value::decode(bytes) else {
+            return Err(VmError::TypeError(
+                "download is not an Ousject Package; CilExec SQLite packages need a format converter",
+            ));
         };
         let coordinate = package_coordinate(&manifest)?;
         let config_view = self
@@ -1025,6 +1052,31 @@ struct MarketHttpResponse {
     etag: Option<String>,
     content_range: Option<String>,
 }
+
+struct MarketDownloadChunk<'a> {
+    owner: SubjectId,
+    config: ObjectId,
+    partial_key: &'a str,
+    sha256: &'a str,
+    size: usize,
+    data: &'a [u8],
+    etag: Option<&'a str>,
+    object: &'a mut Option<ObjectId>,
+}
+
+struct CompletedMarketDownload {
+    owner: SubjectId,
+    config: ObjectId,
+    partial_key: String,
+    completed_key: String,
+    sha256: String,
+    size: usize,
+    data: Vec<u8>,
+    etag: Option<String>,
+    object: Option<ObjectId>,
+}
+
+type MarketConfiguration = (ObjectId, ObjectView, BTreeMap<String, Value>);
 
 fn market_http_get(url: &str, maximum: usize) -> Result<Vec<u8>, VmError> {
     let response = ureq::get(url)

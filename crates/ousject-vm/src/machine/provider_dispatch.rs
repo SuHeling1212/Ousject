@@ -27,57 +27,126 @@ impl VirtualMachine {
             )));
         }
 
-        let effect = if let Some(effect) = self
+        let system = AccessContext::new(SYSTEM_SUBJECT);
+        let existing_effect = self
             .manager
             .read(self.context, process)?
             .links()
             .get("$effect")
-            .copied()
-        {
-            let record = EffectRecord::decode(self.manager.read(self.context, effect)?.state())
+            .copied();
+        let effect = if let Some(effect) = existing_effect {
+            let record = EffectRecord::decode(self.manager.read(system, effect)?.state())
                 .map_err(VmError::from)?;
             if record.process != process
                 || record.target != object
                 || record.token_position != state.token_position
                 || record.capability != capability
-                || record.arguments != arguments
+                || record.arguments != EffectRecord::redact_arguments(arguments)
             {
                 return Err(VmError::InvalidProcessState(
                     "pending Effect does not match the Process token".to_owned(),
                 ));
             }
+            if record.status == EffectStatus::Unknown {
+                return Err(VmError::Provider(
+                    "Effect outcome is unknown; local must resolve or retry it".to_owned(),
+                ));
+            }
+            if record.status == EffectStatus::Failed {
+                return Err(VmError::Provider(
+                    record
+                        .error
+                        .unwrap_or_else(|| "Provider operation failed".to_owned()),
+                ));
+            }
             effect
         } else {
             let effect = ObjectId::new();
-            let record = EffectRecord::pending(
+            let record = EffectRecord::pending_with_policy(
                 process,
                 object,
                 state.token_position,
                 capability,
                 arguments.to_vec(),
+                provider.effect_recovery_policy(capability),
             );
-            let mut intent = self.manager.begin(self.context);
+            let mut waiting = state.clone();
+            waiting.stack.push(Value::Text(object.to_string()));
+            waiting.stack.extend(arguments.iter().cloned());
+            waiting.status = ProcessStatus::Waiting;
+            waiting.wait_reason = WaitReason::Effect(effect);
+            let request = record
+                .create_object(effect)
+                .map_err(VmError::from)?
+                .with_grant(state.subject, Capability::Inspect)
+                .with_grant(state.subject, Capability::ViewValue)
+                .with_grant(state.subject, Capability::Invoke);
+            let mut intent = self.manager.begin(system);
             intent
                 .expect(process, version)
-                .create(record.create_object(effect).map_err(VmError::from)?)
-                .set_link(process, "$effect", effect);
+                .create(request)
+                .set_link(process, "$effect", effect)
+                .update_state(process, encode_process_state(&waiting)?);
+            self.stage_audit_event(
+                state.subject,
+                "effect.intent",
+                effect,
+                Value::Record(BTreeMap::from([(
+                    "capability".to_owned(),
+                    Value::Text(capability.to_owned()),
+                )])),
+                &mut intent,
+            )?;
             self.manager.commit(intent)?;
             effect
         };
 
+        let effect_view = self.manager.read(system, effect)?;
+        let mut record = EffectRecord::decode(effect_view.state()).map_err(VmError::from)?;
         let target_value = Value::decode(target.state())?;
-        let outcome = provider.invoke_for_process(
-            process,
-            object,
-            &target_value,
-            capability,
-            arguments,
-            effect,
-        );
-        let process_view = self.manager.read(self.context, process)?;
-        let effect_view = self.manager.read(self.context, effect)?;
-        let pending = EffectRecord::decode(effect_view.state()).map_err(VmError::from)?;
-        let mut completion = self.manager.begin(self.context);
+        let outcome = if record.status == EffectStatus::Completed {
+            Ok(ProviderOutcome::result(
+                record.result.clone().unwrap_or(Value::Null),
+            ))
+        } else {
+            if record.status != EffectStatus::Running {
+                record = record.running();
+                let mut running = self.manager.begin(system);
+                running
+                    .expect(effect, effect_view.header().version)
+                    .update_state(effect, record.encode().map_err(VmError::from)?);
+                self.stage_audit_event(
+                    state.subject,
+                    "effect.running",
+                    effect,
+                    Value::Record(BTreeMap::new()),
+                    &mut running,
+                )?;
+                self.manager.commit(running)?;
+            }
+            provider.invoke_for_process(
+                process,
+                object,
+                &target_value,
+                capability,
+                arguments,
+                effect,
+            )
+        };
+
+        let process_view = self.manager.read(system, process)?;
+        let persisted_process = decode_process_state(process_view.state())?;
+        if persisted_process.lease_owner != state.lease_owner
+            || persisted_process.lease_generation != state.lease_generation
+            || persisted_process
+                .lease_deadline_unix_ms
+                .is_none_or(|deadline| deadline <= unix_time_millis())
+        {
+            return Err(VmError::WorkerLeaseExpired(process));
+        }
+        let effect_view = self.manager.read(system, effect)?;
+        let record = EffectRecord::decode(effect_view.state()).map_err(VmError::from)?;
+        let mut completion = self.manager.begin(system);
         completion
             .expect(process, process_view.header().version)
             .expect(effect, effect_view.header().version)
@@ -86,7 +155,7 @@ impl VirtualMachine {
             Ok(outcome) => {
                 completion.update_state(
                     effect,
-                    pending
+                    record
                         .complete(outcome.result.clone())
                         .encode()
                         .map_err(VmError::from)?,
@@ -98,14 +167,23 @@ impl VirtualMachine {
                 }
                 for request in outcome.created {
                     if let Some(parent) = request.parent {
-                        let parent_version = self.manager.inspect(self.context, parent)?.version;
+                        let parent_version = self.manager.inspect(system, parent)?.version;
                         completion.expect(parent, parent_version);
                     }
                     completion.create(request);
                 }
+                state.status = ProcessStatus::Running;
+                state.wait_reason = WaitReason::None;
                 state.stack.push(outcome.result);
                 state.token_position = next;
                 completion.update_state(process, encode_process_state(state)?);
+                self.stage_audit_event(
+                    state.subject,
+                    "effect.completed",
+                    effect,
+                    Value::Record(BTreeMap::new()),
+                    &mut completion,
+                )?;
                 self.manager.commit(completion)?;
                 Ok(
                     if target.header().type_id == CONSOLE_TYPE && capability == "println" {
@@ -116,28 +194,60 @@ impl VirtualMachine {
                 )
             }
             Err(ProviderError::Pending) => {
-                // `step_call` already popped the receiver and arguments. The
-                // Process remains on this same call token, so its operand
-                // stack must be restored exactly for the idempotent retry.
+                // The call token remains in place. Restore its operands and
+                // persist one unified wait reason until input or an external
+                // Provider result is available.
                 state.stack.push(Value::Text(object.to_string()));
                 state.stack.extend(arguments.iter().cloned());
-                state.status = ProcessStatus::Suspended;
-                completion = self.manager.begin(self.context);
-                completion
+                state.status = ProcessStatus::Waiting;
+                state.wait_reason = if target.header().type_id == CONSOLE_TYPE
+                    && matches!(capability, "read_line" | "read_secret")
+                {
+                    WaitReason::Input(effect)
+                } else {
+                    WaitReason::Effect(effect)
+                };
+                let mut pending = self.manager.begin(system);
+                pending
                     .expect(process, process_view.header().version)
+                    .expect(effect, effect_view.header().version)
+                    .update_state(effect, record.retry().encode().map_err(VmError::from)?)
                     .update_state(process, encode_process_state(state)?);
-                self.manager.commit(completion)?;
+                self.stage_audit_event(
+                    state.subject,
+                    "effect.pending",
+                    effect,
+                    Value::Record(BTreeMap::new()),
+                    &mut pending,
+                )?;
+                self.manager.commit(pending)?;
                 Ok(None)
             }
             Err(error) => {
-                completion.update_state(
+                state.stack.push(Value::Text(object.to_string()));
+                state.stack.extend(arguments.iter().cloned());
+                state.status = ProcessStatus::Running;
+                state.wait_reason = WaitReason::None;
+                let mut failed = self.manager.begin(system);
+                failed
+                    .expect(process, process_view.header().version)
+                    .expect(effect, effect_view.header().version)
+                    .update_state(
+                        effect,
+                        record
+                            .fail("Provider operation failed")
+                            .encode()
+                            .map_err(VmError::from)?,
+                    )
+                    .update_state(process, encode_process_state(state)?);
+                self.stage_audit_event(
+                    state.subject,
+                    "effect.failed",
                     effect,
-                    pending
-                        .fail(error.to_string())
-                        .encode()
-                        .map_err(VmError::from)?,
-                );
-                self.manager.commit(completion)?;
+                    Value::Record(BTreeMap::new()),
+                    &mut failed,
+                )?;
+                self.manager.commit(failed)?;
                 Err(VmError::from(error))
             }
         }

@@ -152,6 +152,7 @@ impl VirtualMachine {
             ("modules", CORE_MODULE_REGISTRY_TYPE),
             ("packages", CORE_PACKAGE_REGISTRY_TYPE),
             ("market", CORE_PACKAGE_MARKET_TYPE),
+            ("audit", oms_types::CORE_AUDIT_TYPE),
             ("resolver", NET_RESOLVER_TYPE),
         ];
         let mut published = BTreeMap::new();
@@ -180,7 +181,17 @@ impl VirtualMachine {
                         Value::Text(name.to_owned()),
                     )]))
                 };
-                let request = CreateObject::new(type_id, state.encode()?);
+                let mut request = CreateObject::new(type_id, state.encode()?);
+                if name == "audit" {
+                    request.capabilities = [
+                        Capability::Inspect,
+                        Capability::ViewValue,
+                        Capability::CreateChild,
+                        Capability::Link,
+                    ]
+                    .into_iter()
+                    .collect();
+                }
                 let object = request.id;
                 let mut transaction = manager.begin(context);
                 transaction.create(request);
@@ -228,6 +239,7 @@ impl VirtualMachine {
         program: &Program,
         subject: SubjectId,
     ) -> Result<ObjectId, VmError> {
+        self.enforce_process_limits(None, subject)?;
         self.grant_kernel_service_access(subject)?;
         let program_state = program.encode()?;
         let mut program_request = CreateObject::new(PROGRAM_TYPE, program_state);
@@ -245,10 +257,13 @@ impl VirtualMachine {
                 token_position: 0,
                 stack: Vec::new(),
                 variables: BTreeMap::new(),
-                status: ProcessStatus::Running,
+                status: ProcessStatus::Ready,
+                wait_reason: WaitReason::None,
+                lease_owner: None,
+                lease_generation: 0,
+                lease_deadline_unix_ms: None,
                 result: None,
                 error: None,
-                wake_at_unix_ms: None,
                 ended_at_unix_ms: None,
                 frames: Vec::new(),
                 handlers: Vec::new(),
@@ -300,6 +315,13 @@ impl VirtualMachine {
             objects.push(console);
         }
         for object in objects {
+            if self
+                .kernel_services
+                .iter()
+                .any(|(name, service)| name == "audit" && *service == object)
+            {
+                continue;
+            }
             let header = self.manager.inspect(context, object)?;
             let update = transaction
                 .expect(object, header.version)

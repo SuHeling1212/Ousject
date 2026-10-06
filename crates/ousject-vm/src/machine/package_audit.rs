@@ -65,6 +65,22 @@ impl VirtualMachine {
             .expect(registry, registry_view.header().version)
             .create(request)
             .set_link(registry, format!("audit:{owner}:{audit}"), audit);
+        let audited_action = match action {
+            "install" => Some("package.install"),
+            "upgrade" => Some("package.upgrade"),
+            "rollback" => Some("package.rollback"),
+            "uninstall" => Some("package.uninstall"),
+            _ => None,
+        };
+        if let Some(action) = audited_action {
+            self.stage_audit_event(
+                owner,
+                action,
+                target,
+                Value::Record(BTreeMap::new()),
+                transaction,
+            )?;
+        }
         Ok(audit)
     }
 }

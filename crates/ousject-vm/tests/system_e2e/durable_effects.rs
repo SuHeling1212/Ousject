@@ -110,17 +110,17 @@ fn transient_console_render_batches_process_state_without_creating_effects() {
 
     let report = vm.run(process, 100).unwrap();
     assert_eq!(report.status, ProcessStatus::Halted);
-    assert!(report.output.is_empty());
+    assert_eq!(report.output, Vec::<String>::new());
     assert_eq!(
         *driver.frames.lock().unwrap(),
         vec![b"frame 1".to_vec(), b"frame 2".to_vec()]
     );
     let context = AccessContext::new(SYSTEM_SUBJECT);
-    assert!(
+    assert_eq!(
         manager
             .query(context, &ObjectQuery::new().with_type(CORE_EFFECT_TYPE))
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        Vec::<oms_types::ObjectHeader>::new()
     );
 }
 
@@ -195,6 +195,7 @@ fn console_output_has_a_durable_effect_and_is_not_repeated_after_completion_fail
             .contains_key("$effect")
     );
 
+    assert!(vm.poll_pending_effect(process).unwrap());
     let report = vm.run(process, 100).unwrap();
     assert_eq!(report.output, ["hello"]);
     assert_eq!(driver.deliveries.load(Ordering::SeqCst), 1);
@@ -205,6 +206,7 @@ struct TestEffectProvider {
     backend: Arc<FaultBackend>,
     outcomes: Mutex<BTreeMap<ObjectId, ProviderOutcome>>,
     invocations: AtomicUsize,
+    recovery_policy: EffectRecoveryPolicy,
 }
 
 impl ObjectProvider for TestEffectProvider {
@@ -252,6 +254,10 @@ impl ObjectProvider for TestEffectProvider {
     fn capabilities(&self) -> std::collections::BTreeSet<String> {
         ["send".to_owned()].into_iter().collect()
     }
+
+    fn effect_recovery_policy(&self, _capability: &str) -> EffectRecoveryPolicy {
+        self.recovery_policy
+    }
 }
 
 #[test]
@@ -263,6 +269,7 @@ fn provider_effect_is_durable_and_idempotent_across_completion_failure() {
         backend: backend.clone(),
         outcomes: Mutex::new(BTreeMap::new()),
         invocations: AtomicUsize::new(0),
+        recovery_policy: EffectRecoveryPolicy::Manual,
     });
     vm.register_provider(provider.clone()).unwrap();
     let program = compile(
@@ -298,9 +305,10 @@ fn provider_effect_is_durable_and_idempotent_across_completion_failure() {
         )
         .unwrap()
         .status,
-        ousject_provider::EffectStatus::Pending
+        ousject_provider::EffectStatus::Running
     );
 
+    assert!(vm.poll_pending_effect(process).unwrap());
     assert_eq!(vm.run(process, 10).unwrap().status, ProcessStatus::Halted);
     assert_eq!(provider.invocations.load(Ordering::SeqCst), 1);
     assert_eq!(vm.variable(process, "sent"), Ok(Value::Integer(5)));
@@ -329,4 +337,116 @@ fn provider_effect_is_durable_and_idempotent_across_completion_failure() {
         .status,
         ousject_provider::EffectStatus::Completed
     );
+}
+
+fn invoke_provider_until_send(vm: &VirtualMachine, source: &str) -> (ObjectId, u32) {
+    let program = compile(source).unwrap();
+    let call = u32::try_from(
+        program
+            .tokens
+            .iter()
+            .position(|token| matches!(token, tf_format::Token::ObjectCall { method, .. } if method == "send"))
+            .unwrap(),
+    )
+    .unwrap();
+    let process = vm.create_process(&program).unwrap();
+    while vm.process_state(process).unwrap().token_position < call {
+        vm.run(process, 1).unwrap();
+    }
+    (process, call)
+}
+
+#[test]
+fn manual_effect_recovery_marks_outcome_unknown_and_local_can_resolve_it() {
+    let backend = Arc::new(FaultBackend::default());
+    let provider = Arc::new(TestEffectProvider {
+        backend: backend.clone(),
+        outcomes: Mutex::new(BTreeMap::new()),
+        invocations: AtomicUsize::new(0),
+        recovery_policy: EffectRecoveryPolicy::Manual,
+    });
+    let program = "endpoint = object.create(\"net.endpoint\", { transport: \"tcp\" })\nsent = endpoint.send(\"hello\")";
+    let (process, effect) = {
+        let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
+        let vm = VirtualMachine::new(manager.clone());
+        vm.register_provider(provider.clone()).unwrap();
+        let (process, _) = invoke_provider_until_send(&vm, program);
+        assert!(matches!(
+            vm.run(process, 1),
+            Err(VmError::Oms(OmsError::Storage(_)))
+        ));
+        let effect = manager
+            .read(AccessContext::new(SYSTEM_SUBJECT), process)
+            .unwrap()
+            .links()["$effect"];
+        (process, effect)
+    };
+
+    let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
+    let vm = VirtualMachine::new(manager.clone());
+    vm.register_provider(provider.clone()).unwrap();
+    vm.recover_processes().unwrap();
+    assert_eq!(
+        vm.process_state(process).unwrap().status,
+        ProcessStatus::Waiting
+    );
+    assert_eq!(
+        EffectRecord::decode(
+            manager
+                .read(AccessContext::new(SYSTEM_SUBJECT), effect)
+                .unwrap()
+                .state()
+        )
+        .unwrap()
+        .status,
+        EffectStatus::Unknown
+    );
+
+    let resolve = compile(&format!(
+        "effect = object.find(\"{effect}\")\neffect.resolve(9)"
+    ))
+    .unwrap();
+    let resolver = vm.create_process(&resolve).unwrap();
+    assert_eq!(vm.run(resolver, 100).unwrap().status, ProcessStatus::Halted);
+    assert_eq!(vm.run(process, 100).unwrap().status, ProcessStatus::Halted);
+    assert_eq!(vm.variable(process, "sent"), Ok(Value::Integer(9)));
+    assert_eq!(provider.invocations.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn idempotent_effect_recovery_retries_with_the_same_effect_identity() {
+    let backend = Arc::new(FaultBackend::default());
+    let provider = Arc::new(TestEffectProvider {
+        backend: backend.clone(),
+        outcomes: Mutex::new(BTreeMap::new()),
+        invocations: AtomicUsize::new(0),
+        recovery_policy: EffectRecoveryPolicy::RetryIdempotent,
+    });
+    let program = "endpoint = object.create(\"net.endpoint\", { transport: \"tcp\" })\nsent = endpoint.send(\"hello\")";
+    let process = {
+        let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
+        let vm = VirtualMachine::new(manager);
+        vm.register_provider(provider.clone()).unwrap();
+        let (process, _) = invoke_provider_until_send(&vm, program);
+        assert!(matches!(
+            vm.run(process, 1),
+            Err(VmError::Oms(OmsError::Storage(_)))
+        ));
+        process
+    };
+
+    let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
+    let vm = VirtualMachine::new(manager.clone());
+    vm.register_provider(provider.clone()).unwrap();
+    let report = CooperativeScheduler::recover(&vm)
+        .unwrap()
+        .run(100)
+        .unwrap();
+    assert!(report.total_steps > 0);
+    assert_eq!(
+        vm.process_state(process).unwrap().status,
+        ProcessStatus::Halted
+    );
+    assert_eq!(provider.invocations.load(Ordering::SeqCst), 1);
+    assert_eq!(vm.variable(process, "sent"), Ok(Value::Integer(5)));
 }

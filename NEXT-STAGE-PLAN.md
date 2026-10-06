@@ -1,23 +1,23 @@
 # Ousject 下一阶段实现与拆分计划
 
-状态：实施中。只有代码、文档和验收同时完成的项目才可以标记为已完成。
+状态：Hosted Core 当前阶段已完成并通过验收。表中仍列出的未实现项是明确保留的后续边界。
 
 ## 实施进度
 
 | 阶段 | 状态 | 记录 |
 |---|---|---|
 | 0. 可信基线 | 已验收 | `8dd09e1`；`scripts/check-system` 全通过；源码归档解压后 Git 历史为 2 个提交并离线构建成功 |
-| 1.1 CLI 与硬件适配拆分 | 已完成 | 命令、选项、运行时、终端输入与各硬件 Provider 已拆分；`cargo clippy -p ousject-cli --all-targets -- -D warnings` 与 5 项 CLI 测试通过 |
-| 1.2 VM 拆分 | 已完成 | VM 已分出生命周期、指令/事务执行、调用/Provider 分派、对象操作、内建函数、状态编解码、回收与调度文件；VM 全部 11 项单元测试、36 项系统端到端测试及 Clippy 通过 |
-| 1.3 OMS 拆分 | 已完成 | 对象、事务、管理器、保留策略、持久化和 WAL 已拆分；Clippy、9 项单元测试及 30 项 OMS 集成测试通过 |
+| 1.1 CLI 与硬件适配拆分 | 已完成 | 命令、选项、运行时、终端输入与各硬件 Provider 已拆分；严格 Clippy 和 6 项 CLI 测试通过 |
+| 1.2 VM 拆分 | 已完成 | VM 已分出生命周期、指令/事务执行、调用/Provider 分派、对象操作、内建函数、状态编解码、回收与调度文件；VM 13 项单元测试、55 项系统端到端测试及严格 Clippy 通过 |
+| 1.3 OMS 拆分 | 已完成 | 对象、事务、管理器、保留策略、持久化和 WAL 已拆分；严格 Clippy、10 项单元测试、23 项稳定性测试及 8 项统一对象测试通过 |
 | 1.4 Praxis 编译器拆分 | 已完成 | 编译入口、模块展开、词法器、语句/声明/控制流/表达式解析器已拆分；Clippy 与 10 项编译器测试通过 |
-| 1.5 测试拆分 | 已完成 | VM 端到端测试按输入、服务、认证/Shell、数学、恢复、语言、Effect、原子对象和安全/网络拆为 9 组；当前 45 项系统测试通过 |
+| 1.5 测试拆分 | 已完成 | VM 端到端测试按职责拆为 14 组；当前 55 项系统测试通过 |
 | 2. 持久终端会话 | 已完成 | 稳定 Session/Process、跨 Store 重启恢复、每用户隔离、原子提交、历史/多行缓冲/尺寸、表达式回显、函数/Class/import 保留、Ctrl+C 只中断当前提交、旧命令 Token 压缩；终端硬件输入租约重启后重新发现，不复活旧租约 |
-| 3. 内核扩展模块 | 实施中 | 已加入 Module/Registry Object、`local` 原子安装/启停/升级/回滚、按名 import 和按 Object ID 锁定依赖版本；依赖升级后仍加载被锁定的旧版本；未声明的模块导入会失败且不会留下半安装对象；源码 SHA-256 在导入时验证；持久 Store 重启后的模块、依赖和 Module Instance 恢复已有端到端覆盖；`modules.uninstall` 已原子退役无引用版本，仍被依赖或活动实例引用时会拒绝；依赖/实例 Links 与对应的 Object 版本校验和安装、导入同事务提交；`session.close()` 会卸载会话的 Module Instance；声明能力强制授权仍未完成；Native/Rust ABI 明确不加载 |
-| 4. 正式调度器与 Process 恢复 | 未开始 |  |
-| 5. Effect、IPC、Timer 与审计 | 未开始 |  |
-| 6. 资源限制与安全加固 | 未开始 |  |
-| 7. 包、导出、升级与发布 | 实施中 | 本地 Package 已支持不可变 Package、精确坐标/SHA、按用户 Installation、私有 Data、只读资源、Module 导入和 Package 依赖闭包的原子安装/反向依赖保护；正在继续实现 Application 启动、Export 调用、权限隔离、恢复/升级与 Repository |
+| 3. 内核扩展模块 | Hosted Library 已完成 | Module/Registry 支持安装、启停、升级、回滚、卸载、精确依赖锁定、源码 SHA 验证、实例恢复和旧版本引用保护。普通 Library 在调用者 Process/Subject 中运行，Manifest capability 声明不授予额外权限。独立 Service Module、Kernel Extension Type 注册和 Native/Rust ABI 未实现。 |
+| 4. 正式调度器与 Process 恢复 | 已完成（Hosted Core） | Ready/Running/Waiting/Suspended/Halted/Terminated/Failed 与统一 WaitReason 持久保存；round-robin，4096 Token/20ms 执行片，Worker lease owner/generation/deadline，Store recovery 重建 runnable queue 并隔离旧 generation。 |
+| 5. Effect、IPC、Timer 与审计 | 已完成（最小范围） | Channel 原子发送/接收/等待；SwapPool 持久成员 Link；Effect `manual`/`retry_idempotent` 恢复策略；Timer 与 `time.sleep` 持久恢复；内部追加式 Audit。未加入 Topic、Subscription、Broadcast。 |
+| 6. 资源限制与安全加固 | 已完成（Hosted Core 基线） | Value 深度/编码上限、Channel 消息与队列限制、Process/子 Process/Pool/Package 限额；Effect 和终端历史递归/敏感输入脱敏；Package Application 的 Subject 与按方法 capability 隔离。宿主网络安全边界见 Provider 实现。 |
+| 7. 包、导出、升级与发布 | 核心流程已实现 | Package coordinate/SHA 不可变索引、精确依赖闭包、导入/安装复验、按用户 Installation/Data、capability 批准、Application/Export、升级/回滚/恢复/卸载和 Market 下载。Market 仅支持 Ousject Package 格式；开发者签名/发布者信任不在范围内。 |
 
 包管理器从当前 MVP 到完整交付的具体顺序和验收矩阵见 [PACKAGE-MANAGER-COMPLETE-PLAN.md](PACKAGE-MANAGER-COMPLETE-PLAN.md)。
 
@@ -32,7 +32,7 @@
 
 内核继续只保留 Object Store、Process 执行、权限、原子事务、Effect 基础设施和模块加载器。终端、网络及硬件适配能力逐步迁移到模块。
 
-当前阶段验收命令为 `./scripts/check-system`。持久终端测试覆盖 Store 重启、用户隔离、Ctrl+C、同 Process 跨提交调用定义和表达式回显。模块安装、启停、升级保留旧版本、依赖精确锁定、未声明依赖拒绝、源码哈希校验和交互 import 已有端到端用例。完整 `scripts/check-system` 已通过：Clippy、45 项系统端到端测试、编译器/格式测试，以及启动、创建用户和复登验收全部成功。
+本轮最终验收命令为 `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` 和 `./scripts/check-system`，均通过。工作区共 144 项测试通过，其中 VM 系统端到端测试 55 项；验收脚本还通过编译、控制流/集合/对象/管道输入 CLI 示例，以及本地用户首次启动和复登。
 
 ## 2. 执行原则
 
@@ -252,90 +252,37 @@ active → draining → disabled → retired
 3. Storage Driver：块设备适配，只向内核公布。
 4. Diagnostics：健康检查、指标和审计查询。
 
-### 完成标准
+### 当前边界
 
-- 可以安装一个 Praxis Module；声明依赖按 Object ID 精确锁定，未声明的嵌套 import 会失败；导入会校验源码 SHA-256 并创建持久 Module Instance。服务 Object 发布和 Kernel Extension 的 Type 注册仍待实现。
-- 模块无权调用未声明的能力。
-- 模块安装失败不会留下半注册 Type 或服务。
-- 模块升级和 Store 重启后仍使用正确依赖版本；已由 Store 关闭、重新打开后的端到端用例覆盖，且完整系统验收通过。
+- Library Module 按调用者 Process/Subject 执行；Manifest 声明只作元数据，不用于提权。调用者本身没有对应 Object capability 时，Module 代码也不能调用它。
+- 安装失败不会留下半成品；依赖 Object ID、源码 SHA 与 Module Instance 均可在 Store 重启后恢复。
+- 独立 Service Module、Kernel Extension 的动态 Type 注册与 Native/Rust ABI 仍未实现。
 
 ## 7. 阶段 4：正式调度器与 Process 恢复
 
-### 工作
+Hosted Core 已完成统一的持久 Process 状态、统一 `WaitReason`、round-robin runnable queue、4096 Token/20ms bounded slice 和 Worker lease fencing。等待的 Process 不占 Worker；睡眠时调度器等待最近 deadline。恢复扫描持久 Process/Timer/Effect 状态，清理旧 lease 并只重新排入 Ready Process。持久化队列由 Process Object 状态重建，而不是另存易分叉的队列副本。
 
-- 建立持久 Ready Queue、Sleeping Queue 和 Waiting Queue。
-- 使用固定时间片公平调度多个 Process。
-- 增加 Worker Lease、执行代次和过期提交防护。
-- 通过状态变化通知唤醒工作线程，取消固定间隔轮询。
-- Terminal Process、后台 Process 和驱动 Process 使用同一调度核心。
-- 保留 Process 的暂停、恢复、终止和七天结果保留规则。
-
-### 完成标准
-
-- 一个等待输入或睡眠的 Process 不占用 Worker。
-- 崩溃前已提交的执行位置在重启后继续运行。
-- 旧 Worker 不能覆盖新 Worker 已提交的状态。
-- 大量 Process 不会让单个 Process 永久饥饿。
+Hosted 实现仍为协作式单机调度。真正抢占、OS 级多核和独立硬件 Worker 留在脱离宿主阶段。
 
 ## 8. 阶段 5：Effect、IPC、Timer 与审计
 
-### Effect
+Hosted Core 已实现 `pending/running/completed/failed/unknown` Effect 状态，以及 `manual` 和 `retry_idempotent` 恢复策略。没有远端幂等保证时，恢复把不确定结果保留为 `unknown`，不自动重放。
 
-- 状态扩展为 `pending/running/completed/failed/unknown`。
-- 支持 `manual`、`retry_idempotent` 和 `query_remote` 恢复策略。
-- 外部操作在结果不确定时不能被错误标记为失败或自动重复。
+IPC 仅包括持久 Channel 与 SwapPool。Channel 限制单消息 1 MiB、队列 1024 项/8 MiB，send/receive 与 Process 位置或 waiter wakeup 原子提交。SwapPool 只记录共享 Object 的名字到 ObjectId 的持久 Link，不分配共享地址。Topic/Subscription/Broadcast 不属于本轮范围。
 
-### IPC
-
-- 保留简单 Channel。
-- 增加直接消息、Topic、Subscription 和 Broadcast Object。
-- 加入容量、顺序、公平性和发送者权限限制。
-
-### Timer
-
-- 在 `time.sleep()`之外加入独立的持久 Timer Object。
-- 支持一次性定时器、取消和超时等待。
-
-### Audit
-
-- 用户、模块、权限、跨用户操作、Effect 处理和系统控制写入追加式审计对象。
-- 普通用户只能查看自己的记录，`local` 可以查看全局记录。
+`core.timer`、`time.sleep()`、取消、等待和重启后到期唤醒均已接通。最小 Audit 记录权限、Module/Package 生命周期、Process 和 Effect 生命周期事件；Audit details 上限 4 KiB，不记录 Value 或 Provider payload，普通 Subject 没有 Audit root 访问权限。
 
 ## 9. 阶段 6：资源限制与安全加固
 
-- Process 步数、内存对象数、消息容量和子对象数量限制。
-- Module 安装大小、依赖深度和启动时间限制。
-- 网络目标策略、DNS 固定、连接超时和收发上限。
-- 登录失败限速、未知用户等时密码验证和密码策略。
-- Session 到期、撤销和并发会话限制。
-- Secret 内容禁止进入普通 Object、日志、Effect 参数和审计正文。
+当前边界实施 Value 最大 16 MiB/64 层/单容器一百万项，Channel 单消息与队列容量，子 Process 与活跃 Subject Process 限额，SwapPool 成员/数量上限，以及 Module/Package 体积、依赖深度和数量限制。Effect secret handle 递归脱敏，终端历史对敏感输入模式保存通用标记，Audit 只保存白名单事件和小型非内容详情。
 
-## 10. 阶段 7：包、导出、升级与发布
+登录限速、统一 Session 到期/并发策略和更细粒度的网络域名策略仍属于后续安全工作，不作为 Hosted Core 当前验收已完成项。
 
-### Package
+## 10. 阶段 7：Package 核心、导出、升级与发布
 
-- 不可变 Package Object。
-- 精确版本和内容哈希依赖。
-- 每用户安装关系、能力声明、私有数据和执行来源。
-- 本地包安装完成后再考虑远程市场。
+本地 Package 的不可变 coordinate/SHA、精确依赖闭包、按用户安装、私有 Data、资源、Application Subject、方法级 capability、Export、升级/回滚、卸载和保留期内恢复已实现。Market 客户端支持索引、搜索、SHA 校验下载和 Ousject Package 闭包安装；CilExec SQLite/FCL 文件不能直接安装。细节与明确未实现项见 [PACKAGE-MANAGER-COMPLETE-PLAN.md](PACKAGE-MANAGER-COMPLETE-PLAN.md)。
 
-### 导出与恢复
-
-- 从一致性快照导出 Object、Type、Module、用户和权限。
-- 导出文件包含端到端哈希和格式版本。
-- 支持在新存储中验证并恢复。
-
-### 格式升级
-
-- 持久格式只前向升级。
-- 每个升级步骤可重复执行并有恢复测试。
-- 不把未知格式当作空系统启动。
-
-### 发布
-
-- 构建源码包和平台运行包。
-- 生成 SHA-256、SBOM、变更说明和验收报告。
-- 归档解压后验证 Git 历史、构建、首次启动、再次登录和恢复。
+整库 Object 快照导出/导入、正式向前格式迁移流程、远端 Ousject Package 发布端和二进制发布流水线仍是后续工作。签名、Publisher trust、PKI、SBOM、Kernel Extension 发布体系不属于 Hosted Core。
 
 ## 11. 不加入或暂缓的内容
 
@@ -343,13 +290,13 @@ active → draining → disabled → retired
 - 不重新建立“万物皆文件”的传统 VFS。
 - 不允许模块直接执行任意宿主命令。
 - 不在模块系统第一阶段支持不稳定的 Rust 动态库 ABI。
-- 不在本地包管理稳定前建设远程包市场。
+- 不建设 Publisher trust、PKI 或数字签名体系。
 - 不在持久 Terminal Session 完成前制作 nano 类编辑器。
 
 ## 12. 推荐实施顺序
 
 ```text
-可信基线
+可信基线（已完成）
   → 拆分 CLI 和硬件适配器
   → 拆分 VM Process/Codec/Reaper
   → 拆分 VM Executor/Builtins
@@ -358,10 +305,10 @@ active → draining → disabled → retired
   → 持久 Terminal Session
   → core.module 与 Module Registry
   → Terminal/Network/Storage 模块化
-  → 正式 Scheduler
-  → Effect 恢复、IPC、Timer、Audit
-  → 资源限制与安全加固
-  → Package、导出、升级和发布
+  → 正式 Hosted Scheduler（已实现）
+  → Effect 恢复、Channel/SwapPool、Timer、Audit（已实现）
+  → Hosted Core 资源限制（已实现）
+  → Package 安装/运行/恢复（已实现；发布边界保留）
   → Praxis nano 编辑器
 ```
 

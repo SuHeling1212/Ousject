@@ -34,14 +34,15 @@ Console Object 可以持久化，但对象记录不等于硬件。每次启动�
 4. Process 指向自身的 `process` Link。
 5. 如果发现了 Console，再建立指向共享 Console Object 的 `console` Link。
 
-Process 状态包含：
+持久 Process 状态包含：
 
 - 下一条 Token 的位置；
 - 计算栈；
 - 变量名到 Value Object ID 的映射；
-- `Running`、`Suspended`、`Halted` 或 `Terminated` 状态；
-- Program Object ID。
-- 可选的持久唤醒截止时间和结束时间；
+- `Ready`、`Running`、`Waiting`、`Suspended`、`Halted`、`Terminated` 或 `Failed` 状态；
+- 统一 `WaitReason`：Timer、IPC、Effect、Input 或 Process；
+- Worker lease owner、generation 和 deadline；
+- Program Object ID、可选结束时间；
 - 函数/方法调用帧与异常处理帧。
 
 变量名绑定 Object。第一次执行 `x = 42` 会创建 Process 的 `core.value` 子对象；以后修改 `x` 会更新这个对象。
@@ -73,7 +74,9 @@ terminal.open() → Terminal Session
 
 对象创建、替换、Link 修改、变量值和 Process 位置会放进同一个 OMS Transaction。提交失败时，这些变化全部不生效。
 
-`VirtualMachine::run` 执行一个 Process。内核协作调度器每轮给可运行 Process 执行一条 Token；Praxis 不暴露独立的 `scheduler` 对象，进程列表通过 `object.query("core.process")` 查询。定时睡眠只把当前 Process 标记为 `Suspended` 并保存唤醒时间，不占住 VM 工作线程。两者都是 Ousject 代码，不创建 Linux 子进程，也不调用 Linux Scheduler 来表达 Ousject Process 语义。
+`VirtualMachine::run` 执行一个 Process 的 bounded slice，最多 4096 条 Token 或 20ms。`CooperativeScheduler` 将 Ready Process 放入 round-robin 队列；Praxis 不暴露独立的 `scheduler` 对象，进程列表通过 `object.query("core.process")` 查询。Worker 先持久 claim 一个 30 秒 lease，每片续期；generation 变化会拒绝旧 Worker 提交。
+
+执行片中的 Process 位置、Stack、Frames 和 Object 写入同属一个 OMS Transaction。持久提交成功后再可见；提交失败则保持原位置与对象状态。等待 Process 使用 `Waiting + WaitReason`，不占 Worker。Timer 等待在队列空闲时让调度器直接等待最近的 deadline。
 
 结束 Process 的结果和错误会保留七天；后台进程回收器之后原子退役 Process 与其拥有的数据。它指向的 Program 不会被误删。退役后再按统一七天墓碑策略回收内容，元数据仍保留。
 
@@ -90,9 +93,9 @@ child.start()
 result = child.wait()
 ```
 
-子 Process 初始为 `Suspended`，`start/resume` 使其运行，`suspend` 暂停，`terminate` 终止。`wait` 运行目标 Process 直到停止或达到安全步数上限。
+子 Process 初始为 `Suspended`，`start/resume` 使其运行，`suspend` 暂停，`terminate` 终止。`wait` 运行目标 Process 直到停止或达到安全步数上限。子进程与 Subject 活跃 Process 数量均有限制。
 
-进程间不直接读取彼此的局部变量。需要通信时，父进程通过 `links` 把共享 Object 显式交给子进程；子进程用 `object.find("channel")` 发现它，再调用其能力或在事务中修改状态。
+进程间不直接读取彼此的局部变量。可通过持久 `core.channel` 传递 FIFO Value，或将同一个 `core.swap_pool` Object ID 交给多个进程，让它们按名称发现同一个普通 Object。两种方式都仍受 OMS capability、版本冲突和原子持久化规则约束；SwapPool 不共享内存地址。细节见 [IPC.md](./IPC.md) 和 [SWAPPOOL.md](./SWAPPOOL.md)。
 
 ## 打印流程
 
@@ -112,18 +115,18 @@ console.println("hello")
 5. Provider 返回后，Effect 完成状态和 Process 下一 Token 位置原子提交。
 6. Linux 版本的 Provider 将文字写到本次发现的 stdout；以后可以替换成正式终端驱动。
 
-如果整机恰好在外部终端已经接收文字、但 Effect 完成提交之前崩溃，恢复后可能重复输出；Pending Effect 本身不会丢失。没有远端幂等协议时不能虚构跨崩溃 exactly-once。
+Effect 状态为 `pending/running/completed/failed/unknown`，策略为 `manual` 或 `retry_idempotent`。手动策略遇到中途崩溃时会成为 `unknown` 并等待 local 处理；幂等策略用同一 Effect ID 重试。整机在外部终端收到文字、但完成提交前崩溃，远端不支持幂等时仍可能重复输出，不能承诺跨崩溃 exactly-once。见 [EFFECTS.md](./EFFECTS.md)。
 
 旧 `io.println`、`Println` Token、`println` 能力和隐式 Console 已删除。
 
 ## 恢复
 
-程序退出后，OPS0 Process 状态仍在 OMS0 Object Store。下次 `resume` 会：
+程序退出后，OPS0 Process 状态仍在 OMS0 Object Store。下次 Scheduler recovery 会扫描 Process、失效旧 Worker lease、恢复 Timer/Effect 状态，并将 Ready Process 重新排队：
 
 1. 打开 Object Store；
 2. 重新发现硬件并注册 Provider；
 3. 把 Process 的 `console` Link 重新连接到本次发现的 Console；
-4. 从持久化 Token 位置继续运行。
+4. 从最近已提交的 Token 位置继续运行。
 
 ## 当前边界
 

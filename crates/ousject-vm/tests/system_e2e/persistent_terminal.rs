@@ -25,16 +25,21 @@ impl ConsoleProvider for InterruptingConsole {
     }
 
     fn take_interrupt(&self, _process: ObjectId) -> Result<bool, String> {
-        Ok(self
-            .0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                if remaining > 0 {
-                    Some(remaining - 1)
-                } else {
-                    None
-                }
-            })
-            .is_ok())
+        let mut remaining = self.0.load(Ordering::Acquire);
+        loop {
+            if remaining == 0 {
+                return Ok(false);
+            }
+            match self.0.compare_exchange_weak(
+                remaining,
+                remaining - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(true),
+                Err(current) => remaining = current,
+            }
+        }
     }
 }
 

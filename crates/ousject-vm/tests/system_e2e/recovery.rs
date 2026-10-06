@@ -27,7 +27,7 @@ session = authentication.login("alice", "alice-password")
     .unwrap();
     let process = vm.create_process(&program).unwrap();
     while vm.process_state(process).unwrap().token_position != login_position {
-        assert_eq!(vm.run(process, 1).unwrap().status, ProcessStatus::Running);
+        assert_eq!(vm.run(process, 1).unwrap().status, ProcessStatus::Ready);
     }
     let before = vm.process_state(process).unwrap();
 
@@ -37,14 +37,14 @@ session = authentication.login("alice", "alice-password")
         Err(VmError::Oms(OmsError::Storage(_)))
     ));
     assert_eq!(vm.process_state(process), Ok(before));
-    assert!(
+    assert_eq!(
         manager
             .query(
                 AccessContext::new(SYSTEM_SUBJECT),
                 &ObjectQuery::new().with_type(CORE_SESSION_TYPE),
             )
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        Vec::<oms_types::ObjectHeader>::new()
     );
 
     assert_eq!(vm.run(process, 100).unwrap().status, ProcessStatus::Halted);
@@ -114,8 +114,8 @@ console.println(count)
         let vm = vm_with_console(manager);
         let process = vm.create_process(&program).unwrap();
         let partial = vm.run(process, 7).unwrap();
-        assert_eq!(partial.status, ProcessStatus::Running);
-        assert!(partial.output.is_empty());
+        assert_eq!(partial.status, ProcessStatus::Ready);
+        assert_eq!(partial.output, Vec::<String>::new());
         process
     };
 
@@ -129,4 +129,45 @@ console.println(count)
     vm.manager().health_check().unwrap();
     drop(vm);
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn expired_timer_wakes_after_restart_and_retries_a_failed_fire_commit() {
+    let backend = Arc::new(FaultBackend::default());
+    let process = {
+        let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
+        let vm = vm_with_console(manager);
+        let program =
+            compile("time = object.find(\"time\")\ntime.sleep(10)\nfinished = true").unwrap();
+        let process = vm.create_process(&program).unwrap();
+        assert_eq!(
+            vm.run(process, 1_000).unwrap().status,
+            ProcessStatus::Waiting
+        );
+        process
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
+    let vm = vm_with_console(manager);
+    backend.fail_next.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        vm.recover_processes(),
+        Err(VmError::Oms(OmsError::Storage(_)))
+    ));
+    assert_eq!(
+        vm.process_state(process).unwrap().status,
+        ProcessStatus::Waiting
+    );
+
+    let report = CooperativeScheduler::recover(&vm)
+        .unwrap()
+        .run(100)
+        .unwrap();
+    assert!(report.total_steps > 0);
+    assert_eq!(
+        vm.process_state(process).unwrap().status,
+        ProcessStatus::Halted
+    );
+    assert_eq!(vm.variable(process, "finished"), Ok(Value::Bool(true)));
 }

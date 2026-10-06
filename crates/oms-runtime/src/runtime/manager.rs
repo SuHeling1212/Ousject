@@ -977,92 +977,13 @@ impl InMemoryObjectManager {
             combine_shards(locked.iter().map(|(_, shard)| shard.state()))?
         };
 
-        let mut results = Vec::with_capacity(transactions.len());
-        let mut new_tombstone_deadlines = Vec::new();
-        let mut batch_changed = BTreeSet::new();
-        for transaction in transactions {
-            validate_expected(&candidate, &transaction.expected)?;
-            let mut changed = BTreeSet::new();
-            let mut created = BTreeSet::new();
-            let mut relationships_changed: BTreeSet<(ObjectId, ObjectId, bool)> =
-                BTreeSet::new();
-            let mut cycle_starts = BTreeSet::new();
+        let AppliedTransactions {
+            results,
+            changed: batch_changed,
+            tombstone_deadlines: new_tombstone_deadlines,
+        } = apply_transactions(&mut candidate, transactions, &self.types)?;
 
-            for operation in transaction.operations {
-                apply_operation(
-                    &mut candidate,
-                    transaction.context,
-                    operation,
-                    &transaction.expected,
-                    &mut changed,
-                    &mut created,
-                    &mut relationships_changed,
-                    &mut cycle_starts,
-                )?;
-            }
-
-            validate_parent_changes(&candidate, &relationships_changed, &cycle_starts)?;
-            validate_created_type_index(&candidate, &created)?;
-            if changed.iter().any(|object| {
-                candidate
-                    .objects
-                    .get(object)
-                    .is_some_and(|record| record.header.type_id == TYPE_DESCRIPTOR_TYPE)
-            }) {
-                validate_dynamic_types(&candidate, &self.types)?;
-            }
-
-            let mut versions = BTreeMap::new();
-            for &object in &changed {
-                let record = candidate
-                    .objects
-                    .get_mut(&object)
-                    .ok_or(OmsError::NotFound(object))?;
-                if let Some(deadline) = tombstone_reap_deadline(record) {
-                    new_tombstone_deadlines.push(deadline);
-                }
-                if !created.contains(&object) {
-                    record.header.version = record
-                        .header
-                        .version
-                        .checked_next()
-                        .ok_or(OmsError::VersionExhausted(object))?;
-                }
-                versions.insert(object, record.header.version);
-                batch_changed.insert(object);
-            }
-            results.push(CommitResult {
-                transaction_id: transaction.id,
-                versions,
-            });
-        }
-
-        if let Some(backend) = &self.persistence {
-            if backend.supports_delta_records() {
-                let delta = encode_snapshot_delta(&candidate, &batch_changed)?;
-                backend.store_delta(&delta)?;
-                self.performance
-                    .delta_records
-                    .fetch_add(1, Ordering::Relaxed);
-                self.performance.delta_bytes.fetch_add(
-                    u64::try_from(delta.len()).unwrap_or(u64::MAX),
-                    Ordering::Relaxed,
-                );
-            } else {
-                let snapshot = encode_snapshot(&candidate)?;
-                self.performance
-                    .full_snapshot_encodes
-                    .fetch_add(1, Ordering::Relaxed);
-                self.performance.full_snapshot_bytes.fetch_add(
-                    u64::try_from(snapshot.len()).unwrap_or(u64::MAX),
-                    Ordering::Relaxed,
-                );
-                backend.store(&snapshot)?;
-            }
-            self.performance
-                .persisted_batches
-                .fetch_add(1, Ordering::Relaxed);
-        }
+        self.persist_candidate(&candidate, &batch_changed)?;
 
         if locked.len() == 1 {
             if let LockedShard::Write(target) = &mut locked[0].1 {
@@ -1107,6 +1028,41 @@ impl InMemoryObjectManager {
         // state, so readers see either the old global state or the new one.
 
         Ok(results)
+    }
+
+    fn persist_candidate(
+        &self,
+        candidate: &ShardState,
+        changed: &BTreeSet<ObjectId>,
+    ) -> Result<(), OmsError> {
+        let Some(backend) = &self.persistence else {
+            return Ok(());
+        };
+        if backend.supports_delta_records() {
+            let delta = encode_snapshot_delta(candidate, changed)?;
+            backend.store_delta(&delta)?;
+            self.performance
+                .delta_records
+                .fetch_add(1, Ordering::Relaxed);
+            self.performance.delta_bytes.fetch_add(
+                u64::try_from(delta.len()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        } else {
+            let snapshot = encode_snapshot(candidate)?;
+            self.performance
+                .full_snapshot_encodes
+                .fetch_add(1, Ordering::Relaxed);
+            self.performance.full_snapshot_bytes.fetch_add(
+                u64::try_from(snapshot.len()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            backend.store(&snapshot)?;
+        }
+        self.performance
+            .persisted_batches
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     fn shard(&self, object: ObjectId) -> &RwLock<ShardState> {

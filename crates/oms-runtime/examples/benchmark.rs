@@ -110,6 +110,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("write_amplification={amplification:.2}");
     println!("object={object}");
 
+    run_durable_file_benchmark(commits, state_bytes, context)?;
+    Ok(())
+}
+
+fn run_durable_file_benchmark(
+    commits: u64,
+    state_bytes: usize,
+    context: AccessContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     let directory = std::env::temp_dir().join(format!("ousject-wal-benchmark-{}", ObjectId::new()));
     let path = directory.join("objects.oms");
     let file_backend = Arc::new(FileSnapshotBackend::new(&path));

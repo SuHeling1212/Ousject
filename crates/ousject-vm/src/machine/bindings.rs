@@ -271,7 +271,9 @@ fn capability_from_name(value: &str) -> Result<Capability, VmError> {
 
 const fn process_status_name(status: ProcessStatus) -> &'static str {
     match status {
+        ProcessStatus::Ready => "ready",
         ProcessStatus::Running => "running",
+        ProcessStatus::Waiting => "waiting",
         ProcessStatus::Suspended => "suspended",
         ProcessStatus::Halted => "halted",
         ProcessStatus::Terminated => "terminated",

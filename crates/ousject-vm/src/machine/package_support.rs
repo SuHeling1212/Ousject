@@ -391,13 +391,11 @@ pub(super) fn package_component_summary(value: Option<&Value>) -> Result<Value, 
     let Value::Record(fields) = value else {
         return Err(invalid_state("Package component is malformed"));
     };
-    let source = match fields.get("source") {
-        Some(Value::Text(source)) => source,
-        _ => return Err(invalid_state("Package component has no source")),
+    let Some(Value::Text(source)) = fields.get("source") else {
+        return Err(invalid_state("Package component has no source"));
     };
-    let program = match fields.get("program") {
-        Some(Value::Bytes(program)) => program,
-        _ => return Err(invalid_state("Package component has no Program")),
+    let Some(Value::Bytes(program)) = fields.get("program") else {
+        return Err(invalid_state("Package component has no Program"));
     };
     let byte_count = |length: usize| {
         i64::try_from(length)

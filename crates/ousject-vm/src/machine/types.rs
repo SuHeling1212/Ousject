@@ -1,10 +1,33 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessStatus {
+    Ready,
     Running,
+    Waiting,
     Suspended,
     Halted,
     Terminated,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum WaitReason {
+    #[default]
+    None,
+    Timer {
+        timer: Option<ObjectId>,
+        deadline_unix_ms: u64,
+    },
+    Ipc(ObjectId),
+    Effect(ObjectId),
+    Input(ObjectId),
+    Process(ObjectId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerLease {
+    pub owner: ObjectId,
+    pub generation: u64,
+    pub deadline_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,9 +38,12 @@ pub struct ProcessState {
     pub stack: Vec<Value>,
     pub variables: BTreeMap<String, ObjectId>,
     pub status: ProcessStatus,
+    pub wait_reason: WaitReason,
+    pub lease_owner: Option<ObjectId>,
+    pub lease_generation: u64,
+    pub lease_deadline_unix_ms: Option<u64>,
     pub result: Option<Value>,
     pub error: Option<Value>,
-    pub wake_at_unix_ms: Option<u64>,
     pub ended_at_unix_ms: Option<u64>,
     pub frames: Vec<CallFrame>,
     pub handlers: Vec<ExceptionHandler>,
@@ -137,6 +163,8 @@ pub enum VmError {
     Provider(String),
     TokenPositionOutOfRange(u32),
     StepLimitExceeded(u64),
+    WorkerLeaseBusy(ObjectId),
+    WorkerLeaseExpired(ObjectId),
 }
 
 impl fmt::Display for VmError {

@@ -136,14 +136,20 @@ pub(crate) fn run_hosted_process(
             return Ok(RunReport {
                 process,
                 steps: total,
-                status: ProcessStatus::Running,
+                status: ProcessStatus::Ready,
                 output,
             });
         }
         let report = vm.run(process, remaining).map_err(error_text)?;
         total = total.saturating_add(report.steps);
         output.extend(report.output);
-        if report.status != ProcessStatus::Suspended {
+        if report.status == ProcessStatus::Ready {
+            continue;
+        }
+        if !matches!(
+            report.status,
+            ProcessStatus::Waiting | ProcessStatus::Suspended
+        ) {
             return Ok(RunReport {
                 process,
                 steps: total,

@@ -125,12 +125,22 @@ fn encode_reset_wal_payload(snapshot: &[u8]) -> Result<Vec<u8>, OmsError> {
     compress_wal_payload(payload)
 }
 
+struct LoadedWalRecords {
+    latest: Option<Vec<u8>>,
+    updates: Vec<Vec<u8>>,
+    committed_records: Vec<Vec<u8>>,
+}
+
 fn load_wal_records(
     path: &Path,
     mut latest: Option<Vec<u8>>,
-) -> Result<(Option<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>), OmsError> {
+) -> Result<LoadedWalRecords, OmsError> {
     if !path.exists() {
-        return Ok((latest, Vec::new(), Vec::new()));
+        return Ok(LoadedWalRecords {
+            latest,
+            updates: Vec::new(),
+            committed_records: Vec::new(),
+        });
     }
     let bytes = fs::read(path).map_err(storage_error)?;
     let mut position = 0_usize;
@@ -203,13 +213,17 @@ fn load_wal_records(
                 committed_records.push(payload.to_vec());
             }
             _ => {
-                latest = Some(apply_wal_payload(latest.as_deref(), &payload)?);
+                latest = Some(apply_wal_payload(latest.as_deref(), payload)?);
                 updates.clear();
                 committed_records.clear();
             }
         }
     }
-    Ok((latest, updates, committed_records))
+    Ok(LoadedWalRecords {
+        latest,
+        updates,
+        committed_records,
+    })
 }
 
 fn apply_wal_payload(previous: Option<&[u8]>, payload: &[u8]) -> Result<Vec<u8>, OmsError> {

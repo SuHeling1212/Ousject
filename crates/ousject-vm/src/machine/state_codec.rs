@@ -8,12 +8,14 @@ fn decode_process_state(bytes: &[u8]) -> Result<ProcessState, VmError> {
     let program = ObjectId::from_u128(reader.u128()?);
     let subject = SubjectId::from_u128(reader.u128()?);
     let token_position = reader.u32()?;
-    let status = match reader.u8()? {
+    let mut status = match reader.u8()? {
         0 => ProcessStatus::Running,
         1 => ProcessStatus::Suspended,
         2 => ProcessStatus::Halted,
         3 => ProcessStatus::Terminated,
         4 => ProcessStatus::Failed,
+        5 => ProcessStatus::Ready,
+        6 => ProcessStatus::Waiting,
         _ => return Err(invalid_state("invalid Process status")),
     };
     let mut stack = Vec::new();
@@ -67,7 +69,7 @@ fn decode_process_state(bytes: &[u8]) -> Result<ProcessState, VmError> {
             stack_base: reader.u32()?,
         });
     }
-    let (result, error, wake_at_unix_ms, ended_at_unix_ms) = if reader.is_empty() {
+    let (result, error, legacy_wake, ended_at_unix_ms) = if reader.is_empty() {
         (None, None, None, None)
     } else {
         if reader.take(4)? != PROCESS_RESULT_EXTENSION {
@@ -82,12 +84,43 @@ fn decode_process_state(bytes: &[u8]) -> Result<ProcessState, VmError> {
                 return Err(invalid_state("unknown Process runtime extension"));
             }
             (
-                decode_optional_u64(&mut reader)?,
+                decode_state_optional_u64(&mut reader)?,
                 decode_optional_u64(&mut reader)?,
             )
         };
         (result, error, wake_at_unix_ms, ended_at_unix_ms)
     };
+    let (wait_reason, lease_owner, lease_generation, lease_deadline_unix_ms) =
+        if reader.is_empty() {
+            (
+                legacy_wake.map_or(WaitReason::None, |deadline_unix_ms| WaitReason::Timer {
+                    timer: None,
+                    deadline_unix_ms,
+                }),
+                None,
+                0,
+                None,
+            )
+        } else {
+            if reader.take(4)? != PROCESS_SCHEDULER_EXTENSION {
+                return Err(invalid_state("unknown Process scheduler extension"));
+            }
+            let wait_reason = decode_wait_reason(&mut reader)?;
+            let lease_owner = match reader.u8()? {
+                0 => None,
+                1 => Some(ObjectId::from_u128(reader.u128()?)),
+                _ => return Err(invalid_state("invalid Worker lease owner marker")),
+            };
+            (
+                wait_reason,
+                lease_owner,
+                reader.u64()?,
+                decode_optional_u64(&mut reader)?,
+            )
+        };
+    if legacy_wake.is_some() && status == ProcessStatus::Suspended {
+        status = ProcessStatus::Waiting;
+    }
     if !reader.is_empty() {
         return Err(invalid_state("trailing Process state data"));
     }
@@ -98,13 +131,46 @@ fn decode_process_state(bytes: &[u8]) -> Result<ProcessState, VmError> {
         stack,
         variables,
         status,
+        wait_reason,
+        lease_owner,
+        lease_generation,
+        lease_deadline_unix_ms,
         result,
         error,
-        wake_at_unix_ms,
         ended_at_unix_ms,
         frames,
         handlers,
     })
+}
+
+fn decode_wait_reason(reader: &mut StateReader<'_>) -> Result<WaitReason, VmError> {
+    match reader.u8()? {
+        0 => Ok(WaitReason::None),
+        1 => {
+            let timer = match reader.u8()? {
+                0 => None,
+                1 => Some(ObjectId::from_u128(reader.u128()?)),
+                _ => return Err(invalid_state("invalid Timer wait Object marker")),
+            };
+            Ok(WaitReason::Timer {
+                timer,
+                deadline_unix_ms: reader.u64()?,
+            })
+        }
+        2 => Ok(WaitReason::Ipc(ObjectId::from_u128(reader.u128()?))),
+        3 => Ok(WaitReason::Effect(ObjectId::from_u128(reader.u128()?))),
+        4 => Ok(WaitReason::Input(ObjectId::from_u128(reader.u128()?))),
+        5 => Ok(WaitReason::Process(ObjectId::from_u128(reader.u128()?))),
+        _ => Err(invalid_state("invalid Process wait reason")),
+    }
+}
+
+fn decode_state_optional_u64(reader: &mut StateReader<'_>) -> Result<Option<u64>, VmError> {
+    match reader.u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(reader.u64()?)),
+        _ => Err(invalid_state("invalid optional integer marker")),
+    }
 }
 
 fn decode_value_state(bytes: &[u8]) -> Result<Value, VmError> {

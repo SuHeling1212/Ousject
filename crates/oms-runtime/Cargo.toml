@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 im = { version = "15.1.0", default-features = false }
+nix = { version = "0.30", features = ["signal"] }
 oms-shard = { path = "../oms-shard" }
 oms-types = { path = "../oms-types" }
 

@@ -12,7 +12,9 @@
 - Checkpoint 完整落盘并切换成功前，旧 Checkpoint 和 WAL 不能删除。
 - 终端画面可以丢弃并重画，但程序状态和用户明确保存的内容不能丢失。
 
-## 已确认的主要瓶颈
+## 优化前确认的主要瓶颈
+
+本节描述的是执行片与 WAL 调整前的性能诊断，不是当前实现状态。当前 VM 已将连续纯 Token 合并为最多 4096 Token 或 20ms 的执行片；创建/替换 Object、Provider、等待和生命周期等操作在语义边界提前提交。持久 WAL 使用增量 Group Commit，写入成功并同步后才发布。后续运行状态按下文实施记录更新。
 
 ### 1. 每个 Token 都进行一次持久提交
 
@@ -261,3 +263,9 @@ Checkpoint 流程：
 - 同环境基准数据记录在 `PERFORMANCE-BASELINE.md`。Release VM 热循环达到约 9.5M Token/s；这是合成循环，不等于真实交互命令或磁盘提交延迟。
 
 仍未完成的计划项：一般对象修改统一进入执行片 Overlay；多 Shard 事务仍需合并其参与的 Shard；空闲 10 分钟触发；编辑器级键入延迟测试；随机断电点故障注入；跨 Shard 和大对象数量基准；任意大 Text/Bytes 的分块写入。当前 Checkpoint 内容在后台编码和写盘，但切换代时仍需持锁补写 WAL 尾记录与同步 manifest，必须继续测量其对前台尾延迟的影响。
+
+### 2026-10-07：Hosted Core 调度与辅助对象
+
+- Scheduler 继续使用 4096 Token/20ms 的切片边界，新增持久 Worker lease 和 generation fencing；Pure Token Overlay 在语义边界或时间/Token 上限处提交。
+- Channel、SwapPool、Timer、Effect 与 Audit 变更使用 OMS 事务和既有 WAL/Group Commit 路径；没有为这些对象引入单独的内存缓存持久协议。
+- 这一轮的验收目标是正确性命令和恢复/故障测试，不新增磁盘吞吐或交互延迟的基准结论。上一节记录的合成循环数据不代表新增组件的性能。

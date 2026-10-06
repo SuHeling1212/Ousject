@@ -391,8 +391,7 @@ impl FileSnapshotBackend {
             u64::try_from(snapshot.len())
                 .unwrap_or(u64::MAX)
                 .saturating_div(4)
-                .max(1)
-                .min(CHECKPOINT_WAL_BYTES)
+                .clamp(1, CHECKPOINT_WAL_BYTES)
         })
     }
 
@@ -419,7 +418,7 @@ impl FileSnapshotBackend {
             let backend = self.clone();
             let worker = std::thread::Builder::new()
                 .name("ousject-wal-group-commit".to_owned())
-                .spawn(move || backend.group_commit_worker(receiver, IDLE_WINDOW))
+                .spawn(move || backend.group_commit_worker(&receiver, IDLE_WINDOW))
                 .map_err(|error| OmsError::Storage(error.to_string()))?;
             state.sender = Some(sender.clone());
             state.workers.push(worker);
@@ -451,7 +450,7 @@ impl FileSnapshotBackend {
         outcome
     }
 
-    fn group_commit_worker(&self, receiver: Receiver<GroupCommitRequest>, idle_window: Duration) {
+    fn group_commit_worker(&self, receiver: &Receiver<GroupCommitRequest>, idle_window: Duration) {
         const MAX_RECORDS: usize = 64;
         const MAX_BATCH_BYTES: usize = 1024 * 1024;
 
@@ -674,9 +673,23 @@ fn stale_process_lock(path: &Path) -> Result<bool, OmsError> {
         .split_whitespace()
         .next()
         .and_then(|value| value.parse::<u32>().ok());
-    let proc_root = Path::new("/proc");
-    Ok(proc_root.join("self").exists()
-        && pid.is_some_and(|pid| !proc_root.join(pid.to_string()).exists()))
+    let Some(pid) = pid.and_then(|pid| i32::try_from(pid).ok()) else {
+        return Ok(true);
+    };
+
+    #[cfg(unix)]
+    {
+        match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+            Err(nix::errno::Errno::ESRCH) => Ok(true),
+            Ok(()) | Err(_) => Ok(false),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Ok(false)
+    }
 }
 
 impl SnapshotBackend for FileSnapshotBackend {
@@ -710,12 +723,12 @@ impl SnapshotBackend for FileSnapshotBackend {
         } else {
             None
         };
-        let (checkpoint, updates, records) =
-            load_wal_records(&self.wal_path_for(generation), snapshot)?;
-        let mut current_state = checkpoint
+        let recovered = load_wal_records(&self.wal_path_for(generation), snapshot)?;
+        let mut current_state = recovered
+            .latest
             .as_deref()
             .map_or_else(|| Ok(ShardState::default()), decode_snapshot)?;
-        for update in &updates {
+        for update in &recovered.updates {
             apply_snapshot_delta(&mut current_state, update)?;
         }
         self.generation.store(generation, Ordering::Release);
@@ -733,7 +746,7 @@ impl SnapshotBackend for FileSnapshotBackend {
         self.latest
             .lock()
             .map_err(|_| OmsError::TemporarilyUnavailable)?
-            .clone_from(&checkpoint);
+            .clone_from(&recovered.latest);
         *self
             .latest_state
             .lock()
@@ -744,7 +757,7 @@ impl SnapshotBackend for FileSnapshotBackend {
             .map_err(|_| OmsError::TemporarilyUnavailable)?;
         journal.sequence = 0;
         journal.records.clear();
-        for payload in records {
+        for payload in recovered.committed_records {
             journal.sequence = journal.sequence.saturating_add(1);
             let sequence = journal.sequence;
             journal.records.push((sequence, payload));
@@ -763,8 +776,8 @@ impl SnapshotBackend for FileSnapshotBackend {
         let _ = remove_file_if_exists(&self.wal_path_for(orphan_generation));
         let _ = sync_parent_directory(&self.path);
         Ok(SnapshotRecovery {
-            checkpoint,
-            updates,
+            checkpoint: recovered.latest,
+            updates: recovered.updates,
         })
     }
 

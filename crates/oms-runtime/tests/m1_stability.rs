@@ -556,10 +556,10 @@ fn background_checkpoint_triggers_at_quarter_of_existing_snapshot() {
     let path = directory.join("objects.oms");
     let context = AccessContext::new(SubjectId::new());
     let initial_state = (0..1_024)
-        .map(|index| (index % 251) as u8)
+        .map(|index| u8::try_from(index % 251).unwrap())
         .collect::<Vec<_>>();
     let next_state = (0..2_048)
-        .map(|index| ((index * 17) % 251) as u8)
+        .map(|index| u8::try_from((index * 17) % 251).unwrap())
         .collect::<Vec<_>>();
     let object;
 
@@ -597,7 +597,16 @@ fn background_checkpoint_triggers_at_quarter_of_existing_snapshot() {
         assert_eq!(manager.read(context, object).unwrap().state(), next_state);
     }
 
-    let recovered = InMemoryObjectManager::open_persistent(&path).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let recovered = loop {
+        match InMemoryObjectManager::open_persistent(&path) {
+            Ok(manager) => break manager,
+            Err(OmsError::StoreInUse(_)) if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("failed to reopen checkpointed store: {error}"),
+        }
+    };
     assert_eq!(recovered.read(context, object).unwrap().state(), next_state);
     drop(recovered);
     std::fs::remove_dir_all(directory).unwrap();

@@ -95,7 +95,7 @@ name.grant     name.revoke    name.retire
 - 结束的 Process 及其结果保留七天后由内核自动退役；随后对象内容按墓碑的七天策略清理，Program 不会因 Process 结束而被删除。
 - 物理设备由启动时发现并发布；普通 Praxis 不能伪造 Provider-only Object。
 
-Console/Display/Network 等外部世界无法仅靠本地事务保证跨整机崩溃 exactly-once。Effect 意图不会丢；同一启动内重试复用 EffectId。重启后无远端幂等协议的操作采用 at-least-once，可能重复。
+Console/Display/Network 等外部世界无法仅靠本地事务保证跨整机崩溃 exactly-once。Effect 意图不会丢；`retry_idempotent` 恢复复用 EffectId，`manual` 恢复把结果不确定的操作留在 `unknown`，不自动重放。
 
 ## Process、IPC、用户与权限
 
@@ -130,7 +130,7 @@ Praxis Shell 通过 `terminal.open()` 找到当前用户的终端会话。会话
 
 交互终端执行 `process.wait()` 时，Linux 终端适配器监听原始 Ctrl+C 键；它只中断当前终端提交，Process 仍可继续接收下一段代码。已经提交的 Token 不回滚。Shell 提示符下的 Ctrl+C 会清除尚未提交的多行输入。
 
-交互式 `import "模块名"` 会从已启用的 Module Object 读取 Praxis 源码，并与当前提交一起编译。模块可在安装时锁定依赖 Module 的 Object ID；加载时按锁定 ID 取源码，所以依赖模块升级不会改变已有模块引用的版本。每个版本同时保存源码 SHA-256，导入时会重新计算并拒绝哈希不匹配的源码。每个 Terminal Session 对每个被导入模块及其依赖会持久创建一个 `core.module_instance` 记录；重复导入不会重复创建，重启后可查询恢复。模块声明的能力仍是登记信息，执行隔离和能力强制授权尚未完成。
+交互式 `import "模块名"` 会从已启用的 Module Object 读取 Praxis 源码，并与当前提交一起编译。模块可在安装时锁定依赖 Module 的 Object ID；加载时按锁定 ID 取源码，所以依赖模块升级不会改变已有模块引用的版本。每个版本同时保存源码 SHA-256，导入时会重新计算并拒绝哈希不匹配的源码。每个 Terminal Session 对每个被导入模块及其依赖会持久创建一个 `core.module_instance` 记录；重复导入不会重复创建，重启后可查询恢复。Library Module 在调用者自己的 Process/Subject 中运行；Manifest 能力只登记，不会授予调用者原本没有的权限。独立 Service Module 和 Kernel Extension 尚未实现。
 
 ## Praxis Module Registry
 
@@ -154,7 +154,17 @@ installed = modules.modules()
 | `modules.upgrade(module_id, version, source, capabilities[, dependencies])` | 原子建立新版 Module 和 Program，返回新版 ID，并保留旧版内容；省略依赖参数时沿用旧版本锁定的依赖 |
 | `modules.rollback(current_id, target_id)` | 原子切回同名的旧版本，不删除任一版本 |
 
-`enable/disable`、安装、升级和回滚仅允许 `local`。升级保留旧版 Module 和 Program 内容，将其标记为 `superseded`，再以同一 OMS 事务创建新版；旧版 ID、版本和源码仍可检查。回滚会在单个事务中切换当前版本状态，两个版本的源码和 Program 都保留。依赖 Object ID 会随 Module 持久保存；当依赖升级时，依赖仍按原 ID 解析至保留的旧版。源码 SHA-256 在安装和升级时写入，并在每次模块导入时验证。真实持久 Store 关闭后重新打开，已启用 Module、其 Program 与锁定依赖都能恢复并执行。Module Instance 目前是会话加载关系记录，不是独立的 Process 或隔离运行时。`modules.uninstall(id)` 会拒绝卸载仍被任何安装版本依赖或仍被活动 Terminal Session 加载的 Module；依赖/实例对象 Links 会和 Module 安装/Terminal 导入同时原子提交，因此并发卸载会与导入冲突，不能卸载正在被装载的版本。通过检查后，在一个 OMS 事务中退役 Module 与其 Program，内容按系统 7 天保留规则处理。`session.close()` 会原子关闭会话并将活动 Module Instance 标为 unloaded，清除反向索引，因此关闭会话后不再永久阻止 Module 卸载。清理旧历史版本以及将声明能力限制到专用 Subject 还未实现。Module 源码导入后以调用者自己的 Process 身份运行；声明能力列表目前只做记录，不授予额外权限。模块不会获得宿主命令或 Rust 动态库权限。
+`enable/disable`、安装、升级和回滚仅允许 `local`。升级保留旧版 Module 和 Program 内容，将其标记为 `superseded`，再以同一 OMS 事务创建新版；旧版 ID、版本和源码仍可检查。回滚会在单个事务中切换当前版本状态，两个版本的源码和 Program 都保留。依赖 Object ID 会随 Module 持久保存；当依赖升级时，依赖仍按原 ID 解析至保留的旧版。源码 SHA-256 在安装和升级时写入，并在每次模块导入时验证。真实持久 Store 关闭后重新打开，已启用 Module、其 Program 与锁定依赖都能恢复并执行。Module Instance 是会话加载关系记录，不是独立 Process 或隔离运行时。`modules.uninstall(id)` 会拒绝卸载仍被任何安装版本依赖或仍被活动 Terminal Session 加载的 Module；依赖/实例对象 Links 会和 Module 安装/Terminal 导入同时原子提交，因此并发卸载会与导入冲突，不能卸载正在被装载的版本。通过检查后，在一个 OMS 事务中退役 Module 与其 Program，内容按系统 7 天保留规则处理。`session.close()` 会原子关闭会话并将活动 Module Instance 标为 unloaded，清除反向索引，因此关闭会话后不再永久阻止 Module 卸载。Module 源码导入后以调用者自己的 Process 身份运行，声明能力不会被当成授权；模块没有宿主命令或 Rust 动态库权限。
+
+## Hosted Core: Scheduler、IPC、Timer 与 Audit
+
+- Process 状态为 `Ready/Running/Waiting/Suspended/Halted/Terminated/Failed`。Waiting 保存 `Timer/Ipc/Effect/Input/Process` 中的一个 `WaitReason`。
+- `CooperativeScheduler` 按 round-robin 运行持久 Ready Process。Worker lease 使用 owner、generation 和 deadline；切片上限 4096 Token 或 20ms。恢复时重建 runnable 队列并推进失效 lease generation。
+- Channel 保存 FIFO 消息；单条最多 1 MiB，队列最多 1024 条、编码状态 8 MiB。send 与 waiter 唤醒、receive 与消费位置均在 OMS 事务内。
+- `core.swap_pool` 以 `member:<name>` Link 发现现有 Object。attach/detach 不改变 member ObjectId/Parent/lifetime；读取和修改分别再通过 member 自己的 capability 与版本检查。
+- `core.timer` 与 `time.sleep` 使用持久 Unix-millisecond deadline。到期唤醒与 Timer 状态原子提交，恢复会重试失败的 fire commit。
+- Effect 状态含 `unknown`；恢复策略为 `manual` 或 `retry_idempotent`。Audit 是内部追加式 root/event；详情限 4 KiB，普通 Subject 不获 Audit root 权限。
+- Value 上限为 16 MiB、嵌套 64 层、容器 1,000,000 项；其他资源限额以各对象实现和 [API-REFERENCE.md](./API-REFERENCE.md) 为准。
 
 ## Local Package MVP
 
