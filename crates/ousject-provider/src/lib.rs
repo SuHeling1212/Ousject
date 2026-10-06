@@ -113,6 +113,31 @@ pub trait ObjectProvider: fmt::Debug + Send + Sync {
         self.invoke(object, state, capability, arguments, effect)
     }
 
+    /// Capabilities in this set are explicitly transient: they do not create
+    /// a durable Effect record and must not mutate persistent Object state.
+    fn ephemeral_capabilities(&self) -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
+    /// Performs a transient capability for a Process. The VM commits the
+    /// Process at its normal execution-slice boundary instead of persisting an
+    /// Effect for this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider-specific error if the transient operation fails.
+    fn invoke_ephemeral_for_process(
+        &self,
+        _process: ObjectId,
+        object: ObjectId,
+        state: &Value,
+        capability: &str,
+        arguments: &[Value],
+    ) -> Result<ProviderOutcome, ProviderError> {
+        let _ = (object, state, arguments);
+        Err(ProviderError::UnsupportedCapability(capability.to_owned()))
+    }
+
     /// Releases any boot-scoped resources leased by a Process that ended.
     fn process_ended(&self, _process: ObjectId) {}
 

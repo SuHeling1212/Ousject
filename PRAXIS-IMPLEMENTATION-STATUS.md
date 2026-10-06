@@ -14,7 +14,8 @@
 | 错误 | `try/catch` | 语言、类型、权限和对象错误可捕获；存储故障不被吞掉 |
 | 原子块 | `transaction { ... }` | 块内支持赋值、字段/索引修改和 Link；外部 Effect 禁止放入块内 |
 | 关系 | `b link a` | 两个名字显式绑定同一 Object；与 `b = a` 不同 |
-| 模块 | `import`、`include` | import 一次、include 每次，检测循环 |
+| 程序入口 | `func main()` | 完整程序必须有且只有一个无参数 main；入口顶层不能写执行语句 |
+| 模块 | `import`、`include` | 被导入源码禁止 main；先执行模块顶层初始化，import 一次、include 每次，检测循环 |
 | 注释/分隔 | `//`、换行、`;` | `#` 是长度运算符 |
 
 ## 统一 Object API

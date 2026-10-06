@@ -1,5 +1,7 @@
+func main() {
 console = object.find("console")
 store = object.find("store")
 
 console.println(store.stats())
 console.println(store.effects())
+}

@@ -1,3 +1,4 @@
+func main() {
 console = object.find("console")
 system = object.find("system")
 store = object.find("store")
@@ -21,3 +22,4 @@ login = object.find(login_id)
 login_process_id = login.execute()
 login_process = object.find(login_process_id)
 login_process.wait()
+}

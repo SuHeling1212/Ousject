@@ -20,6 +20,12 @@ const DEFAULT_SESSION_SECONDS: u64 = 24 * 60 * 60;
 const SALT_BYTES: usize = 16;
 const TOKEN_BYTES: usize = 32;
 
+/// Calculates a SHA-256 digest for content integrity checks.
+#[must_use]
+pub fn sha256_digest(message: &[u8]) -> [u8; 32] {
+    sha256(message)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthError {
     Oms(OmsError),

@@ -1,3 +1,4 @@
+func main() {
 console = object.find("console")
 authentication = object.find("authentication")
 programs = object.find("programs")
@@ -15,3 +16,4 @@ shell = object.find(shell_id)
 shell_process_id = shell.execute()
 shell_process = object.find(shell_process_id)
 shell_process.wait()
+}

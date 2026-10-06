@@ -1003,6 +1003,8 @@ Token Stream
 Ousject
 ```
 
+完整可执行 Praxis 源码必须声明一个无参数 `main()`，执行语句写在 `main()` 中。通过 `import` 或 `include` 加载的源码 Module 禁止声明 `main()`；Module 的顶层初始化先执行，随后入口程序的 `main()` 才开始运行。交互终端的逐段提交不要求 `main()`。
+
 Kernel 不需要理解 Praxis。
 
 ---

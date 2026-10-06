@@ -509,6 +509,9 @@ fn checkpoint_batches_commits_without_weakening_wal_recovery() {
     {
         let manager = InMemoryObjectManager::open_persistent(&path).unwrap();
         object = create(&manager, context, b"0", None);
+        for _ in 0..16 {
+            create(&manager, context, b"another object", None);
+        }
         for value in 1_u8..64 {
             let view = manager.read(context, object).unwrap();
             let mut transaction = manager.begin(context);
@@ -520,6 +523,8 @@ fn checkpoint_batches_commits_without_weakening_wal_recovery() {
         let manifest = path.with_extension("manifest");
         let checkpoint = path.with_extension("oms.g1");
         let wal = path.with_extension("wal.g1");
+        assert!(!manifest.exists(), "small commits must not force snapshots");
+        manager.checkpoint().unwrap();
         assert!(manifest.exists());
         assert!(checkpoint.exists());
         assert_eq!(
@@ -540,6 +545,60 @@ fn checkpoint_batches_commits_without_weakening_wal_recovery() {
 
     let recovered = InMemoryObjectManager::open_persistent(&path).unwrap();
     assert_eq!(recovered.read(context, object).unwrap().state(), [64]);
+    drop(recovered);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn background_checkpoint_triggers_at_quarter_of_existing_snapshot() {
+    let directory =
+        std::env::temp_dir().join(format!("ousject-checkpoint-ratio-{}", ObjectId::new()));
+    let path = directory.join("objects.oms");
+    let context = AccessContext::new(SubjectId::new());
+    let initial_state = (0..1_024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let next_state = (0..2_048)
+        .map(|index| ((index * 17) % 251) as u8)
+        .collect::<Vec<_>>();
+    let object;
+
+    {
+        let manager = InMemoryObjectManager::open_persistent(&path).unwrap();
+        object = create(&manager, context, &initial_state, None);
+        manager.checkpoint().unwrap();
+
+        let view = manager.read(context, object).unwrap();
+        let mut transaction = manager.begin(context);
+        transaction
+            .expect(object, view.header().version)
+            .update_state(object, next_state.clone());
+        manager.commit(transaction).unwrap();
+
+        let manifest = path.with_extension("manifest");
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let switched = loop {
+            let generation = std::fs::read(&manifest)
+                .ok()
+                .filter(|bytes| bytes.len() == 20)
+                .map(|bytes| u64::from_le_bytes(bytes[4..12].try_into().unwrap()));
+            if generation.is_some_and(|generation| generation >= 2) {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            switched,
+            "WAL above one quarter of the checkpoint did not trigger background compaction"
+        );
+        assert_eq!(manager.read(context, object).unwrap().state(), next_state);
+    }
+
+    let recovered = InMemoryObjectManager::open_persistent(&path).unwrap();
+    assert_eq!(recovered.read(context, object).unwrap().state(), next_state);
     drop(recovered);
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -617,15 +676,8 @@ fn compressed_incremental_wal_rejects_bit_corruption() {
     let context = AccessContext::new(SubjectId::new());
     {
         let manager = InMemoryObjectManager::open_persistent(&path).unwrap();
-        let object = create(&manager, context, &vec![0_u8; 4096], None);
-        for value in 1_u8..64 {
-            let view = manager.read(context, object).unwrap();
-            let mut transaction = manager.begin(context);
-            transaction
-                .expect(object, view.header().version)
-                .update_state(object, vec![value; 4096]);
-            manager.commit(transaction).unwrap();
-        }
+        let object = create(&manager, context, &vec![0_u8; 65_536], None);
+        manager.checkpoint().unwrap();
         let view = manager.read(context, object).unwrap();
         let mut transaction = manager.begin(context);
         transaction

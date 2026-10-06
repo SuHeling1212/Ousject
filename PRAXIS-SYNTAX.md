@@ -1280,7 +1280,22 @@ External Effect
 
 ## 48. import / include
 
-顶层可以使用：
+完整的可执行 Praxis 源码必须声明一个无参数 `main()`。入口源码的顶层只能放
+`func`、`class`、`import` 和 `include` 等声明，实际执行语句必须写进 `main()`：
+
+```praxis
+import "math"
+
+func main() {
+    console = object.find("console")
+    console.println(double(21))
+}
+```
+
+入口源码缺少 `main()`、声明多个 `main()`，或给 `main()` 添加参数都会在编译期报错。
+交互终端的逐段提交不是完整程序，因此不要求每次输入都声明 `main()`。
+
+顶层可以导入源码：
 
 ```praxis
 import "module"
@@ -1290,6 +1305,26 @@ include "source"
 这些属于编译组织能力，不改变 Ousject 的 Object Model。
 
 `import` 对同一路径只展开一次，`include` 每次都会展开。CLI 从主源码所在目录加载；省略扩展名时自动使用 `.px`。循环加载会在编译期报错。
+
+被导入的源码是 Module，不允许声明 `main()`。Module 可以包含顶层初始化语句；这些语句按导入顺序执行。全部导入初始化完成后，系统才调用入口源码的 `main()`。Module 中声明的函数和 Class 可以直接在 `main()` 中使用。
+
+```praxis
+// math.px
+factor = 2
+
+func double(value) {
+    return value * factor
+}
+```
+
+```praxis
+// main.px
+import "math"
+
+func main() {
+    result = double(21)
+}
+```
 
 ---
 

@@ -1,3 +1,4 @@
+func main() {
 count = 0
 sum = 0
 console = object.find("console")
@@ -23,4 +24,5 @@ if false && missing {
 } else if true || missing {
     console.println(sum)
     console.println(count)
+}
 }

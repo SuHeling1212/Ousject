@@ -1,3 +1,4 @@
+func main() {
 items = [1, 2, 3]
 console = object.find("console")
 items[0] = 10
@@ -10,3 +11,4 @@ user["age"] = 19
 
 console.println(items[0] + user["age"])
 console.println(#items + #user + #"hi")
+}

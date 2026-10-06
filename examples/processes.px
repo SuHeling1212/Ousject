@@ -7,6 +7,7 @@ func worker() {
     channel.value++
 }
 
+func main() {
 console = object.find("console")
 channel = object.create("Channel", {})
 child = object.create("core.process", {
@@ -17,3 +18,4 @@ child = object.create("core.process", {
 child.start()
 console.println(child.wait())
 console.println(channel.value)
+}

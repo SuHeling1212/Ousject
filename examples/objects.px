@@ -1,3 +1,4 @@
+func main() {
 // Assignment creates a core.value Object; explicit creation chooses a Type.
 x = 46
 console = object.find("console")
@@ -16,3 +17,4 @@ linked = object.find(root.links["note"])
 console.println(linked.value)
 console.println(#object.query("core.text"))
 console.println("printed by the console Object")
+}

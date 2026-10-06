@@ -1,4 +1,6 @@
+func main() {
 console = object.find("console")
 
 processes = object.query("core.process")
 console.println(processes)
+}

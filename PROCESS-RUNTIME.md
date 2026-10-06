@@ -46,6 +46,18 @@ Process 状态包含：
 
 变量名绑定 Object。第一次执行 `x = 42` 会创建 Process 的 `core.value` 子对象；以后修改 `x` 会更新这个对象。
 
+## 持久 Terminal Session
+
+Praxis Shell 为当前 Subject 打开或恢复一个 `core.terminal_session`。会话固定关联一个 Program 和一个 Process；每次输入都复用同一个 Process，所以变量、函数和 Class 定义跨提示符以及对象库重启后保留。
+
+```text
+terminal.open() → Terminal Session
+                         ├── Program Object
+                         └── one persistent Process Object
+```
+
+会话对象保存最近 100 次提交、未闭合括号的多行输入和终端尺寸。提交时，Session、Program 和 Process 位置在同一个 OMS 事务中更新。下一次提交前会压缩旧命令 Token，只保留仍有效的函数/Class 定义。交互式 `process.wait()` 收到 Ctrl+C 时会清空当前调用栈并停下这一段；已经提交的 Token 修改保留，同一个 Process 可以继续执行下一段。
+
 ## 执行一条 Token
 
 ```text

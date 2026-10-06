@@ -1,17 +1,42 @@
+func main() {
 console = object.find("console")
-compiler = object.find("compiler")
+terminal = object.find("terminal")
 types = object.find("types")
 authentication = object.find("authentication")
-current_user = authentication.current_user()
-prompt = current_user["name"] + ">"
-context = {}
+prompt = "local>"
+try {
+    current_user = authentication.current_user()
+    prompt = current_user["name"] + ">"
+} catch (identity_error) {
+}
+terminal_id = terminal.open()
+session = object.find(terminal_id)
+process_id = session.process()
+process = object.find(process_id)
+pending_source = session.pending_input()
+
+if console.is_interactive() {
+    dimensions = console.size()
+    session.update_size(dimensions["columns"], dimensions["rows"])
+}
 
 running = true
 while running {
     console.print(prompt + " ")
-    source = console.read_line()
+        line = console.read_line()
+        if line == "\r" {
+            source = "\r"
+        } else if pending_source != "" {
+            source = pending_source + "\n" + line
+        } else {
+            source = line
+        }
+        pending_source = ""
 
-    if source == "exit" {
+    if source == "\r" {
+        session.cancel()
+        session.save_input("")
+    } else if source == "exit" {
         running = false
     } else if source == "objects" {
         type_list = types.types()
@@ -31,7 +56,7 @@ while running {
             }
             type_index++
         }
-    } else {
+        } else {
         round_depth = 0
         curly_depth = 0
         square_depth = 0
@@ -61,7 +86,7 @@ while running {
             } else if character == "\"" {
                 in_string = true
                 scan_index++
-            } else {
+    } else {
                 if character == "(" {
                     round_depth++
                 } else if character == ")" {
@@ -90,6 +115,7 @@ while running {
         }
 
         while (round_depth > 0 or curly_depth > 0 or square_depth > 0) or continue_slash {
+            session.save_input(source)
             console.print("... ")
             continuation = console.read_line()
             explicit_join = #continuation > 0 and continuation[#continuation - 1] == "\\"
@@ -152,16 +178,14 @@ while running {
                 }
             }
         }
-
         try {
-            program_id = compiler.compile(source)
-            program = object.find(program_id)
-            process_id = program.execute(context)
-            process = object.find(process_id)
+            session.save_input("")
+            session.submit(source)
             process.wait()
-            context = process.bindings()
         } catch (error) {
             console.println(error)
         }
     }
+}
+session.close()
 }

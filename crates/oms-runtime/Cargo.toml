@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+im = { version = "15.1.0", default-features = false }
 oms-shard = { path = "../oms-shard" }
 oms-types = { path = "../oms-types" }
 

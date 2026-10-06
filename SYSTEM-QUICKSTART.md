@@ -25,6 +25,8 @@ Praxis、TF、Token VM、Process、Value Object、Scheduler、OMS、权限和原
 
 ## 1. 运行完整示例
 
+完整 `.px` 程序必须包含一个无参数 `func main()`。入口文件顶层只放函数、Class 和源码导入声明；执行语句写进 `main()`。被导入源码不能声明 `main()`，其顶层初始化会先于入口 `main()` 执行。交互式 Shell 输入不受此入口规则限制。
+
 ```bash
 ./scripts/ousject run examples/hello.px --local
 ```

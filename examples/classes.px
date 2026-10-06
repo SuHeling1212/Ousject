@@ -1,5 +1,3 @@
-console = object.find("console")
-
 func twice(value) {
     return value * 2
 }
@@ -13,6 +11,9 @@ class Counter {
     }
 }
 
+func main() {
+console = object.find("console")
 counter = object.create("Counter", { value: twice(5) })
 console.println(counter.add(2))
 console.println(counter.type)
+}

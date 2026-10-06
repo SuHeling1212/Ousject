@@ -58,6 +58,17 @@
 | `core.object_store` (`110e`) | record / provider_only | `stats, health_check, effects` |
 | `core.math` (`110f`) | record / provider_only | 数学函数；`pi`、`e` 字段 |
 | `core.time` (`1110`) | record / provider_only | `now, monotonic, sleep` |
+| `core.module` (`1113`) | record / provider_only | PX Module 源码、哈希、编译 Program 和精确依赖 |
+| `core.module_registry` (`1114`) | record / provider_only | 安装/查询/启停/升级/回滚/卸载 Module；仅 `local` 可管理 |
+| `core.module_instance` (`1115`) | record / provider_only | Terminal Session 已加载 Module 的持久关系 |
+| `core.package` (`1116`) | record / provider_only | 按 SHA 标识的不可变 Package 内容 |
+| `core.package_registry` (`1117`) | record / provider_only | 构建、验证、查询及安装本地 Package |
+| `core.package_installation` (`1118`) | record / provider_only | 每个用户独立的 Package 安装、Module 和 Data 入口 |
+| `core.package_data` (`1119`) | any / public | 用户 Package 的私有 Value 内容 |
+| `core.package_module` (`111a`) | record / provider_only | Installation 中的模块索引对象 |
+| `core.package_subject` (`111c`) | record / provider_only | 一次 Package 运行的 Subject 授权记录 |
+| `core.package_instance` (`111d`) | record / provider_only | Package Process 与固定 Package、Program、参数、资源和 Data 的绑定 |
+| `core.crypto` (`111b`) | record / provider_only | `sha256(value)`；Text/Bytes 原始内容，其他 Value 采用规范 TF 编码 |
 | `net.endpoint` (`1200`) | record / provider_only | TCP `connect, listen, accept, send, receive, close`；已注册网络 Provider 允许用户请求创建 |
 | `net.resolver` (`1201`) | record / provider_only | `resolve` |
 | `device.display` (`1300`) | record / provider_only | `present, configure`；交互 stdout 时发布实例 |
@@ -97,7 +108,7 @@ Shard 路由由 ObjectId 固定决定；查找/访问先路由到 Shard。程序
 
 ## 4. 编译、TF、Process 和运行
 
-`praxis_compiler::compile(source)` 将源码直接编译；遇到 import/include 指令会报错。`compile_with_loader` 对顶层 `import "path"` 只加载一次，对 `include "path"` 每次展开，并检测循环。CLI 可为源码文件提供加载器；Praxis 内建 `compiler.compile/validate` 不提供加载器。TF 程序编码魔数 `OTF0`，最多 16 Mi 条指令，解码校验跳转目标。Value 编码魔数 `OVL0`，Process 状态魔数 `OPS0`，对象库快照/WAL/manifest 分别为 `OMS0`/`OMW0`/`OMG0`。当前预发布格式保持 `0`；旧格式不作兼容保证。
+`praxis_compiler::compile_program(source)` 编译完整程序，要求有且只有一个无参数 `main()`，入口顶层只能包含声明；Praxis 内建 `compiler.compile/validate` 使用这条规则。`compile_program_with_loader` 对顶层 `import "path"` 只加载一次，对 `include "path"` 每次展开，并检测循环；被导入源码禁止 `main()`，其顶层初始化在入口 `main()` 前执行。CLI 为源码提供加载器，Praxis 内建 Compiler Object 暂不提供加载器。内部的片段编译和交互编译不要求 `main()`。TF 程序编码魔数 `OTF0`，最多 16 Mi 条指令，解码校验跳转目标。Value 编码魔数 `OVL0`，Process 状态魔数 `OPS0`，对象库快照/WAL/manifest 分别为 `OMS0`/`OMW0`/`OMG0`。当前预发布格式保持 `0`；旧格式不作兼容保证。
 
 ### 4.1 TF 指令全集
 
@@ -194,6 +205,7 @@ Class 定义写入 TF 中，并非 `core.type` 注册项。`object.create("类�
 | `math` | `sin(x)`、`cos(x)`、`tan(x)`、`atan2(y,x)`、`hypot(x,y)` | 三角函数/长度 |
 | `math` | `log(x)`、`log2(x)`、`log10(x)`、`exp(x)` | 对数/指数 |
 | `math` | `random()`、`random_integer(min,max)`、`pi`、`e` | `[0,1)` 随机 Float、含两端随机整数、数学常数 |
+| `crypto` | `sha256(value)` | 64 个十六进制字符的 SHA-256；内核校验仍自行重算 |
 | `core.text` 或内容为 Text 的 `core.value` | `slice(start,length)`、`find(needle)`、`contains(needle)`、`split(separator)` | Unicode 字符截取/位置、查找、拆分 |
 | 同上 | `replace_all(from,to)`、`trim()`、`lower()`、`upper()` | 文本替换、去空白、大小写转换 |
 
@@ -224,9 +236,12 @@ Class 定义写入 TF 中，并非 `core.type` 注册项。`object.create("类�
 | Session | `revoke()` | 将 Session 退役 |
 | `types` | `types()`、`descriptor(name)`、`register(name,schema,creation,capabilities)` | 查/注册 Type；注册仅 `local`；策略 `public/provider_only` |
 | `providers` | `providers()`、`devices()` | 已注册 Provider Type ID、已发现设备 Object ID；仅 `local` |
+| `modules` | `find(name,version)` | 仅 `local`；返回精确版本 Module Object ID，重复或不存在时报错 |
+| `packages` | `build(spec)`、`packages()`、`search(query)`、`find(coordinate)`、`info(id)`、`verify(id)`、`install(id)`、`installed()`、`require(coordinate)`、`restore(retired_id)`、`audit()` | 本地 Package、原子依赖安装、默认版本、保留期恢复和不可变审计 |
+| Package Installation | `info()`、`verify()`、`module(name)`、`resource(name)`、`permissions()`、`data()`、`run(args,grants)`、`upgrade(package)`、`rollback(target)`、`uninstall()` | 固定版本应用、权限预览、资源、数据与依赖生命周期；Manifest Export 是动态方法 |
 | Effect | `status()`、`result()` | `pending/completed/failed` 状态与结果 |
 
-已发布的内核服务名字是 `system`、`authentication`、`users`、`compiler`、`types`、`providers`、`store`、`math`、`time`、`resolver`；发现到 system Namespace 后还有 `programs` 名字。`console` 单独由硬件发现发布。**没有**已发布的 `scheduler` 服务；进程控制在 Process 自身。
+已发布的内核服务名字是 `system`、`authentication`、`users`、`compiler`、`types`、`providers`、`store`、`math`、`crypto`、`time`、`modules`、`packages`、`resolver`；发现到 system Namespace 后还有 `programs` 名字。`console` 单独由硬件发现发布。**没有**已发布的 `scheduler` 服务；进程控制在 Process 自身。
 
 ### 6.5 网络与设备
 

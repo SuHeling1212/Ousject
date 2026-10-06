@@ -1,9 +1,9 @@
-console = object.find("console")
-
 class Account {
     balance = 0
 }
 
+func main() {
+console = object.find("console")
 source = object.create("Account", { balance: 20 })
 target = object.create("Account", { balance: 2 })
 
@@ -14,3 +14,4 @@ transaction {
 
 console.println(source.balance)
 console.println(target.balance)
+}

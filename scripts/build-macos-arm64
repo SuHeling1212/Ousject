@@ -1,0 +1,86 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+tools_root="$project_root/.tools"
+rust_root="$tools_root/apple-rust"
+cargo_home="$rust_root/cargo"
+rustup_home="$rust_root/rustup"
+zig_root="$tools_root/zig"
+target="aarch64-apple-darwin"
+output="$project_root/ousject-macos-arm64"
+
+if [ "$(uname -s):$(uname -m)" != "Linux:x86_64" ]; then
+    echo "This build script is for the current Linux x86_64 environment." >&2
+    exit 1
+fi
+
+rustup_host=x86_64-unknown-linux-gnu
+zig_archive=zig-linux-x86_64-0.13.0.tar.xz
+
+for command_name in curl tar file; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        echo "Required command not found: $command_name" >&2
+        exit 1
+    fi
+done
+
+mkdir -p "$tools_root"
+temp_root=$(mktemp -d "$tools_root/apple-arm64-build.XXXXXX")
+trap 'rm -rf "$temp_root"' EXIT HUP INT TERM
+
+export RUSTUP_HOME="$rustup_home"
+export CARGO_HOME="$cargo_home"
+export PATH="$cargo_home/bin:$zig_root:$PATH"
+
+if [ ! -x "$cargo_home/bin/rustup" ]; then
+    mkdir -p "$cargo_home/bin" "$rustup_home"
+    rustup_url="https://static.rust-lang.org/rustup/dist/$rustup_host/rustup-init"
+    echo "Downloading Rust installer..."
+    curl -fL --retry 3 "$rustup_url" -o "$temp_root/rustup-init"
+    chmod +x "$temp_root/rustup-init"
+    "$temp_root/rustup-init" -y --no-modify-path --profile minimal \
+        --default-toolchain 1.85.0 --target "$target"
+fi
+
+rustup toolchain install 1.85.0 --profile minimal --no-self-update
+rustup target add --toolchain 1.85.0 "$target"
+
+if [ ! -x "$zig_root/zig" ]; then
+    mkdir -p "$zig_root"
+    echo "Downloading Zig cross-linker..."
+    curl -fL --retry 3 \
+        "https://ziglang.org/download/0.13.0/$zig_archive" \
+        -o "$temp_root/$zig_archive"
+    tar -xJf "$temp_root/$zig_archive" --strip-components=1 -C "$zig_root"
+fi
+
+if [ ! -x "$cargo_home/bin/cargo-zigbuild" ]; then
+    echo "Installing Rust cross-build helper..."
+    cargo +1.85.0 install cargo-zigbuild --version 0.19.8 --locked
+fi
+
+echo "Building Ousject for Apple Silicon..."
+cargo +1.85.0 zigbuild --release --locked -p ousject-cli --target "$target"
+
+built_binary="$project_root/target/$target/release/ousject"
+if [ ! -f "$built_binary" ]; then
+    echo "Build finished without producing $built_binary" >&2
+    exit 1
+fi
+
+binary_type=$(file -b "$built_binary")
+case "$binary_type" in
+    *"Mach-O 64-bit arm64"*) ;;
+    *)
+        echo "Refusing to publish unexpected build output: $binary_type" >&2
+        exit 1
+        ;;
+esac
+
+cp "$built_binary" "$output.tmp"
+chmod +x "$output.tmp"
+mv -f "$output.tmp" "$output"
+
+echo "Done: $output"
+echo "$binary_type"

@@ -1,4 +1,6 @@
-use oms_runtime::{AccessContext, CreateObject, InMemoryObjectManager, SnapshotBackend};
+use oms_runtime::{
+    AccessContext, CreateObject, FileSnapshotBackend, InMemoryObjectManager, SnapshotBackend,
+};
 use oms_types::{ObjectId, OmsError, SubjectId, TypeId};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -110,7 +112,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let directory = std::env::temp_dir().join(format!("ousject-wal-benchmark-{}", ObjectId::new()));
     let path = directory.join("objects.oms");
-    let file_manager = InMemoryObjectManager::open_persistent(&path)?;
+    let file_backend = Arc::new(FileSnapshotBackend::new(&path));
+    let file_manager = InMemoryObjectManager::open_with_backend(file_backend.clone())?;
     let mut target = None;
     for _ in 0..64 {
         let request = CreateObject::new(TypeId::new(), vec![0_u8; state_bytes]);
@@ -120,16 +123,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         file_manager.commit(transaction)?;
     }
     let target = target.ok_or("file benchmark did not create an Object")?;
-    let view = file_manager.read(context, target)?;
-    let mut transaction = file_manager.begin(context);
-    transaction
-        .expect(target, view.header().version)
-        .update_state(target, vec![1_u8; state_bytes]);
-    file_manager.commit(transaction)?;
-    let checkpoint_bytes = std::fs::metadata(&path)?.len();
-    let incremental_wal_bytes = std::fs::metadata(path.with_extension("wal"))?.len();
-    println!("checkpoint_bytes={checkpoint_bytes}");
-    println!("incremental_wal_bytes={incremental_wal_bytes}");
+    file_manager.checkpoint()?;
+    let durable_started = Instant::now();
+    let mut durable_latencies = Vec::with_capacity(usize::try_from(commits)?);
+    for sequence in 0..commits {
+        let view = file_manager.read(context, target)?;
+        let mut state = vec![0_u8; state_bytes];
+        state[0] = sequence.to_le_bytes()[0];
+        let mut transaction = file_manager.begin(context);
+        transaction
+            .expect(target, view.header().version)
+            .update_state(target, state);
+        let commit_started = Instant::now();
+        file_manager.commit(transaction)?;
+        durable_latencies.push(commit_started.elapsed().as_nanos());
+    }
+    let durable_elapsed = durable_started.elapsed();
+    let usage = file_backend.storage_usage()?;
+    durable_latencies.sort_unstable();
+    println!("durable_file_commits={commits}");
+    println!("durable_file_elapsed_ms={}", durable_elapsed.as_millis());
+    println!(
+        "durable_file_commits_per_second={:.2}",
+        f64::from(u32::try_from(commits.min(u64::from(u32::MAX)))?) / durable_elapsed.as_secs_f64()
+    );
+    println!(
+        "durable_commit_p50_ns={}",
+        percentile(&durable_latencies, 50)
+    );
+    println!(
+        "durable_commit_p95_ns={}",
+        percentile(&durable_latencies, 95)
+    );
+    println!(
+        "durable_commit_p99_ns={}",
+        percentile(&durable_latencies, 99)
+    );
+    println!("checkpoint_bytes={}", usage.store_bytes);
+    println!("incremental_wal_bytes={}", usage.wal_bytes);
     drop(file_manager);
     std::fs::remove_dir_all(directory)?;
     Ok(())
