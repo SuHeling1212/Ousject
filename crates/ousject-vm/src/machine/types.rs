@@ -199,7 +199,7 @@ impl From<ProviderError> for VmError {
     }
 }
 
-pub trait ConsoleProvider: fmt::Debug + Send + Sync {
+pub trait TerminalProvider: fmt::Debug + Send + Sync {
     /// Sends output without adding a trailing newline.
     ///
     /// # Errors
@@ -266,7 +266,7 @@ pub trait ConsoleProvider: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a provider-specific message when console input is unavailable.
+    /// Returns a provider-specific message when terminal input is unavailable.
     fn try_read_line(&self) -> Result<Option<String>, String> {
         Ok(None)
     }

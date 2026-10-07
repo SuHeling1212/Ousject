@@ -11,7 +11,7 @@ use tf_format::Token;
 fn package_build_import_install_upgrade_rollback_and_restore_are_atomic() {
     let backend = Arc::new(FaultBackend::default());
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let source = r#"
 modules = object.find("modules")
 packages = object.find("packages")
@@ -186,7 +186,7 @@ active_id = packages.require("sample/greetings")
 )]
 fn package_application_remains_bound_to_its_program_and_sha_after_upgrade() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let source = r#"
 packages = object.find("packages")
 compiler = object.find("compiler")

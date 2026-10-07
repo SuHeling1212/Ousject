@@ -1,6 +1,6 @@
 func main() {
-console = object.find("console")
+terminal = object.find("terminal")
 types = object.find("types")
 
-console.println(types.types())
+terminal.println(types.types())
 }

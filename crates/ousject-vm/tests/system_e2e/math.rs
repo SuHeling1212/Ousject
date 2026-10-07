@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn praxis_uses_math_object_capabilities_and_constants() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let source = r#"
 math = object.find("math")
 pi = math.pi
@@ -70,7 +70,7 @@ distance = math.hypot(3, 4)
 #[test]
 fn math_object_reports_domain_and_overflow_errors() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let negative_root = vm
         .create_process(&compile("math = object.find(\"math\")\nmath.sqrt(-1)").unwrap())
         .unwrap();

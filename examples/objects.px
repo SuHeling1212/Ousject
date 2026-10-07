@@ -1,20 +1,20 @@
 func main() {
 // Assignment creates a core.value Object; explicit creation chooses a Type.
 x = 46
-console = object.find("console")
+terminal = object.find("terminal")
 note = object.create("core.text", "hello")
-console.println(x.type)
-console.println(note.type)
-console.println(note)
+terminal.println(x.type)
+terminal.println(note.type)
+terminal.println(note)
 
 note.replace("hello, Ousject")
 same = object.find(note.id)
-console.println(same.value)
+terminal.println(same.value)
 
 root = object.create("core.namespace", {})
 root.link("note", note)
 linked = object.find(root.links["note"])
-console.println(linked.value)
-console.println(#object.query("core.text"))
-console.println("printed by the console Object")
+terminal.println(linked.value)
+terminal.println(#object.query("core.text"))
+terminal.println("printed by the terminal Object")
 }

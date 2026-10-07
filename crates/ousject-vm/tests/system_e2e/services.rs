@@ -3,9 +3,9 @@
 use super::*;
 
 #[derive(Debug)]
-struct ModuleTestConsole(Arc<Mutex<Vec<String>>>);
+struct ModuleTestTerminal(Arc<Mutex<Vec<String>>>);
 
-impl ConsoleProvider for ModuleTestConsole {
+impl TerminalProvider for ModuleTestTerminal {
     fn println(&self, text: &str) -> Result<(), String> {
         self.0.lock().unwrap().push(text.to_owned());
         Ok(())
@@ -15,18 +15,18 @@ impl ConsoleProvider for ModuleTestConsole {
 #[test]
 fn praxis_discovers_and_uses_kernel_service_objects() {
     let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
-    let vm = vm_with_console(Arc::clone(&manager));
+    let vm = vm_with_terminal(Arc::clone(&manager));
     let program = compile(
         r#"
-console = object.find("console")
+terminal = object.find("terminal")
 system = object.find("system")
 store = object.find("store")
 types = object.find("types")
 processes = object.query("core.process")
-console.println(system.status())
-console.println(store.health_check())
-console.println(types.types())
-console.println(processes)
+terminal.println(system.status())
+terminal.println(store.health_check())
+terminal.println(types.types())
+terminal.println(processes)
 "#,
     )
     .unwrap();
@@ -44,20 +44,18 @@ console.println(processes)
 #[allow(clippy::too_many_lines)]
 fn local_installs_praxis_module_source_and_program_atomically() {
     let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
     let output = Arc::new(Mutex::new(Vec::new()));
-    let vm = VirtualMachine::with_console(
+    let vm = VirtualMachine::with_terminal(
         manager.clone(),
-        console,
-        Arc::new(ModuleTestConsole(Arc::clone(&output))),
+        terminal,
+        Arc::new(ModuleTestTerminal(Arc::clone(&output))),
     )
     .unwrap();
-    vm.register_provider(Arc::new(super::persistent_terminal::ShellTerminalProvider))
-        .unwrap();
     let source = r#"
 modules = object.find("modules")
-module_id = modules.install("greeter", "0.1.0", "func greeting() { return \"hello\" }", ["console.println"])
+module_id = modules.install("greeter", "0.1.0", "func greeting() { return \"hello\" }", ["terminal.println"])
 module_list = modules.modules()
 modules.enable(module_id)
 terminal = object.find("terminal")
@@ -72,7 +70,7 @@ terminal_process.wait()
 modules.disable(module_id)
 shell_terminal.submit("answer = greeting()")
 terminal_process.wait()
-upgraded_module_id = modules.upgrade(module_id, "0.2.0", "func greeting() { return \"bonjour\" }", ["console.println"])
+upgraded_module_id = modules.upgrade(module_id, "0.2.0", "func greeting() { return \"bonjour\" }", ["terminal.println"])
 modules.enable(upgraded_module_id)
 shell_terminal.submit("import \"greeter\"\ngreeting()")
 terminal_process.wait()
@@ -164,7 +162,7 @@ module_history = modules.modules()
     assert_eq!(fields["status"], Value::Text("superseded".to_owned()));
     assert_eq!(
         fields["capabilities"],
-        Value::Array(vec![Value::Text("console.println".to_owned())])
+        Value::Array(vec![Value::Text("terminal.println".to_owned())])
     );
     let program_id: ObjectId = match &fields["program"] {
         Value::Text(program) => program.parse().unwrap(),
@@ -192,17 +190,15 @@ module_history = modules.modules()
 #[allow(clippy::too_many_lines)]
 fn praxis_modules_lock_dependencies_and_verify_source_hashes() {
     let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
     let output = Arc::new(Mutex::new(Vec::new()));
-    let vm = VirtualMachine::with_console(
+    let vm = VirtualMachine::with_terminal(
         manager.clone(),
-        console,
-        Arc::new(ModuleTestConsole(output)),
+        terminal,
+        Arc::new(ModuleTestTerminal(output)),
     )
     .unwrap();
-    vm.register_provider(Arc::new(super::persistent_terminal::ShellTerminalProvider))
-        .unwrap();
     let source = r#"
 modules = object.find("modules")
 dependency_id = modules.install("greeter", "1.0.0", "func greeting() { return \"hello\" }", [])
@@ -459,7 +455,7 @@ fn enabled_modules_and_locked_dependencies_survive_store_reopen() {
     let wrapper_id;
     {
         let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-        let vm = vm_with_console(Arc::clone(&manager));
+        let vm = vm_with_terminal(Arc::clone(&manager));
         let install = compile(
             r#"
 modules = object.find("modules")
@@ -542,19 +538,19 @@ shell_process.wait()
 #[test]
 fn praxis_compiles_and_executes_program_objects_through_compiler_service() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let program = compile(
         r#"
-console = object.find("console")
+terminal = object.find("terminal")
 compiler = object.find("compiler")
 source = "func main() { value = 40 + 2 }"
-console.println(compiler.validate(source))
+terminal.println(compiler.validate(source))
 program_id = compiler.compile(source)
 program = object.find(program_id)
-console.println(program.type)
+terminal.println(program.type)
 child_id = program.execute()
 child = object.find(child_id)
-console.println(child.wait())
+terminal.println(child.wait())
 "#,
     )
     .unwrap();
@@ -565,15 +561,15 @@ console.println(child.wait())
 }
 
 #[test]
-fn process_wait_keeps_driving_a_child_suspended_for_console_input() {
+fn process_wait_keeps_driving_a_child_suspended_for_terminal_input() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-    let driver = Arc::new(InputConsole {
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let driver = Arc::new(InputTerminal {
         lines: Mutex::new(VecDeque::new()),
         reads: AtomicUsize::new(0),
     });
-    let vm = VirtualMachine::with_console(manager, console, driver.clone()).unwrap();
+    let vm = VirtualMachine::with_terminal(manager, terminal, driver.clone()).unwrap();
     let delayed_input = Arc::clone(&driver);
     let input_thread = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(30));
@@ -585,14 +581,14 @@ fn process_wait_keeps_driving_a_child_suspended_for_console_input() {
     });
     let program = compile(
         r#"
-console = object.find("console")
+terminal = object.find("terminal")
 compiler = object.find("compiler")
-source = "func main() { console = object.find(\"console\")\nconsole.read_line() }"
+source = "func main() { terminal = object.find(\"terminal\")\nterminal.read_line() }"
 program_id = compiler.compile(source)
 child_program = object.find(program_id)
 child_id = child_program.execute()
 child = object.find(child_id)
-console.println(child.wait())
+terminal.println(child.wait())
 "#,
     )
     .unwrap();

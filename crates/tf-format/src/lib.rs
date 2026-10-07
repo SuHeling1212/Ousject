@@ -654,7 +654,7 @@ mod tests {
                     arguments: 0,
                 },
                 Token::BindFound {
-                    name: "console".to_owned(),
+                    name: "terminal".to_owned(),
                     arguments: 1,
                 },
                 Token::Halt,

@@ -110,7 +110,7 @@ impl<'a> CooperativeScheduler<'a> {
                                 header.type_id == CORE_TERMINAL_TYPE
                             })
                     });
-                    if let (Some(terminal), Some(driver)) = (terminal, &self.vm.console_driver) {
+                    if let (Some(terminal), Some(driver)) = (terminal, &self.vm.terminal_driver) {
                         if driver.is_interactive() {
                             driver
                                 .begin_interrupt_watch(process)
@@ -150,7 +150,7 @@ impl<'a> CooperativeScheduler<'a> {
                 // Poll after giving a Ready process an execution slice. An
                 // interrupt is intended to cancel active work, not consume a
                 // pending Ctrl-C before a newly submitted command has begun.
-                if let Some(driver) = &self.vm.console_driver {
+                if let Some(driver) = &self.vm.terminal_driver {
                     for (watched, terminal) in &interrupt_watches {
                         if driver
                             .take_interrupt(*watched)
@@ -186,7 +186,7 @@ impl<'a> CooperativeScheduler<'a> {
             return Ok(());
         })();
 
-        if let Some(driver) = &self.vm.console_driver {
+        if let Some(driver) = &self.vm.terminal_driver {
             for process in interrupt_watches.keys() {
                 driver.end_interrupt_watch(*process);
             }

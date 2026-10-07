@@ -71,8 +71,8 @@ impl VirtualMachine {
             .with_id(program_id)
             .with_parent(terminal);
         let mut variables = self.kernel_services.clone();
-        if let Some(console) = self.console_provider {
-            variables.insert("console".to_owned(), console);
+        if let Some(terminal) = self.terminal_provider {
+            variables.insert("terminal".to_owned(), terminal);
         }
         let process_state = ProcessState {
             program: program_id,
@@ -97,8 +97,8 @@ impl VirtualMachine {
                 .with_parent(terminal)
                 .with_link("program", program_id)
                 .with_link("process", process);
-        if let Some(console) = self.console_provider {
-            process_request = process_request.with_link("console", console);
+        if let Some(terminal) = self.terminal_provider {
+            process_request = process_request.with_link("terminal", terminal);
         }
         for (name, service) in &self.kernel_services {
             process_request = process_request.with_link(name.clone(), *service);
@@ -742,8 +742,8 @@ mod tests {
         assert_eq!(sanitized, "<redacted sensitive input>");
         assert!(!sanitized.contains("private-password"));
         assert_eq!(
-            sanitize_terminal_history_source("console.println(\"safe\")"),
-            "console.println(\"safe\")"
+            sanitize_terminal_history_source("terminal.println(\"safe\")"),
+            "terminal.println(\"safe\")"
         );
     }
 }

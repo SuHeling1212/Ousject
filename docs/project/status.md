@@ -32,7 +32,7 @@
 | 用户、密码、Session | 已实现 | auth 与 shell 测试 |
 | Module Registry | 已实现 | services 测试 |
 | 本地 Package 生命周期 | 已实现核心流程 | package lifecycle 测试 |
-| Console 兼容 API | 已实现 | CLI Console Provider 与 durable effect/输入测试 |
+| Terminal 兼容 API | 已实现 | CLI Terminal Provider 与 durable effect/输入测试 |
 | Terminal 字节流、VT 屏幕子集与 Child Terminal 路由 | 已实现宿主版子集 | `HostTerminalProvider`、`TerminalScreen`、CLI 路由测试与 Terminal Shell e2e |
 | Physical Display Provider | 未实现 | tty 不再作为 `device.display` 发布；无 framebuffer driver |
 | Terminal Binary `input/output(Bytes)` | 已实现 | Host Terminal raw/canonical input 与 screen output；ephemeral |
@@ -55,7 +55,7 @@
 - `import` 与 `include`；
 - Object 创建、查找、查询、替换、Link 和授权；
 - `transaction` 原子块；
-- 子 Process、Channel、Timer、Console 输入和系统服务。
+- 子 Process、Channel、Timer、Terminal 输入和系统服务。
 - Terminal 字节输入/输出、VT 子集屏幕状态与 alternate-screen 快照。
 
 语法子集和运行时 API 以 [Praxis 语法参考](../reference/praxis-syntax.md)、

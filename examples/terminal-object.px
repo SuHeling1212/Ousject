@@ -1,5 +1,4 @@
 func main() {
-    console = object.find("console")
     root = object.find("terminal")
     child_id = root.create()
     terminal = object.find(child_id)
@@ -10,17 +9,15 @@ func main() {
     time = object.find("time")
     banner = "\e[?1049h\e[?1h\e[?2004h\e[?1000h\e[?1006h"
     banner = banner + "\e[2J\e[1;1H\e[1;38;2;80;220;255mOusject Terminal\e[0m"
-    banner = banner + "\e[3;1H256/true color, grapheme-aware cells, child Terminal"
-    banner = banner + "\e[5;1HArrows: host encodes normal/application cursor keys"
-    banner = banner + "\e[6;1HPaste and SGR mouse are delivered through Terminal.input()"
-    banner = banner + "\e[8;1HPress r, then resize this window; press q to quit"
+    banner = banner + "\e[3;1H256 colors; grapheme-aware cells"
+    banner = banner + "\e[4;1HChild Terminal; true-color support"
+    banner = banner + "\e[5;1HArrows: normal/application cursor keys"
+    banner = banner + "\e[6;1HPaste and SGR mouse: Terminal.input()"
+    banner = banner + "\e[8;1HPress r to test resize events"
+    banner = banner + "\e[9;1HPress q to quit"
     terminal.output(banner.utf8_bytes())
 
-    frame = terminal.snapshot()
-    console.println(frame["lines"][0])
-    console.println(frame["lines"][2])
-
-    if console.is_interactive() {
+    if terminal.is_interactive() {
         running = true
         while running {
             bytes = terminal.input(64)
@@ -35,9 +32,8 @@ func main() {
                     event = terminal.wait_event()
                     result_line = "\e[11;1HResize event delivered without polling.\e[K"
                     terminal.output(result_line.utf8_bytes())
-                    console.println(event["kind"])
-                    console.println(event["columns"])
-                    console.println(event["rows"])
+                    terminal.output(event["kind"].utf8_bytes())
+                    terminal.output("\n".utf8_bytes())
                 }
                 index++
             }
@@ -49,5 +45,4 @@ func main() {
 
     cleanup = "\e[?1006l\e[?1000l\e[?2004l\e[?1l\e[?1049l\e[0m"
     terminal.output(cleanup.utf8_bytes())
-    console.println("Child Terminal detached; parent Terminal restored on exit.")
 }

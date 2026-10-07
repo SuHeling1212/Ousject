@@ -1,6 +1,6 @@
 func main() {
 items = [1, 2, 3]
-console = object.find("console")
+terminal = object.find("terminal")
 items[0] = 10
 
 user = {
@@ -9,6 +9,6 @@ user = {
 }
 user["age"] = 19
 
-console.println(items[0] + user["age"])
-console.println(#items + #user + #"hi")
+terminal.println(items[0] + user["age"])
+terminal.println(#items + #user + #"hi")
 }

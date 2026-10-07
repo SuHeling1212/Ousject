@@ -356,8 +356,8 @@ impl VirtualMachine {
         let mut request = CreateObject::new(PROCESS_TYPE, encode_process_state(&state)?)
             .with_parent(parent)
             .with_link("program", program_id);
-        if let Some(console) = self.console_provider {
-            request = request.with_link("console", console);
+        if let Some(terminal) = self.terminal_provider {
+            request = request.with_link("terminal", terminal);
         }
         for (name, service) in &self.kernel_services {
             request = request.with_link(name.clone(), *service);
@@ -436,8 +436,8 @@ impl VirtualMachine {
         let mut request = CreateObject::new(PROCESS_TYPE, encode_process_state(&state)?)
             .with_parent(parent)
             .with_link("program", program);
-        if let Some(console) = self.console_provider {
-            request = request.with_link("console", console);
+        if let Some(terminal) = self.terminal_provider {
+            request = request.with_link("terminal", terminal);
         }
         for (name, service) in &self.kernel_services {
             request = request.with_link(name.clone(), *service);

@@ -112,7 +112,6 @@ pub const CORE_INSTANCE_TYPE: TypeId = TypeId::from_u128(0x1005);
 pub const CORE_PROGRAM_TYPE: TypeId = TypeId::from_u128(0x1100);
 pub const CORE_PROCESS_TYPE: TypeId = TypeId::from_u128(0x1101);
 pub const CORE_USER_TYPE: TypeId = TypeId::from_u128(0x1102);
-pub const CORE_CONSOLE_TYPE: TypeId = TypeId::from_u128(0x1103);
 pub const CORE_SESSION_TYPE: TypeId = TypeId::from_u128(0x1104);
 pub const CORE_EFFECT_TYPE: TypeId = TypeId::from_u128(0x1105);
 pub const CORE_CHANNEL_TYPE: TypeId = TypeId::from_u128(0x1106);

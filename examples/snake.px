@@ -14,9 +14,9 @@ func cursor_at(x, y) {
 }
 
 func main() {
-    console = object.find("console")
-    if !console.is_interactive() {
-        console.println("Snake needs an interactive host terminal.")
+    terminal = object.find("terminal")
+    if !terminal.is_interactive() {
+        terminal.println("Snake needs an interactive host terminal.")
         return
     }
 
@@ -246,5 +246,5 @@ func main() {
     }
     cleanup = "\e[?1006l\e[?1000l\e[?2004l\e[?1l\e[?1049l\e[0m"
     terminal.output(cleanup.utf8_bytes())
-    console.println("Snake exited.")
+    terminal.println("Snake exited.")
 }

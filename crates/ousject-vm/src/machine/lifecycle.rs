@@ -258,14 +258,14 @@ impl VirtualMachine {
     ///
     /// Returns an error if no provider was discovered or the Link commit fails.
     pub fn reconnect_hardware(&self, process: ObjectId) -> Result<(), VmError> {
-        let console = self
-            .console_provider
-            .ok_or(VmError::MissingProvider("console"))?;
+        let terminal = self
+            .terminal_provider
+            .ok_or(VmError::MissingProvider("terminal"))?;
         let view = self.manager.read(self.context, process)?;
         let mut transaction = self.manager.begin(self.context);
         transaction
             .expect(process, view.header().version)
-            .set_link(process, "console", console);
+            .set_link(process, "terminal", terminal);
         self.manager.commit(transaction)?;
         Ok(())
     }
@@ -484,8 +484,8 @@ impl VirtualMachine {
         Self {
             manager: Arc::clone(&self.manager),
             context: AccessContext::new(subject),
-            console_provider: self.console_provider,
-            console_driver: self.console_driver.clone(),
+            terminal_provider: self.terminal_provider,
+            terminal_driver: self.terminal_driver.clone(),
             kernel_services: self.kernel_services.clone(),
             providers: Arc::clone(&self.providers),
             program_cache: Arc::clone(&self.program_cache),

@@ -12,8 +12,8 @@ class Counter {
 }
 
 func main() {
-console = object.find("console")
+terminal = object.find("terminal")
 counter = object.create("Counter", { value: twice(5) })
-console.println(counter.add(2))
-console.println(counter.type)
+terminal.println(counter.add(2))
+terminal.println(counter.type)
 }

@@ -83,13 +83,13 @@ impl Parser {
             self.tokens.truncate(token_start);
             return Ok(false);
         }
-        let is_console_output = matches!(
+        let is_terminal_output = matches!(
             self.tokens.last(),
             Some(Token::ObjectCall { method, .. }) if method == "print" || method == "println"
         );
-        if !is_console_output {
+        if !is_terminal_output {
             self.tokens
-                .insert(token_start, Token::LoadIdentity("console".to_owned()));
+                .insert(token_start, Token::LoadIdentity("terminal".to_owned()));
             self.tokens.push(Token::ObjectCall {
                 method: "println".to_owned(),
                 arguments: 1,

@@ -6,7 +6,7 @@ use super::*;
 fn praxis_login_and_process_identity_transition_are_one_atomic_commit() {
     let backend = Arc::new(FaultBackend::default());
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-    let vm = vm_with_console(manager.clone());
+    let vm = vm_with_terminal(manager.clone());
     let program = compile(
         r#"
 authentication = object.find("authentication")
@@ -64,10 +64,10 @@ session = authentication.login("alice", "alice-password")
 #[test]
 fn reserved_local_user_cannot_be_replaced_or_retired_by_praxis() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(Arc::clone(&manager));
+    let vm = vm_with_terminal(Arc::clone(&manager));
     let program = compile(
         r#"
-console = object.find("console")
+terminal = object.find("terminal")
 authentication = object.find("authentication")
 authentication.initialize_local("password")
 found = object.query("core.user")
@@ -75,12 +75,12 @@ local = object.find(found[0])
 try {
     local.replace({ name: "forged" })
 } catch (error) {
-    console.println("replace denied")
+    terminal.println("replace denied")
 }
 try {
     local.retire()
 } catch (error) {
-    console.println("retire denied")
+    terminal.println("retire denied")
 }
 "#,
     )
@@ -99,11 +99,11 @@ try {
 fn praxis_process_recovers_and_finishes_after_restart() {
     let source = r#"
 count = 0
-console = object.find("console")
+terminal = object.find("terminal")
 while count < 5 {
     count++
 }
-console.println(count)
+terminal.println(count)
 "#;
     let program = compile(source).unwrap();
     let directory = std::env::temp_dir().join(format!("ousject-e2e-{}", ObjectId::new()));
@@ -111,7 +111,7 @@ console.println(count)
 
     let process = {
         let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-        let vm = vm_with_console(manager);
+        let vm = vm_with_terminal(manager);
         let process = vm.create_process(&program).unwrap();
         let partial = vm.run(process, 7).unwrap();
         assert_eq!(partial.status, ProcessStatus::Ready);
@@ -120,7 +120,7 @@ console.println(count)
     };
 
     let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     vm.reconnect_hardware(process).unwrap();
     let completed = vm.run(process, 200).unwrap();
     assert_eq!(completed.status, ProcessStatus::Halted);
@@ -136,7 +136,7 @@ fn expired_timer_wakes_after_restart_and_retries_a_failed_fire_commit() {
     let backend = Arc::new(FaultBackend::default());
     let process = {
         let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-        let vm = vm_with_console(manager);
+        let vm = vm_with_terminal(manager);
         let program =
             compile("time = object.find(\"time\")\ntime.sleep(10)\nfinished = true").unwrap();
         let process = vm.create_process(&program).unwrap();
@@ -149,7 +149,7 @@ fn expired_timer_wakes_after_restart_and_retries_a_failed_fire_commit() {
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     backend.fail_next.store(true, Ordering::SeqCst);
     assert!(matches!(
         vm.recover_processes(),

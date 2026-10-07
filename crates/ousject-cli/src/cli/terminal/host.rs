@@ -1,14 +1,13 @@
 use super::super::{
-    Arc, AtomicBool, BTreeMap, BTreeSet, Command, ConsoleProvider, ControlFlags, InputFlags,
-    IsTerminal, LocalFlags, Mutex, ObjectId, Ordering, ProviderError, SetArg,
-    SpecialCharacterIndices, Stdio, Termios, Value, VecDeque, Write, error_text, mpsc, tcgetattr,
-    tcsetattr,
+    Arc, AtomicBool, BTreeMap, BTreeSet, Command, ControlFlags, InputFlags, IsTerminal, LocalFlags,
+    Mutex, ObjectId, Ordering, ProviderError, SetArg, SpecialCharacterIndices, Stdio,
+    TerminalProvider, Termios, Value, VecDeque, Write, error_text, mpsc, tcgetattr, tcsetattr,
 };
 use super::input::{dispatch_event, input_reader};
 use super::key_parser::KeyEvent;
 
 #[derive(Debug)]
-pub(crate) struct LinuxConsole {
+pub(crate) struct LinuxTerminal {
     pub(crate) input: Arc<Mutex<LinuxInputState>>,
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) start_reader: mpsc::Sender<()>,
@@ -42,7 +41,7 @@ pub(crate) struct LinuxInputState {
     pub(crate) reader_error: Option<String>,
 }
 
-impl LinuxConsole {
+impl LinuxTerminal {
     pub(crate) fn new() -> Result<Arc<Self>, String> {
         let stdin = std::io::stdin();
         let terminal = stdin.is_terminal();
@@ -124,7 +123,7 @@ impl LinuxConsole {
             return Err(error.clone());
         }
         if input.eof {
-            return Err("console input reached EOF".to_owned());
+            return Err("terminal input reached EOF".to_owned());
         }
         let (start_reader, pending) = match input.owner {
             None => {
@@ -335,7 +334,7 @@ impl LinuxConsole {
     }
 }
 
-impl ConsoleProvider for LinuxConsole {
+impl TerminalProvider for LinuxTerminal {
     fn print(&self, text: &str) -> Result<(), String> {
         let mut output = std::io::stdout().lock();
         output.write_all(text.as_bytes()).map_err(error_text)?;
@@ -382,15 +381,15 @@ impl ConsoleProvider for LinuxConsole {
     }
 
     fn begin_interrupt_watch(&self, process: ObjectId) -> Result<(), String> {
-        LinuxConsole::begin_interrupt_watch(self, process)
+        LinuxTerminal::begin_interrupt_watch(self, process)
     }
 
     fn take_interrupt(&self, process: ObjectId) -> Result<bool, String> {
-        LinuxConsole::take_interrupt(self, process)
+        LinuxTerminal::take_interrupt(self, process)
     }
 
     fn end_interrupt_watch(&self, process: ObjectId) {
-        LinuxConsole::end_interrupt_watch(self, process);
+        LinuxTerminal::end_interrupt_watch(self, process);
     }
 
     fn try_read_line(&self) -> Result<Option<String>, String> {
@@ -414,7 +413,7 @@ impl ConsoleProvider for LinuxConsole {
     }
 }
 
-impl Drop for LinuxConsole {
+impl Drop for LinuxTerminal {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
         let _ = self.start_reader.send(());

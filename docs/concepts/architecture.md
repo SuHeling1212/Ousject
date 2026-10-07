@@ -119,7 +119,7 @@ system, authentication, users, compiler, types, providers, store,
 math, crypto, time, terminal, modules, packages, market, audit, resolver
 ```
 
-这些名称是 Praxis 可发现的系统服务入口。服务的 Object 状态可以持久化，但 Console、
+这些名称是 Praxis 可发现的系统服务入口。服务的 Object 状态可以持久化，但 Terminal、
 网络和设备等真实能力仍需要每次启动时由宿主 Provider 重新连接。
 
 Provider 用于实现 Object 的领域能力。普通程序不能通过伪造 Type 或能力字符串创建物理

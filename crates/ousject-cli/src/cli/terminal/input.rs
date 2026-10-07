@@ -1,5 +1,5 @@
 use super::super::{AtomicBool, Duration, Mutex, Ordering, Read, Write, mpsc};
-use super::console::{InputMode, LinuxInputState};
+use super::host::{InputMode, LinuxInputState};
 use super::key_parser::{InputParser, KeyEvent, MAX_KEYBOARD_EVENTS};
 
 const MAX_RAW_INPUT_BYTES: usize = 65_536;
@@ -134,7 +134,7 @@ pub(crate) fn dispatch_event(input: &Mutex<LinuxInputState>, event: KeyEvent, te
         }
         _ if event.control && event.key == "c" => {
             let result = if mode == InputMode::Secret {
-                Err("console input interrupted".to_owned())
+                Err("terminal input interrupted".to_owned())
             } else {
                 Ok("\r".to_owned())
             };

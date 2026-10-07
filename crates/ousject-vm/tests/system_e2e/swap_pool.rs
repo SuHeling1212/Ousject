@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn swap_pool_membership_preserves_object_identity_rights_and_conflicts() {
     let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
-    let vm = vm_with_console(Arc::clone(&manager));
+    let vm = vm_with_terminal(Arc::clone(&manager));
     let subject_a = SubjectId::new();
     let subject_b = SubjectId::new();
     let create = compile(
@@ -109,7 +109,7 @@ fn swap_pool_shared_state_is_old_or_fully_committed_after_reopen() {
     let subject = SubjectId::new();
     let (pool, shared) = {
         let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-        let vm = vm_with_console(manager);
+        let vm = vm_with_terminal(manager);
         let program = compile(
             "pool = object.create(\"core.swap_pool\", {})\nshared = object.create(\"core.value\", 1)\npool.attach(\"state\", shared.id)\npool_id = pool.id\nshared_id = shared.id",
         )

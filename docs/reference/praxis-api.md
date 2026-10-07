@@ -68,27 +68,27 @@ Process 另外公开 `.result`、`.error`、`.variables`、`.program`、`.user`/
 | `audit` | Audit 根 Object；通过通用 Object 属性读取 |
 | `resolver` | `resolve(hostname)` |
 | `programs` | 系统 Program Namespace，常用 `resolve(path)` |
-| `console` | Console Provider API |
+| `terminal` | Terminal Provider API |
 
 `types.register` 的 `schema` 可为 `any`、`text`、`bytes`、`collection`、`record`；
 `creation` 可为 `public` 或 `provider_only`。它登记 Praxis Object 的数据描述与 capability
 名称，不会安装 Rust Provider 或 native Type 实现。Provider 只能在可信 VM 启动阶段通过 Rust
 API 注册；第一个 runnable Process 开始执行时 Registry 自动 seal。
 
-## Console
+## Terminal
 
 | API | 返回 | 说明 |
 | --- | --- | --- |
-| `console.print(value)` | `null` | 不换行输出 |
-| `console.println(value)` | `null` | 换行输出 |
-| `console.render(text_or_bytes)` | `null` | 将帧内容直接写入终端，不添加换行 |
-| `console.read_line()` | Text | 读取一行 |
-| `console.read_secret()` | secret Text | 隐藏回显读取；敏感明文不进入 Process 状态 |
-| `console.size()` | Record | `{columns, rows}` |
-| `console.is_interactive()` | Bool | 是否连接交互终端 |
+| `terminal.print(value)` | `null` | 不换行输出 |
+| `terminal.println(value)` | `null` | 换行输出 |
+| `terminal.read_line()` | Text | 读取一行 |
+| `terminal.read_secret()` | secret Text | 隐藏回显读取；敏感明文不进入 Process 状态 |
+| `terminal.size()` | Record | `{columns, rows}` |
+| `terminal.is_interactive()` | Bool | 是否连接交互终端 |
+| `terminal.input(max_bytes)` | Bytes | 轮询 Terminal 输入字节 |
+| `terminal.output(bytes)` | Integer | 将 Bytes 写入 Terminal，不生成 durable Effect |
 
-`render` 是即时 Provider 调用，适合高频刷新终端画面；传入的 Text 可以包含 `\\e` 生成的
-ANSI 控制字符。
+`output` 不生成 durable Effect，调用方应从持久状态重绘画面。
 
 ## 数学、Text 与时间
 
@@ -131,7 +131,7 @@ Terminal 传输任意 Bytes 并维护字符屏幕状态；物理 Display Provide
 | `snapshot()` | 返回完整行、光标、尺寸、alternate-screen 状态和增量 `dirty_rows` |
 | `shell()` | 打开或复用当前用户的持久 Shell 子 Terminal，返回 Terminal Object ID |
 
-输入由一个独占 Process 租约保护，和旧 Console/Keyboard 输入共享宿主输入。Raw 模式保留原始
+输入由一个独占 Process 租约保护，和旧 Terminal/Keyboard 输入共享宿主输入。Raw 模式保留原始
 字节；Canonical 模式按行返回 UTF-8 字节并追加 LF，可配置软件回显。Child Terminal 可以嵌套并
 拥有独立 Screen、模式和输入路由；进程结束、失败或 Terminal 被退役时，输入所有权恢复到父
 Terminal。Terminal 层级、配置、尺寸和前台 Process ID 持久化；Cell、解析器临时状态与渲染缓存
@@ -335,12 +335,12 @@ Driver Process 失败由 VM 标记为 Failed；已有 Device Object、Capability
 
 ```px
 types = object.find("types")
-console = object.find("console")
+terminal = object.find("terminal")
 
-console.println(types.types())
+terminal.println(types.types())
 item = object.find("system")
-console.println(item.inspect)
-console.println(item.capabilities)
+terminal.println(item.inspect)
+terminal.println(item.capabilities)
 ```
 
 `types.types()` 与 `types.descriptor(name)` 返回运行时 Type 清单/描述符；其中 Provider-backed

@@ -7,7 +7,7 @@ fn extended_praxis_control_flow_runs_end_to_end() {
     let source = r#"
 count = 0
 sum = 0
-console = object.find("console")
+terminal = object.find("terminal")
 
 while count < 10 {
     count++
@@ -23,14 +23,14 @@ while count < 10 {
 count--
 
 if false && missing {
-    console.println("short circuit failed")
+    terminal.println("short circuit failed")
 } else if true || missing {
-    console.println(sum)
-    console.println(count)
+    terminal.println(sum)
+    terminal.println(count)
 }
 "#;
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm.create_process(&compile(source).unwrap()).unwrap();
     let report = vm.run(process, 500).unwrap();
     assert_eq!(report.status, ProcessStatus::Halted);
@@ -43,18 +43,18 @@ if false && missing {
 fn praxis_collections_run_and_persist_as_values() {
     let source = r#"
 items = [1, 2, 3]
-console = object.find("console")
+terminal = object.find("terminal")
 items[0] = 10
 user = {
     name: "Ada",
     age: 18,
 }
 user["age"] = 19
-console.println(items[0] + user["age"])
-console.println(#items + #user + #"hi")
+terminal.println(items[0] + user["age"])
+terminal.println(#items + #user + #"hi")
 "#;
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm.create_process(&compile(source).unwrap()).unwrap();
     let report = vm.run(process, 500).unwrap();
     assert_eq!(report.status, ProcessStatus::Halted);
@@ -96,16 +96,16 @@ class Counter extends BaseCounter {
     }
 }
 
-console = object.find("console")
+terminal = object.find("terminal")
 counter = object.create("Counter", { value: 10 })
 same link counter
-console.println(counter.add(3))
-console.println(same.value)
-console.println(counter.reveal())
-console.println(counter.type)
-console.println(counter.inspect["type"])
-console.println(#object.query("Counter", "add"))
-console.println(#counter.capabilities)
+terminal.println(counter.add(3))
+terminal.println(same.value)
+terminal.println(counter.reveal())
+terminal.println(counter.type)
+terminal.println(counter.inspect["type"])
+terminal.println(#object.query("Counter", "add"))
+terminal.println(#counter.capabilities)
 "#;
     let directory = std::env::temp_dir().join(format!("ousject-class-{}", ObjectId::new()));
     let path = directory.join("objects.oms");
@@ -113,7 +113,7 @@ console.println(#counter.capabilities)
     let counter;
     {
         let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-        let vm = vm_with_console(manager);
+        let vm = vm_with_terminal(manager);
         process = vm.create_process(&compile(source).unwrap()).unwrap();
         let report = vm.run(process, 1_000).unwrap();
         assert_eq!(report.status, ProcessStatus::Halted);
@@ -152,7 +152,7 @@ secret = object.create("Secret", {})
 copy = secret.value
 "#;
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm.create_process(&compile(source).unwrap()).unwrap();
     assert!(matches!(
         vm.run(process, 100),
@@ -165,24 +165,24 @@ copy = secret.value
 #[test]
 fn praxis_index_updates_unicode_and_try_catch_run_end_to_end() {
     let source = r#"
-console = object.find("console")
+terminal = object.find("terminal")
 items = [1, 4]
 items[0]++
 items[1]--
-console.println(items[0] + items[1])
-console.println("你好，Ousject")
+terminal.println(items[0] + items[1])
+terminal.println("你好，Ousject")
 
 try {
     failed = 1 / 0
-    console.println("not reached")
+    terminal.println("not reached")
 } catch (error) {
-    console.println(error)
+    terminal.println(error)
 }
 
-console.println("continued")
+terminal.println("continued")
 "#;
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm.create_process(&compile(source).unwrap()).unwrap();
     let report = vm.run(process, 500).unwrap();
     assert_eq!(report.status, ProcessStatus::Halted);
@@ -199,27 +199,27 @@ console.println("continued")
 #[test]
 fn praxis_object_api_runs_and_recovers() {
     let source = r#"
-	console = object.find("console")
+	terminal = object.find("terminal")
 	item = object.create("core.text", "one")
 	same = object.find(item.id)
-	console.println(item.type)
-	console.println(item.value)
+	terminal.println(item.type)
+	terminal.println(item.value)
 	item.replace("two")
 	root = object.create("core.namespace", {})
 	child = object.create("core.text", "nested", root)
 	parent = child.parent
-	console.println(parent == root.id)
-	console.println(#root.children)
+	terminal.println(parent == root.id)
+	terminal.println(#root.children)
 	root.link("item", item)
 	found = root.links["item"]
 	found_object = object.find(found)
-	console.println(found_object.value)
-	console.println(#object.query("core.text"))
-	console.println(item.inspect["type"])
-	console.println(item.status)
-	console.println(#item.capabilities)
+	terminal.println(found_object.value)
+	terminal.println(#object.query("core.text"))
+	terminal.println(item.inspect["type"])
+	terminal.println(item.status)
+	terminal.println(#item.capabilities)
 	root.unlink("item")
-	console.println(#root.links)
+	terminal.println(#root.links)
 "#;
     let directory = std::env::temp_dir().join(format!("ousject-object-api-{}", ObjectId::new()));
     let path = directory.join("objects.oms");
@@ -227,7 +227,7 @@ fn praxis_object_api_runs_and_recovers() {
     let item;
     {
         let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-        let vm = vm_with_console(manager);
+        let vm = vm_with_terminal(manager);
         process = vm.create_process(&compile(source).unwrap()).unwrap();
         let report = vm.run(process, 500).unwrap();
         assert_eq!(report.status, ProcessStatus::Halted);
@@ -258,7 +258,7 @@ fn praxis_object_api_runs_and_recovers() {
         manager.value(AccessContext::new(ousject_vm::SYSTEM_SUBJECT), item),
         Ok(Value::Text("two".to_owned()))
     );
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     assert_eq!(
         vm.variable(process, "item"),
         Ok(Value::Text("two".to_owned()))

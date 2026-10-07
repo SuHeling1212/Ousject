@@ -1,0 +1,5 @@
+func main() {
+terminal = object.find("terminal")
+line = terminal.read_line()
+terminal.println(line)
+}

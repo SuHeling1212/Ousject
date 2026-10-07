@@ -1,11 +1,11 @@
 func main() {
-console = object.find("console")
+terminal = object.find("terminal")
 system = object.find("system")
 store = object.find("store")
 providers = object.find("providers")
 
-console.println(system.health_check())
-console.println(store.health_check())
-console.println(providers.providers())
-console.println(providers.devices())
+terminal.println(system.health_check())
+terminal.println(store.health_check())
+terminal.println(providers.providers())
+terminal.println(providers.devices())
 }

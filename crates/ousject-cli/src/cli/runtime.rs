@@ -1,10 +1,10 @@
 use super::{
-    AccessContext, Arc, BTreeMap, CORE_CONSOLE_TYPE, CORE_TERMINAL_TYPE, CachedProvider,
-    Capability, DEVICE_BLOCK_STORAGE_TYPE, DEVICE_KEYBOARD_TYPE, Duration,
-    HostBlockStorageProvider, HostKeyboardProvider, HostNetworkProvider, HostResolverProvider,
-    HostTerminalProvider, InMemoryObjectManager, IsTerminal, LinuxConsole, NET_RESOLVER_TYPE,
-    ObjectId, ObjectQuery, Path, PathBuf, ProcessStatus, Program, RunReport, RuntimeOptions,
-    SYSTEM_SUBJECT, SubjectId, Value, VirtualMachine, compile_program_with_loader,
+    AccessContext, Arc, BTreeMap, CORE_TERMINAL_TYPE, CachedProvider, Capability,
+    DEVICE_BLOCK_STORAGE_TYPE, DEVICE_KEYBOARD_TYPE, Duration, HostBlockStorageProvider,
+    HostKeyboardProvider, HostNetworkProvider, HostResolverProvider, HostTerminalProvider,
+    InMemoryObjectManager, IsTerminal, LinuxTerminal, NET_RESOLVER_TYPE, ObjectId, ObjectQuery,
+    Path, PathBuf, ProcessStatus, Program, RunReport, RuntimeOptions, SYSTEM_SUBJECT, SubjectId,
+    Value, VirtualMachine, compile_program_with_loader,
 };
 
 pub(crate) fn host_block_path(options: &RuntimeOptions) -> PathBuf {
@@ -25,17 +25,18 @@ pub(crate) fn discover_host_hardware(
     manager: Arc<InMemoryObjectManager>,
     block_path: PathBuf,
 ) -> Result<VirtualMachine, String> {
-    let state = Value::Record(BTreeMap::from([
+    let terminal_state = Value::Record(BTreeMap::from([
         (
             "provider".to_owned(),
-            Value::Text("linux.stdout".to_owned()),
+            Value::Text("linux.terminal".to_owned()),
         ),
         (
             "interactive".to_owned(),
             Value::Bool(std::io::stdout().is_terminal()),
         ),
     ]));
-    let console = VirtualMachine::publish_console(&manager, &state).map_err(error_text)?;
+    let terminal_id =
+        VirtualMachine::publish_terminal(&manager, &terminal_state).map_err(error_text)?;
     if std::io::stdin().is_terminal() {
         VirtualMachine::publish_provider_object(
             &manager,
@@ -62,8 +63,8 @@ pub(crate) fn discover_host_hardware(
         ])),
     )
     .map_err(error_text)?;
-    let terminal = LinuxConsole::new()?;
-    let vm = VirtualMachine::with_console(manager.clone(), console, terminal.clone())
+    let terminal = LinuxTerminal::new()?;
+    let vm = VirtualMachine::with_terminal_backend(manager.clone(), terminal_id, terminal.clone())
         .map_err(error_text)?;
     let terminal_object = vm
         .manager()
@@ -104,7 +105,7 @@ pub(crate) fn provider_state(provider: &str) -> Value {
     )]))
 }
 
-pub(crate) fn grant_console_access(
+pub(crate) fn grant_terminal_access(
     manager: &Arc<InMemoryObjectManager>,
     subject: SubjectId,
 ) -> Result<(), String> {
@@ -113,7 +114,7 @@ pub(crate) fn grant_console_access(
     }
     let context = AccessContext::new(SYSTEM_SUBJECT);
     let mut transaction = manager.begin(context);
-    for type_id in [CORE_CONSOLE_TYPE, CORE_TERMINAL_TYPE, DEVICE_KEYBOARD_TYPE] {
+    for type_id in [CORE_TERMINAL_TYPE, DEVICE_KEYBOARD_TYPE] {
         for object in manager
             .query(context, &ObjectQuery::new().with_type(type_id))
             .map_err(error_text)?

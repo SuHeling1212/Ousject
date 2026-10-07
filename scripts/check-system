@@ -39,9 +39,9 @@ test "$resolved_id" = "$object_id"
 "$project_root/scripts/ousject" run "$project_root/examples/control-flow.px" --memory --local
 "$project_root/scripts/ousject" run "$project_root/examples/collections.px" --memory --local
 "$project_root/scripts/ousject" run "$project_root/examples/objects.px" --memory --local
-console_input=$(printf '%s\n' 'console input works' | \
-    "$project_root/scripts/ousject" run "$project_root/examples/console-input.px" --memory --local)
-test "$console_input" = "console input works"
+terminal_input=$(printf '%s\n' 'terminal input works' | \
+    "$project_root/scripts/ousject" run "$project_root/examples/terminal-input.px" --memory --local)
+test "$terminal_input" = "terminal input works"
 "$project_root/scripts/ousject" system-install "$project_root/system" --local \
     --state "$temporary/boot.oms" >/dev/null
 printf '%s\n' 'boot-password' 'local' 'boot-password' 'exit' | \

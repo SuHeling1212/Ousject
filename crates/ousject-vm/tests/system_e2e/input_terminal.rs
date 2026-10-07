@@ -3,12 +3,12 @@
 use super::*;
 
 #[derive(Debug)]
-pub(super) struct InputConsole {
+pub(super) struct InputTerminal {
     pub(super) lines: Mutex<VecDeque<String>>,
     pub(super) reads: AtomicUsize,
 }
 
-impl ConsoleProvider for InputConsole {
+impl TerminalProvider for InputTerminal {
     fn println(&self, _text: &str) -> Result<(), String> {
         Ok(())
     }
@@ -20,17 +20,17 @@ impl ConsoleProvider for InputConsole {
 }
 
 #[test]
-fn praxis_reads_console_input_through_a_durable_effect() {
+fn praxis_reads_terminal_input_through_a_durable_effect() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-    let driver = Arc::new(InputConsole {
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let driver = Arc::new(InputTerminal {
         lines: Mutex::new(VecDeque::from(["你好 Ousject".to_owned()])),
         reads: AtomicUsize::new(0),
     });
-    let vm = VirtualMachine::with_console(manager, console, driver.clone()).unwrap();
+    let vm = VirtualMachine::with_terminal(manager, terminal, driver.clone()).unwrap();
     let program = compile(
-        "console = object.find(\"console\")\nline = console.read_line()\nconsole.println(line)",
+        "terminal = object.find(\"terminal\")\nline = terminal.read_line()\nterminal.println(line)",
     )
     .unwrap();
     let process = vm.create_process(&program).unwrap();
@@ -46,17 +46,17 @@ fn praxis_reads_console_input_through_a_durable_effect() {
 }
 
 #[test]
-fn console_input_suspends_only_the_waiting_process_and_reuses_its_effect() {
+fn terminal_input_suspends_only_the_waiting_process_and_reuses_its_effect() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-    let driver = Arc::new(InputConsole {
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let driver = Arc::new(InputTerminal {
         lines: Mutex::new(VecDeque::new()),
         reads: AtomicUsize::new(0),
     });
-    let vm = VirtualMachine::with_console(manager, console, driver.clone()).unwrap();
+    let vm = VirtualMachine::with_terminal(manager, terminal, driver.clone()).unwrap();
     let program = compile(
-        "console = object.find(\"console\")\nline = console.read_line()\nconsole.println(line)",
+        "terminal = object.find(\"terminal\")\nline = terminal.read_line()\nterminal.println(line)",
     )
     .unwrap();
     let process = vm.create_process(&program).unwrap();
@@ -86,17 +86,17 @@ fn console_input_suspends_only_the_waiting_process_and_reuses_its_effect() {
 }
 
 #[test]
-fn two_console_waiters_keep_distinct_effects_and_inputs() {
+fn two_terminal_waiters_keep_distinct_effects_and_inputs() {
     let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-    let driver = Arc::new(InputConsole {
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let driver = Arc::new(InputTerminal {
         lines: Mutex::new(VecDeque::new()),
         reads: AtomicUsize::new(0),
     });
-    let vm = VirtualMachine::with_console(manager, console, driver.clone()).unwrap();
+    let vm = VirtualMachine::with_terminal(manager, terminal, driver.clone()).unwrap();
     let program = compile(
-        "console = object.find(\"console\")\nline = console.read_line()\nconsole.println(line)",
+        "terminal = object.find(\"terminal\")\nline = terminal.read_line()\nterminal.println(line)",
     )
     .unwrap();
     let first = vm.create_process(&program).unwrap();
@@ -123,23 +123,23 @@ fn two_console_waiters_keep_distinct_effects_and_inputs() {
 }
 
 #[test]
-fn pending_console_input_recovers_after_store_reopen() {
+fn pending_terminal_input_recovers_after_store_reopen() {
     let directory =
         std::env::temp_dir().join(format!("ousject-input-recovery-{}", ObjectId::new()));
     let path = directory.join("objects.oms");
     let process;
-    let console;
+    let terminal;
     {
         let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-        console =
-            VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-        let driver = Arc::new(InputConsole {
+        terminal =
+            VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+        let driver = Arc::new(InputTerminal {
             lines: Mutex::new(VecDeque::new()),
             reads: AtomicUsize::new(0),
         });
-        let vm = VirtualMachine::with_console(manager, console, driver).unwrap();
+        let vm = VirtualMachine::with_terminal(manager, terminal, driver).unwrap();
         let program = compile(
-            "console = object.find(\"console\")\nline = console.read_line()\nconsole.println(line)",
+            "terminal = object.find(\"terminal\")\nline = terminal.read_line()\nterminal.println(line)",
         )
         .unwrap();
         process = vm.create_process(&program).unwrap();
@@ -150,11 +150,11 @@ fn pending_console_input_recovers_after_store_reopen() {
     }
 
     let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-    let driver = Arc::new(InputConsole {
+    let driver = Arc::new(InputTerminal {
         lines: Mutex::new(VecDeque::from(["after restart".to_owned()])),
         reads: AtomicUsize::new(0),
     });
-    let vm = VirtualMachine::with_console(manager, console, driver).unwrap();
+    let vm = VirtualMachine::with_terminal(manager, terminal, driver).unwrap();
     assert!(vm.poll_pending_effect(process).unwrap());
     let report = vm.run(process, 1_000).unwrap();
     assert_eq!(report.status, ProcessStatus::Halted);

@@ -9,7 +9,7 @@ fn channel_send_and_consume_survive_store_restarts_exactly_once() {
     let path = directory.join("objects.oms");
     let channel = {
         let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-        let vm = vm_with_console(manager);
+        let vm = vm_with_terminal(manager);
         let program = compile(
             "channel = object.create(\"core.channel\", [])\nchannel.send(\"durable message\")\nchannel_id = channel.id",
         )
@@ -33,7 +33,7 @@ fn channel_send_and_consume_survive_store_restarts_exactly_once() {
                 "durable message".to_owned()
             )]))
         );
-        let vm = vm_with_console(manager.clone());
+        let vm = vm_with_terminal(manager.clone());
         let program = compile(&format!(
             "channel = object.find(\"{channel}\")\nreceived = channel.receive()"
         ))

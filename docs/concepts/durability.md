@@ -87,7 +87,7 @@ Ready、Waiting 或 Sleeping Process。
 
 ## 外部 Effect
 
-网络发送、Console 输出和设备操作不能像内存修改一样回滚。VM 因此在执行外部动作前创建
+网络发送、Terminal 输出和设备操作不能像内存修改一样回滚。VM 因此在执行外部动作前创建
 持久 Effect intent：
 
 ```text

@@ -1,11 +1,11 @@
 use super::super::{
-    Arc, BTreeSet, DEVICE_KEYBOARD_TYPE, LinuxConsole, ObjectId, ObjectProvider, ProviderError,
+    Arc, BTreeSet, DEVICE_KEYBOARD_TYPE, LinuxTerminal, ObjectId, ObjectProvider, ProviderError,
     ProviderOutcome, Value,
 };
 
 #[derive(Debug)]
 pub(crate) struct HostKeyboardProvider {
-    pub(crate) terminal: Arc<LinuxConsole>,
+    pub(crate) terminal: Arc<LinuxTerminal>,
 }
 
 impl ObjectProvider for HostKeyboardProvider {

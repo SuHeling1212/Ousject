@@ -146,12 +146,12 @@ Creating → Active ↔ Suspended
 ## Praxis 中的统一访问
 
 ```praxis
-console = object.find("console")
-console.println("hello")
+terminal = object.find("terminal")
+terminal.println("hello")
 
 note = object.create("core.text", "first")
 note.replace("second")
-console.println(note.value)
+terminal.println(note.value)
 ```
 
 `object` 负责创建、发现和查询；获得对象后，通过公共属性和 `name.capability(...)` 调用统一

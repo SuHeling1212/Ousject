@@ -1,9 +1,9 @@
 use super::*;
 
-fn detached_terminal_input() -> (LinuxConsole, mpsc::Receiver<()>) {
+fn detached_terminal_input() -> (LinuxTerminal, mpsc::Receiver<()>) {
     let (start_reader, receiver) = mpsc::channel();
     (
-        LinuxConsole {
+        LinuxTerminal {
             input: Arc::new(Mutex::new(LinuxInputState {
                 owner: None,
                 line: String::new(),
@@ -29,7 +29,7 @@ fn detached_terminal_input() -> (LinuxConsole, mpsc::Receiver<()>) {
 }
 
 #[test]
-fn console_lines_and_keyboard_capture_share_exclusive_process_lease() {
+fn terminal_lines_and_keyboard_capture_share_exclusive_process_lease() {
     let (terminal, _reader) = detached_terminal_input();
     let line_process = ObjectId::new();
     let keyboard_process = ObjectId::new();
@@ -525,13 +525,14 @@ fn terminal_foreground_hierarchy_recovers_and_clears_after_process_exit() {
 #[test]
 fn terminal_recovery_detaches_a_previously_ended_foreground_process() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
     let system = AccessContext::new(SYSTEM_SUBJECT);
     let (root, ended_process) = {
-        let (console_driver, _console_reader) = detached_terminal_input();
-        let vm = VirtualMachine::with_console(manager.clone(), console, Arc::new(console_driver))
-            .unwrap();
+        let (terminal_driver, _terminal_reader) = detached_terminal_input();
+        let vm =
+            VirtualMachine::with_terminal(manager.clone(), terminal, Arc::new(terminal_driver))
+                .unwrap();
         let root = manager
             .query(system, &ObjectQuery::new().with_type(CORE_TERMINAL_TYPE))
             .unwrap()
@@ -578,9 +579,10 @@ fn terminal_recovery_detaches_a_previously_ended_foreground_process() {
     ));
     assert_eq!(provider.active_terminal_id().unwrap(), child);
 
-    let (console_driver, _console_reader) = detached_terminal_input();
+    let (terminal_driver, _terminal_reader) = detached_terminal_input();
     let vm =
-        VirtualMachine::with_console(manager.clone(), console, Arc::new(console_driver)).unwrap();
+        VirtualMachine::with_terminal_backend(manager.clone(), root, Arc::new(terminal_driver))
+            .unwrap();
     vm.register_provider(provider.clone()).unwrap();
     vm.recover_processes().unwrap();
 

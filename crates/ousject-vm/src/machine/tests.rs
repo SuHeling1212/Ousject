@@ -3,18 +3,18 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct TestConsole;
+    struct TestTerminal;
 
-    impl ConsoleProvider for TestConsole {
+    impl TerminalProvider for TestTerminal {
         fn println(&self, _text: &str) -> Result<(), String> {
             Ok(())
         }
     }
 
-    fn vm_with_console(manager: Arc<InMemoryObjectManager>) -> VirtualMachine {
-        let console =
-            VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-        VirtualMachine::with_console(manager, console, Arc::new(TestConsole)).unwrap()
+    fn vm_with_terminal(manager: Arc<InMemoryObjectManager>) -> VirtualMachine {
+        let terminal =
+            VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+        VirtualMachine::with_terminal(manager, terminal, Arc::new(TestTerminal)).unwrap()
     }
 
     #[test]
@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn praxis_can_index_binary_bytes_without_text_conversion() {
-        let vm = vm_with_console(Arc::new(InMemoryObjectManager::new(1).unwrap()));
+        let vm = vm_with_terminal(Arc::new(InMemoryObjectManager::new(1).unwrap()));
         let program = praxis_compiler::compile(
             "text = \"A\"\nbytes = text.utf8_bytes()\nfirst = bytes[0]\nlength = #bytes",
         )
@@ -60,7 +60,7 @@ mod tests {
 
     #[test]
     fn timer_sleep_suspends_without_blocking_the_process_worker() {
-        let vm = vm_with_console(Arc::new(InMemoryObjectManager::new(1).unwrap()));
+        let vm = vm_with_terminal(Arc::new(InMemoryObjectManager::new(1).unwrap()));
         let program = praxis_compiler::compile(
             "time = object.find(\"time\")\ntime.sleep(10000)\nanswer = 42",
         )
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn scheduler_runs_other_processes_before_waking_a_timer_sleeper() {
-        let vm = vm_with_console(Arc::new(InMemoryObjectManager::new(1).unwrap()));
+        let vm = vm_with_terminal(Arc::new(InMemoryObjectManager::new(1).unwrap()));
         let sleeper = vm
             .create_process(
                 &praxis_compiler::compile(
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn expired_finished_process_tree_is_retired_but_program_is_not() {
         let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
-        let vm = vm_with_console(Arc::clone(&manager));
+        let vm = vm_with_terminal(Arc::clone(&manager));
         let program = praxis_compiler::compile("answer = 42").unwrap();
         let process = vm.create_process(&program).unwrap();
         assert_eq!(vm.run(process, 100).unwrap().status, ProcessStatus::Halted);
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn process_reaper_wakes_for_a_newly_ended_process() {
         let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-        let vm = vm_with_console(Arc::clone(&manager));
+        let vm = vm_with_terminal(Arc::clone(&manager));
         let process = vm
             .create_process(&praxis_compiler::compile("answer = 42").unwrap())
             .unwrap();
@@ -188,9 +188,9 @@ mod tests {
     #[test]
     fn executes_program_with_variable_objects() {
         let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-        let vm = vm_with_console(manager);
+        let vm = vm_with_terminal(manager);
         let program = praxis_compiler::compile(
-            "console = object.find(\"console\")\nanswer = 40 + 2\nconsole.println(answer)",
+            "terminal = object.find(\"terminal\")\nanswer = 40 + 2\nterminal.println(answer)",
         )
         .unwrap();
         let process = vm.create_process(&program).unwrap();
@@ -203,25 +203,25 @@ mod tests {
     }
 
     #[test]
-    fn console_is_shared_and_requires_a_provider_for_this_boot() {
+    fn terminal_is_shared_and_requires_a_provider_for_this_boot() {
         let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-        let vm = vm_with_console(manager.clone());
+        let vm = vm_with_terminal(manager.clone());
         let program = praxis_compiler::compile(
-            "console = object.find(\"console\")\nconsole.println(\"ready\")",
+            "terminal = object.find(\"terminal\")\nterminal.println(\"ready\")",
         )
         .unwrap();
         let first = vm.create_process(&program).unwrap();
         let second = vm.create_process(&program).unwrap();
         let context = AccessContext::new(SYSTEM_SUBJECT);
-        let first_console = manager.read(context, first).unwrap().links()["console"];
-        let second_console = manager.read(context, second).unwrap().links()["console"];
-        assert_eq!(first_console, second_console);
+        let first_terminal = manager.read(context, first).unwrap().links()["terminal"];
+        let second_terminal = manager.read(context, second).unwrap().links()["terminal"];
+        assert_eq!(first_terminal, second_terminal);
 
         assert_eq!(vm.run(first, 2).unwrap().status, ProcessStatus::Ready);
         let disconnected = VirtualMachine::new(manager);
         assert_eq!(
             disconnected.run(first, 10),
-            Err(VmError::MissingProvider("console"))
+            Err(VmError::MissingProvider("terminal"))
         );
     }
 
@@ -240,11 +240,11 @@ mod tests {
     #[test]
     fn scheduler_runs_processes_round_robin() {
         let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-        let vm = vm_with_console(manager);
+        let vm = vm_with_terminal(manager);
         let first = vm
             .create_process(
                 &praxis_compiler::compile(
-                    "console = object.find(\"console\")\nconsole.println(\"a\")",
+                    "terminal = object.find(\"terminal\")\nterminal.println(\"a\")",
                 )
                 .unwrap(),
             )
@@ -252,7 +252,7 @@ mod tests {
         let second = vm
             .create_process(
                 &praxis_compiler::compile(
-                    "console = object.find(\"console\")\nconsole.println(\"b\")",
+                    "terminal = object.find(\"terminal\")\nterminal.println(\"b\")",
                 )
                 .unwrap(),
             )
@@ -279,14 +279,14 @@ mod tests {
 
         let process = {
             let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-            let vm = vm_with_console(manager);
+            let vm = vm_with_terminal(manager);
             let process = vm.create_process(&program).unwrap();
             assert_eq!(vm.run(process, 5).unwrap().status, ProcessStatus::Ready);
             process
         };
 
         let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-        let vm = vm_with_console(manager);
+        let vm = vm_with_terminal(manager);
         vm.reconnect_hardware(process).unwrap();
         let report = vm.run(process, 100).unwrap();
         assert_eq!(report.output, vec!["3"]);
@@ -297,7 +297,7 @@ mod tests {
 
     fn praxis_program_for_recovery() -> Program {
         praxis_compiler::compile(
-            "console = object.find(\"console\")\ncount = 0\nwhile count < 3 { count++ }\nconsole.println(count)",
+            "terminal = object.find(\"terminal\")\ncount = 0\nwhile count < 3 { count++ }\nterminal.println(count)",
         )
         .unwrap()
     }

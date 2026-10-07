@@ -8,7 +8,7 @@ func worker() {
 }
 
 func main() {
-console = object.find("console")
+terminal = object.find("terminal")
 channel = object.create("Channel", {})
 child = object.create("core.process", {
     entry: "worker",
@@ -16,6 +16,6 @@ child = object.create("core.process", {
 })
 
 child.start()
-console.println(child.wait())
-console.println(channel.value)
+terminal.println(child.wait())
+terminal.println(channel.value)
 }

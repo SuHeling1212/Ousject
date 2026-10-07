@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn permission_events_are_append_only_and_exclude_object_values() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(Arc::clone(&manager));
+    let vm = vm_with_terminal(Arc::clone(&manager));
     let recipient = SubjectId::new();
     let program = compile(&format!(
         "secret = object.create(\"core.text\", \"secret:private-payload\")\nsecret.grant(\"{recipient}\", \"inspect\")"

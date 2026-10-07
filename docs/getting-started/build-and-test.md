@@ -71,7 +71,7 @@ OMS 基线：
 
 - Praxis 编译与 TF 执行；
 - Object 创建、读取、查询和 Namespace 解析；
-- 控制流、集合、Class 与 Console 输入；
+- 控制流、集合、Class 与 Terminal 输入；
 - 系统安装、首次初始化、登录和退出；
 - 密码没有以明文写入测试 Store。
 

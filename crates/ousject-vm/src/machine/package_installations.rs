@@ -1769,8 +1769,8 @@ impl VirtualMachine {
             .with_grant(package_subject, Capability::Link)
             .with_grant(package_subject, Capability::Reparent)
             .with_grant(package_subject, Capability::Retire);
-        if let Some(console) = self.console_provider {
-            process_request = process_request.with_link("console", console);
+        if let Some(terminal) = self.terminal_provider {
+            process_request = process_request.with_link("terminal", terminal);
         }
         for (name, service) in &self.kernel_services {
             process_request = process_request.with_link(name.clone(), *service);
@@ -2324,8 +2324,8 @@ impl VirtualMachine {
             .with_grant(owner, Capability::Invoke)
             .with_grant(owner, Capability::Link)
             .with_grant(owner, Capability::Retire);
-        if let Some(console) = self.console_provider {
-            process_request = process_request.with_link("console", console);
+        if let Some(terminal) = self.terminal_provider {
+            process_request = process_request.with_link("terminal", terminal);
         }
         for (name, service) in &self.kernel_services {
             process_request = process_request.with_link(name.clone(), *service);
@@ -2392,14 +2392,14 @@ impl VirtualMachine {
     fn package_capability_targets(&self, capability: &str) -> Result<Vec<ObjectId>, VmError> {
         let root = capability.split('.').next().unwrap_or(capability);
         let singleton = match root {
-            "console" => self.console_provider,
+            "terminal" => self.terminal_provider,
             "time" => self.kernel_services.get("time").copied(),
             "resolver" => self.kernel_services.get("resolver").copied(),
             "math" => self.kernel_services.get("math").copied(),
             "crypto" => self.kernel_services.get("crypto").copied(),
             _ => None,
         };
-        let objects = if matches!(root, "console" | "time" | "resolver" | "math" | "crypto") {
+        let objects = if matches!(root, "terminal" | "time" | "resolver" | "math" | "crypto") {
             singleton.map(|object| vec![object]).ok_or_else(|| {
                 VmError::Provider(format!("requested capability '{root}' is unavailable"))
             })?
@@ -2420,7 +2420,7 @@ impl VirtualMachine {
                 }
                 _ => {
                     return Err(VmError::TypeError(
-                        "unsupported Package capability; use console, time, keyboard, display, sensor, resolver, math or crypto",
+                        "unsupported Package capability; use terminal, time, keyboard, display, sensor, resolver, math or crypto",
                     ));
                 }
             };
@@ -2464,7 +2464,7 @@ impl VirtualMachine {
         method: &str,
     ) -> Result<(), VmError> {
         let root = match target_type {
-            CORE_CONSOLE_TYPE => "console",
+            CORE_TERMINAL_TYPE => "terminal",
             CORE_TIME_TYPE => "time",
             CORE_MATH_TYPE => "math",
             CORE_CRYPTO_TYPE => "crypto",

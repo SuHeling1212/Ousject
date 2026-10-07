@@ -3,7 +3,7 @@ class Account {
 }
 
 func main() {
-console = object.find("console")
+terminal = object.find("terminal")
 source = object.create("Account", { balance: 20 })
 target = object.create("Account", { balance: 2 })
 
@@ -12,6 +12,6 @@ transaction {
     target.balance = target.balance + 10
 }
 
-console.println(source.balance)
-console.println(target.balance)
+terminal.println(source.balance)
+terminal.println(target.balance)
 }

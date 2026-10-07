@@ -1,7 +1,8 @@
 use super::super::{
     AccessContext, CooperativeScheduler, ObjectQuery, Path, Program, SYSTEM_SUBJECT,
-    compile_source_file, discover_host_hardware, error_text, grant_console_access, host_block_path,
-    open_manager, option_subject, parse_object, parse_options, print_report, run_hosted_process,
+    compile_source_file, discover_host_hardware, error_text, grant_terminal_access,
+    host_block_path, open_manager, option_subject, parse_object, parse_options, print_report,
+    run_hosted_process,
 };
 
 pub(crate) fn command_run(arguments: &[String], tf_input: bool) -> Result<(), String> {
@@ -22,7 +23,7 @@ pub(crate) fn command_run(arguments: &[String], tf_input: bool) -> Result<(), St
     let manager = open_manager(options.state.as_deref())?;
     let subject = option_subject(&manager, &options)?;
     let vm = discover_host_hardware(manager, block_path)?;
-    grant_console_access(vm.manager(), subject)?;
+    grant_terminal_access(vm.manager(), subject)?;
     let process = vm
         .create_process_as(&program, subject)
         .map_err(error_text)?;
@@ -50,7 +51,7 @@ pub(crate) fn command_resume(arguments: &[String]) -> Result<(), String> {
             return Err("the Session does not own this Process".to_owned());
         }
     }
-    grant_console_access(
+    grant_terminal_access(
         vm.manager(),
         vm.process_state(process).map_err(error_text)?.subject,
     )?;
@@ -70,7 +71,7 @@ pub(crate) fn command_schedule(arguments: &[String]) -> Result<(), String> {
     let manager = open_manager(options.state.as_deref())?;
     let subject = option_subject(&manager, &options)?;
     let vm = discover_host_hardware(manager, block_path)?;
-    grant_console_access(vm.manager(), subject)?;
+    grant_terminal_access(vm.manager(), subject)?;
     let processes = if positional.is_empty() {
         vm.manager()
             .query(

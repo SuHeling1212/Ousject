@@ -8,8 +8,8 @@ impl VirtualMachine {
         Self {
             manager,
             context: AccessContext::new(SYSTEM_SUBJECT),
-            console_provider: None,
-            console_driver: None,
+            terminal_provider: None,
+            terminal_driver: None,
             kernel_services: BTreeMap::new(),
             providers: Arc::new(ProviderRegistry::new()),
             program_cache: Arc::new(Mutex::new(BTreeMap::new())),
@@ -18,28 +18,28 @@ impl VirtualMachine {
         }
     }
 
-    /// Connects a discovered Console Object to this VM boot.
+    /// Connects a discovered Terminal Object to this VM boot.
     ///
-    /// Persisting a Console Object is not enough to make it usable: a hardware
+    /// Persisting a Terminal Object is not enough to make it usable: a hardware
     /// provider must rediscover and connect it on every boot.
     ///
     /// # Errors
     ///
-    /// Returns an error when the Object is unavailable or is not a Console.
-    pub fn with_console(
+    /// Returns an error when the Object is unavailable or is not a Terminal.
+    pub fn with_terminal(
         manager: Arc<InMemoryObjectManager>,
-        console: ObjectId,
-        driver: Arc<dyn ConsoleProvider>,
+        terminal: ObjectId,
+        driver: Arc<dyn TerminalProvider>,
     ) -> Result<Self, VmError> {
         let context = AccessContext::new(SYSTEM_SUBJECT);
-        if manager.inspect(context, console)?.type_id != CONSOLE_TYPE {
+        if manager.inspect(context, terminal)?.type_id != CONSOLE_TYPE {
             return Err(VmError::TypeError(
-                "console provider has the wrong Object type",
+                "terminal provider has the wrong Object type",
             ));
         }
         let providers = Arc::new(ProviderRegistry::new());
-        providers.register(Arc::new(ConsoleObjectProvider {
-            object: console,
+        providers.register(Arc::new(TerminalObjectProvider {
+            object: terminal,
             driver: Arc::clone(&driver),
             completed_this_boot: Mutex::new(BTreeMap::new()),
             secrets_this_boot: Mutex::new(BTreeMap::new()),
@@ -52,8 +52,8 @@ impl VirtualMachine {
         Ok(Self {
             manager,
             context,
-            console_provider: Some(console),
-            console_driver: Some(driver),
+            terminal_provider: Some(terminal),
+            terminal_driver: Some(driver),
             kernel_services,
             providers,
             program_cache: Arc::new(Mutex::new(BTreeMap::new())),
@@ -74,7 +74,7 @@ impl VirtualMachine {
         self.providers.register(provider).map_err(VmError::from)
     }
 
-    /// Publishes or reuses the Object representing a console found by a driver.
+    /// Publishes or reuses the Object representing a terminal found by a driver.
     ///
     /// This trusted entry point is for hardware providers. Praxis programs
     /// cannot create `ProviderOnly` Objects.
@@ -82,23 +82,23 @@ impl VirtualMachine {
     /// # Errors
     ///
     /// Returns an error when querying, encoding or committing the Object fails.
-    pub fn publish_console(
+    pub fn publish_terminal(
         manager: &Arc<InMemoryObjectManager>,
         state: &Value,
     ) -> Result<ObjectId, VmError> {
         let context = AccessContext::new(SYSTEM_SUBJECT);
-        if let Some(console) = manager
+        if let Some(terminal) = manager
             .query(context, &ObjectQuery::new().with_type(CONSOLE_TYPE))?
             .first()
         {
-            return Ok(console.id);
+            return Ok(terminal.id);
         }
         let request = CreateObject::new(CONSOLE_TYPE, state.encode()?);
-        let console = request.id;
+        let terminal = request.id;
         let mut transaction = manager.begin(context);
         transaction.create(request);
         manager.commit(transaction)?;
-        Ok(console)
+        Ok(terminal)
     }
 
     /// Publishes or reuses one Provider-owned Object discovered this boot.
@@ -247,8 +247,8 @@ impl VirtualMachine {
         self.grant_kernel_service_access(subject)?;
         let program_state = program.encode()?;
         let mut program_request = CreateObject::new(PROGRAM_TYPE, program_state);
-        if let Some(console) = self.console_provider {
-            while self.manager.shard_for(program_request.id) != self.manager.shard_for(console) {
+        if let Some(terminal) = self.terminal_provider {
+            while self.manager.shard_for(program_request.id) != self.manager.shard_for(terminal) {
                 program_request.id = ObjectId::new();
             }
         }
@@ -280,8 +280,8 @@ impl VirtualMachine {
         process_request = process_request
             .with_link("program", program_id)
             .with_link("process", process_id);
-        if let Some(console) = self.console_provider {
-            process_request = process_request.with_link("console", console);
+        if let Some(terminal) = self.terminal_provider {
+            process_request = process_request.with_link("terminal", terminal);
         }
         for (name, service) in &self.kernel_services {
             process_request = process_request.with_link(name.clone(), *service);
@@ -315,8 +315,8 @@ impl VirtualMachine {
         }
         let context = AccessContext::new(SYSTEM_SUBJECT);
         let mut objects = self.kernel_services.values().copied().collect::<Vec<_>>();
-        if let Some(console) = self.console_provider {
-            objects.push(console);
+        if let Some(terminal) = self.terminal_provider {
+            objects.push(terminal);
         }
         for object in objects {
             if self

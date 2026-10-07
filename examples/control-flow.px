@@ -1,7 +1,7 @@
 func main() {
 count = 0
 sum = 0
-console = object.find("console")
+terminal = object.find("terminal")
 
 while count < 10 {
     count++
@@ -20,9 +20,9 @@ while count < 10 {
 count--
 
 if false && missing {
-    console.println("short circuit failed")
+    terminal.println("short circuit failed")
 } else if true || missing {
-    console.println(sum)
-    console.println(count)
+    terminal.println(sum)
+    terminal.println(count)
 }
 }

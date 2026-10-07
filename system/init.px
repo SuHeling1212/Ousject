@@ -1,13 +1,13 @@
 func main() {
-console = object.find("console")
+terminal = object.find("terminal")
 system = object.find("system")
 store = object.find("store")
 authentication = object.find("authentication")
 programs = object.find("programs")
 
-console.println("Ousject user space starting")
-console.println(system.health_check())
-console.println(store.health_check())
+terminal.println("Ousject user space starting")
+terminal.println(system.health_check())
+terminal.println(store.health_check())
 
 if !authentication.local_initialized() {
     setup_id = programs.resolve("local-setup")
@@ -16,7 +16,7 @@ if !authentication.local_initialized() {
     setup_process = object.find(setup_process_id)
     setup_status = setup_process.wait()
     if setup_status == "failed" {
-        console.println(setup_process.error)
+        terminal.println(setup_process.error)
         return
     }
 }
@@ -27,6 +27,6 @@ login_process_id = login.execute()
 login_process = object.find(login_process_id)
 login_status = login_process.wait()
 if login_status == "failed" {
-    console.println(login_process.error)
+    terminal.println(login_process.error)
 }
 }

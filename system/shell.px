@@ -1,5 +1,4 @@
 func main() {
-console = object.find("console")
 terminal = object.find("terminal")
 types = object.find("types")
 authentication = object.find("authentication")
@@ -15,15 +14,15 @@ process_id = shell_terminal.process()
 process = object.find(process_id)
 pending_source = shell_terminal.pending_input()
 
-if console.is_interactive() {
-    dimensions = console.size()
+if terminal.is_interactive() {
+    dimensions = terminal.size()
     shell_terminal.update_size(dimensions["columns"], dimensions["rows"])
 }
 
 running = true
 while running {
-    console.print(prompt + " ")
-        line = console.read_line()
+    terminal.print(prompt + " ")
+        line = terminal.read_line()
         if line == "\r" {
             source = "\r"
         } else if pending_source != "" {
@@ -48,12 +47,12 @@ while running {
             type_name = type_list[type_index]["name"]
             available = object.query(type_name)
             if #available > 0 {
-                console.println(type_name)
+                terminal.println(type_name)
                 object_index = 0
                 while object_index < #available {
                     available_object = object.find(available[object_index])
-                    console.println(available_object.inspect)
-                    console.println(available_object.capabilities)
+                    terminal.println(available_object.inspect)
+                    terminal.println(available_object.capabilities)
                     object_index++
                 }
             }
@@ -119,8 +118,8 @@ while running {
 
         while (round_depth > 0 or curly_depth > 0 or square_depth > 0) or continue_slash {
             shell_terminal.save_input(source)
-            console.print("... ")
-            continuation = console.read_line()
+            terminal.print("... ")
+            continuation = terminal.read_line()
             explicit_join = #continuation > 0 and continuation[#continuation - 1] == "\\"
             if explicit_join {
                 without_slash = ""
@@ -186,10 +185,10 @@ while running {
             shell_terminal.submit(source)
             status = process.wait()
             if status == "failed" {
-                console.println(process.error)
+                terminal.println(process.error)
             }
         } catch (error) {
-            console.println(error)
+            terminal.println(error)
         }
     }
 }

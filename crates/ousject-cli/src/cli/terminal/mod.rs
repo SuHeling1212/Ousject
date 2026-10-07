@@ -1,10 +1,10 @@
-mod console;
+mod host;
 mod input;
 mod key_parser;
 
-pub(crate) use console::LinuxConsole;
+pub(crate) use host::LinuxTerminal;
 #[cfg(test)]
-pub(crate) use console::{InputMode, LinuxInputState};
+pub(crate) use host::{InputMode, LinuxInputState};
 #[cfg(test)]
 pub(crate) use input::dispatch_event;
 #[cfg(test)]

@@ -1070,9 +1070,9 @@ impl VirtualMachine {
                 transaction.expect(object, header.version).tombstone(object);
                 Ok((Value::Null, None))
             }
-            (CONSOLE_TYPE, "print" | "println", [_])
-            | (CONSOLE_TYPE, "read_line" | "read_secret", []) => {
-                Err(VmError::MissingProvider("console"))
+            (CORE_TERMINAL_TYPE, "print" | "println", [_])
+            | (CORE_TERMINAL_TYPE, "read_line" | "read_secret", []) => {
+                Err(VmError::MissingProvider("terminal"))
             }
             (PROCESS_TYPE, "start" | "resume", []) => {
                 self.change_process_status(

@@ -4,9 +4,9 @@ use super::*;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
-struct RecordingConsole(Arc<Mutex<Vec<String>>>);
+struct RecordingTerminal(Arc<Mutex<Vec<String>>>);
 
-impl ConsoleProvider for RecordingConsole {
+impl TerminalProvider for RecordingTerminal {
     fn println(&self, text: &str) -> Result<(), String> {
         self.0.lock().unwrap().push(text.to_owned());
         Ok(())
@@ -14,9 +14,9 @@ impl ConsoleProvider for RecordingConsole {
 }
 
 #[derive(Debug)]
-struct InterruptingConsole(AtomicUsize);
+struct InterruptingTerminal(AtomicUsize);
 
-impl ConsoleProvider for InterruptingConsole {
+impl TerminalProvider for InterruptingTerminal {
     fn println(&self, _text: &str) -> Result<(), String> {
         Ok(())
     }
@@ -41,75 +41,6 @@ impl ConsoleProvider for InterruptingConsole {
                 Err(current) => remaining = current,
             }
         }
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct ShellTerminalProvider;
-
-impl ObjectProvider for ShellTerminalProvider {
-    fn type_id(&self) -> TypeId {
-        CORE_TERMINAL_TYPE
-    }
-
-    fn user_creatable(&self) -> bool {
-        true
-    }
-
-    fn create(&self, initial: &Value) -> Result<Value, ProviderError> {
-        let Value::Record(mut fields) = initial.clone() else {
-            return Err(ProviderError::InvalidArguments(
-                "Terminal state must be a Record",
-            ));
-        };
-        fields
-            .entry("columns".to_owned())
-            .or_insert(Value::Integer(80));
-        fields
-            .entry("rows".to_owned())
-            .or_insert(Value::Integer(24));
-        fields
-            .entry("input_mode".to_owned())
-            .or_insert(Value::Text("raw".to_owned()));
-        fields
-            .entry("echo".to_owned())
-            .or_insert(Value::Bool(false));
-        fields
-            .entry("foreground_process".to_owned())
-            .or_insert(Value::Null);
-        fields
-            .entry("parent_terminal".to_owned())
-            .or_insert(Value::Null);
-        Ok(Value::Record(fields))
-    }
-
-    fn invoke(
-        &self,
-        object: ObjectId,
-        _state: &Value,
-        capability: &str,
-        arguments: &[Value],
-        _effect: ObjectId,
-    ) -> Result<ProviderOutcome, ProviderError> {
-        if capability != "create" || !arguments.is_empty() {
-            return Err(ProviderError::UnsupportedCapability(capability.to_owned()));
-        }
-        let Value::Record(mut fields) = self.create(&Value::Record(BTreeMap::new()))? else {
-            unreachable!()
-        };
-        fields.insert(
-            "parent_terminal".to_owned(),
-            Value::Text(object.to_string()),
-        );
-        let id = ObjectId::new();
-        let request = CreateObject::new(CORE_TERMINAL_TYPE, Value::Record(fields).encode()?)
-            .with_id(id)
-            .with_parent(object);
-        Ok(ProviderOutcome::result(Value::Text(id.to_string())).with_created(request))
-    }
-
-    fn capabilities(&self) -> std::collections::BTreeSet<String> {
-        ["create".to_owned()].into_iter().collect()
     }
 }
 
@@ -188,17 +119,17 @@ impl ObjectProvider for DriverDeviceProvider {
 #[test]
 fn type_registry_reports_the_registered_provider_capabilities() {
     let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
-    let vm = vm_with_console(Arc::clone(&manager));
+    let vm = vm_with_terminal(Arc::clone(&manager));
     vm.register_provider(Arc::new(DriverDeviceProvider))
         .unwrap();
 
     let program = compile(
         r#"
-console = object.find("console")
+terminal = object.find("terminal")
 types = object.find("types")
 descriptor = types.descriptor("net.endpoint")
-console.println(descriptor)
-console.println(types.types())
+terminal.println(descriptor)
+terminal.println(types.types())
 "#,
     )
     .unwrap();
@@ -235,10 +166,8 @@ console.println(types.types())
 #[test]
 fn praxis_module_cannot_register_a_native_provider() {
     let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
-    let vm = vm_with_console(Arc::clone(&manager));
+    let vm = vm_with_terminal(Arc::clone(&manager));
     vm.register_provider(Arc::new(DriverDeviceProvider))
-        .unwrap();
-    vm.register_provider(Arc::new(ShellTerminalProvider))
         .unwrap();
 
     let installer_program = compile(
@@ -290,19 +219,16 @@ registered = providers.providers()
 #[test]
 fn terminal_shell_keeps_one_process_and_uses_latest_function_definition() {
     let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
     let output = Arc::new(Mutex::new(Vec::new()));
-    let vm = VirtualMachine::with_console(
+    let vm = VirtualMachine::with_terminal(
         manager.clone(),
-        console,
-        Arc::new(RecordingConsole(Arc::clone(&output))),
+        terminal,
+        Arc::new(RecordingTerminal(Arc::clone(&output))),
     )
     .unwrap();
-    vm.register_provider(Arc::new(ShellTerminalProvider))
-        .unwrap();
     let source = r#"
-console = object.find("console")
 terminal = object.find("terminal")
 terminal_id = terminal.shell()
 shell_terminal = object.find(terminal_id)
@@ -380,9 +306,7 @@ again = terminal.shell()
 #[test]
 fn system_shell_state_lives_on_terminal_objects() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager.clone());
-    vm.register_provider(Arc::new(ShellTerminalProvider))
-        .unwrap();
+    let vm = vm_with_terminal(manager.clone());
     let source = r#"
 terminal = object.find("terminal")
 terminal_capabilities = terminal.capabilities
@@ -417,7 +341,7 @@ shell_id_again = terminal.shell()
     assert!(terminal_capabilities.contains(&Value::Text("create".to_owned())));
     assert!(terminal_capabilities.contains(&Value::Text("shell".to_owned())));
     assert!(!terminal_capabilities.contains(&Value::Text("input".to_owned())));
-    assert!(!terminal_capabilities.contains(&Value::Text("output".to_owned())));
+    assert!(terminal_capabilities.contains(&Value::Text("output".to_owned())));
     let Value::Array(provider_capabilities) = vm.variable(parent, "provider_capabilities").unwrap()
     else {
         panic!("expected provider registry capability list");
@@ -439,7 +363,7 @@ shell_id_again = terminal.shell()
         .collect::<Vec<_>>();
     assert_eq!(shell_terminals.len(), 1);
     assert!(matches!(
-        vm.register_provider(Arc::new(ShellTerminalProvider)),
+        vm.register_provider(Arc::new(DriverDeviceProvider)),
         Err(VmError::Provider(message)) if message.contains("Sealed")
     ));
 }
@@ -448,7 +372,7 @@ shell_id_again = terminal.shell()
 #[allow(clippy::too_many_lines)]
 fn failed_user_space_driver_process_leaves_device_and_kernel_usable() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager.clone());
+    let vm = vm_with_terminal(manager.clone());
     vm.register_provider(Arc::new(DriverDeviceProvider))
         .unwrap();
     let device_state = DriverDeviceProvider.create(&Value::Null).unwrap();
@@ -615,16 +539,14 @@ fn terminal_and_process_survive_a_store_restart() {
     let process_id;
     {
         let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-        let console =
-            VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-        let vm = VirtualMachine::with_console(
+        let terminal =
+            VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+        let vm = VirtualMachine::with_terminal(
             manager,
-            console,
-            Arc::new(RecordingConsole(Arc::new(Mutex::new(Vec::new())))),
+            terminal,
+            Arc::new(RecordingTerminal(Arc::new(Mutex::new(Vec::new())))),
         )
         .unwrap();
-        vm.register_provider(Arc::new(ShellTerminalProvider))
-            .unwrap();
         let source = r#"
 terminal = object.find("terminal")
 terminal_id = terminal.shell()
@@ -651,17 +573,15 @@ shell_terminal.save_input("unfinished {")
 
     {
         let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-        let console =
-            VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
+        let terminal =
+            VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
         let output = Arc::new(Mutex::new(Vec::new()));
-        let vm = VirtualMachine::with_console(
+        let vm = VirtualMachine::with_terminal(
             manager,
-            console,
-            Arc::new(RecordingConsole(Arc::clone(&output))),
+            terminal,
+            Arc::new(RecordingTerminal(Arc::clone(&output))),
         )
         .unwrap();
-        vm.register_provider(Arc::new(ShellTerminalProvider))
-            .unwrap();
         let source = r#"
 terminal = object.find("terminal")
 terminal_id = terminal.shell()
@@ -827,16 +747,14 @@ process.wait()
 #[test]
 fn ctrl_c_interrupts_a_running_submission_and_the_same_process_continues() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-    let vm = VirtualMachine::with_console(
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let vm = VirtualMachine::with_terminal(
         manager,
-        console,
-        Arc::new(InterruptingConsole(AtomicUsize::new(2))),
+        terminal,
+        Arc::new(InterruptingTerminal(AtomicUsize::new(2))),
     )
     .unwrap();
-    vm.register_provider(Arc::new(ShellTerminalProvider))
-        .unwrap();
     let source = r#"
 terminal = object.find("terminal")
 terminal_id = terminal.shell()

@@ -200,7 +200,7 @@ impl Parser {
             return Err(self.error("capability and function calls are not allowed in transaction"));
         }
         if name == "io.println" {
-            return Err(self.error("io.println was removed; discover a console Object"));
+            return Err(self.error("io.println was removed; discover a terminal Object"));
         }
         let registry = registry_call(name);
         let object_capability = if registry.is_none() {

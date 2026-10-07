@@ -15,7 +15,7 @@ Process、用户、设备和系统服务，并尝试让对象状态与 Process �
 - Token Format（TF）：Praxis 编译结果的预发布字节码格式。
 - Virtual Machine：持久 Program/Process、协作式调度、等待、Timer、IPC 和 Effect。
 - 用户空间：初始化、登录、Shell 和系统管理程序。
-- 宿主适配：Console、网络、显示、键盘和块存储 Provider。
+- 宿主适配：Terminal、网络、显示、键盘和块存储 Provider。
 
 已实现范围、证据和限制见[当前状态](docs/project/status.md)。
 

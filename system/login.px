@@ -1,21 +1,21 @@
 func main() {
-console = object.find("console")
+terminal = object.find("terminal")
 authentication = object.find("authentication")
 programs = object.find("programs")
 
 logged_in = false
 while !logged_in {
     try {
-        console.print("user: ")
-        name = console.read_line()
-        console.print("password: ")
-        password = console.read_secret()
+        terminal.print("user: ")
+        name = terminal.read_line()
+        terminal.print("password: ")
+        password = terminal.read_secret()
         session = authentication.login(name, password)
-        console.println("logged in")
-        console.println(session["subject"])
+        terminal.println("logged in")
+        terminal.println(session["subject"])
         logged_in = true
     } catch (error) {
-        console.println(error)
+        terminal.println(error)
     }
 }
 
@@ -25,6 +25,6 @@ shell_process_id = shell.execute()
 shell_process = object.find(shell_process_id)
 shell_status = shell_process.wait()
 if shell_status == "failed" {
-    console.println(shell_process.error)
+    terminal.println(shell_process.error)
 }
 }

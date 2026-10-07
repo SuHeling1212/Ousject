@@ -1,7 +1,8 @@
 use super::super::{
-    AccessContext, Arc, BTreeMap, BTreeSet, CORE_TERMINAL_TYPE, ConsoleProvider, CreateObject,
-    EffectRecoveryPolicy, InMemoryObjectManager, LinuxConsole, Mutex, ObjectId, ObjectProvider,
-    ObjectQuery, ProviderError, ProviderOutcome, SYSTEM_SUBJECT, TerminalScreen, Value, VecDeque,
+    AccessContext, Arc, BTreeMap, BTreeSet, CORE_TERMINAL_TYPE, CreateObject, EffectRecoveryPolicy,
+    InMemoryObjectManager, LinuxTerminal, Mutex, ObjectId, ObjectProvider, ObjectQuery,
+    ProviderError, ProviderOutcome, SYSTEM_SUBJECT, TerminalProvider, TerminalScreen, Value,
+    VecDeque,
 };
 use ousject_provider::{
     MouseTracking, TerminalColor, TerminalModes, TerminalRenderView, TerminalStyle,
@@ -26,23 +27,27 @@ struct TerminalRoutes {
 #[derive(Debug)]
 pub(crate) struct HostTerminalProvider {
     host_terminal: ObjectId,
-    terminal: Arc<LinuxConsole>,
+    terminal: Arc<LinuxTerminal>,
     screens: Mutex<BTreeMap<ObjectId, TerminalScreen>>,
     canonical_input: Mutex<BTreeMap<(ObjectId, ObjectId), VecDeque<u8>>>,
     events: Mutex<BTreeMap<ObjectId, VecDeque<Value>>>,
+    completed_terminal_effects: Mutex<BTreeMap<ObjectId, ProviderOutcome>>,
+    secrets_this_boot: Mutex<BTreeMap<String, String>>,
     render_modes: Mutex<RenderModes>,
     routes: Mutex<TerminalRoutes>,
     manager: Option<Arc<InMemoryObjectManager>>,
 }
 
 impl HostTerminalProvider {
-    pub(crate) fn new(host_terminal: ObjectId, terminal: Arc<LinuxConsole>) -> Self {
+    pub(crate) fn new(host_terminal: ObjectId, terminal: Arc<LinuxTerminal>) -> Self {
         Self {
             host_terminal,
             terminal,
             screens: Mutex::new(BTreeMap::new()),
             canonical_input: Mutex::new(BTreeMap::new()),
             events: Mutex::new(BTreeMap::new()),
+            completed_terminal_effects: Mutex::new(BTreeMap::new()),
+            secrets_this_boot: Mutex::new(BTreeMap::new()),
             render_modes: Mutex::new(RenderModes::default()),
             routes: Mutex::new(TerminalRoutes {
                 active_terminal: host_terminal,
@@ -57,7 +62,7 @@ impl HostTerminalProvider {
 
     pub(crate) fn with_manager(
         host_terminal: ObjectId,
-        terminal: Arc<LinuxConsole>,
+        terminal: Arc<LinuxTerminal>,
         manager: Arc<InMemoryObjectManager>,
     ) -> Self {
         let mut provider = Self::new(host_terminal, terminal);
@@ -241,6 +246,95 @@ impl HostTerminalProvider {
             self.poll_canonical(process, object, maximum, echo)?
         };
         Ok(ProviderOutcome::result(Value::Bytes(bytes)))
+    }
+
+    fn invoke_terminal_io(
+        &self,
+        process: Option<ObjectId>,
+        object: ObjectId,
+        state: &Value,
+        capability: &str,
+        arguments: &[Value],
+        effect: ObjectId,
+    ) -> Result<ProviderOutcome, ProviderError> {
+        if let Some(completed) = self
+            .completed_terminal_effects
+            .lock()
+            .map_err(|_| ProviderError::Unavailable)?
+            .get(&effect)
+            .cloned()
+        {
+            return Ok(completed);
+        }
+
+        let outcome = match (capability, arguments) {
+            ("print" | "println", [value]) => {
+                let text = value.to_string();
+                if !self.terminal.is_interactive() {
+                    if capability == "println" {
+                        self.terminal
+                            .println(&text)
+                            .map_err(ProviderError::Adapter)?;
+                    } else {
+                        self.terminal.print(&text).map_err(ProviderError::Adapter)?;
+                    }
+                } else {
+                    let mut bytes = text.into_bytes();
+                    if capability == "println" {
+                        bytes.push(b'\n');
+                    }
+                    self.output(object, state, &[Value::Bytes(bytes)])?;
+                }
+                ProviderOutcome::result(Value::Null)
+            }
+            ("size", []) => {
+                let (columns, rows) = self.terminal.size().map_err(ProviderError::Adapter)?;
+                ProviderOutcome::result(Value::Record(BTreeMap::from([
+                    ("columns".to_owned(), Value::Integer(i64::from(columns))),
+                    ("rows".to_owned(), Value::Integer(i64::from(rows))),
+                ])))
+            }
+            ("is_interactive", []) => {
+                ProviderOutcome::result(Value::Bool(self.terminal.is_interactive()))
+            }
+            ("read_line", []) => {
+                if !self.is_active_terminal(object)? {
+                    return Err(ProviderError::Pending);
+                }
+                let line = process
+                    .map_or_else(
+                        || self.terminal.try_read_line(),
+                        |process| self.terminal.try_read_line_for(process),
+                    )
+                    .map_err(ProviderError::Adapter)?
+                    .ok_or(ProviderError::Pending)?;
+                ProviderOutcome::result(Value::Text(line))
+            }
+            ("read_secret", []) => {
+                if !self.is_active_terminal(object)? {
+                    return Err(ProviderError::Pending);
+                }
+                let secret = process
+                    .map_or_else(
+                        || self.terminal.try_read_secret(),
+                        |process| self.terminal.try_read_secret_for(process),
+                    )
+                    .map_err(ProviderError::Adapter)?
+                    .ok_or(ProviderError::Pending)?;
+                let token = format!("secret:{effect}");
+                self.secrets_this_boot
+                    .lock()
+                    .map_err(|_| ProviderError::Unavailable)?
+                    .insert(token.clone(), secret);
+                ProviderOutcome::result(Value::Text(token))
+            }
+            _ => return Err(ProviderError::UnsupportedCapability(capability.to_owned())),
+        };
+        self.completed_terminal_effects
+            .lock()
+            .map_err(|_| ProviderError::Unavailable)?
+            .insert(effect, outcome.clone());
+        Ok(outcome)
     }
 
     fn is_active_terminal(&self, object: ObjectId) -> Result<bool, ProviderError> {
@@ -653,8 +747,14 @@ impl ObjectProvider for HostTerminalProvider {
         state: &Value,
         capability: &str,
         arguments: &[Value],
-        _effect: ObjectId,
+        effect: ObjectId,
     ) -> Result<ProviderOutcome, ProviderError> {
+        if matches!(
+            capability,
+            "print" | "println" | "read_line" | "read_secret" | "size" | "is_interactive"
+        ) {
+            return self.invoke_terminal_io(None, object, state, capability, arguments, effect);
+        }
         let mut fields = record(state)?.clone();
         match (capability, arguments) {
             ("create", [] | [Value::Record(_) | Value::Map(_)]) => {
@@ -920,8 +1020,21 @@ impl ObjectProvider for HostTerminalProvider {
         state: &Value,
         capability: &str,
         arguments: &[Value],
-        _effect: ObjectId,
+        effect: ObjectId,
     ) -> Result<ProviderOutcome, ProviderError> {
+        if matches!(
+            capability,
+            "print" | "println" | "read_line" | "read_secret" | "size" | "is_interactive"
+        ) {
+            return self.invoke_terminal_io(
+                Some(process),
+                object,
+                state,
+                capability,
+                arguments,
+                effect,
+            );
+        }
         if capability == "wait_event" && arguments.is_empty() {
             return self.wait_event(process, object, state);
         }
@@ -934,10 +1047,31 @@ impl ObjectProvider for HostTerminalProvider {
     }
 
     fn capabilities(&self) -> std::collections::BTreeSet<String> {
-        ["create", "configure", "resize", "foreground", "wait_event"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        [
+            "print",
+            "println",
+            "read_line",
+            "read_secret",
+            "size",
+            "is_interactive",
+            "create",
+            "configure",
+            "resize",
+            "foreground",
+            "wait_event",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    fn resolve_secret(&self, token: &str) -> Result<Option<String>, ProviderError> {
+        Ok(self
+            .secrets_this_boot
+            .lock()
+            .map_err(|_| ProviderError::Unavailable)?
+            .get(token)
+            .cloned())
     }
 }
 

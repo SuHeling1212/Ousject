@@ -189,7 +189,7 @@ impl VirtualMachine {
                 )?;
                 self.manager.commit(completion)?;
                 Ok(
-                    if target.header().type_id == CONSOLE_TYPE && capability == "println" {
+                    if target.header().type_id == CORE_TERMINAL_TYPE && capability == "println" {
                         arguments.first().map(ToString::to_string)
                     } else {
                         None
@@ -203,7 +203,7 @@ impl VirtualMachine {
                 state.stack.push(Value::Text(object.to_string()));
                 state.stack.extend(arguments.iter().cloned());
                 state.status = ProcessStatus::Waiting;
-                state.wait_reason = if target.header().type_id == CONSOLE_TYPE
+                state.wait_reason = if target.header().type_id == CORE_TERMINAL_TYPE
                     && matches!(capability, "read_line" | "read_secret")
                 {
                     WaitReason::Input(effect)

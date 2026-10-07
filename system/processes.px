@@ -1,6 +1,6 @@
 func main() {
-console = object.find("console")
+terminal = object.find("terminal")
 
 processes = object.query("core.process")
-console.println(processes)
+terminal.println(processes)
 }

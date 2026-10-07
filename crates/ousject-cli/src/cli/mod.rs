@@ -7,17 +7,16 @@ use oms_runtime::{
     TombstoneReaper, ValueSchema,
 };
 use oms_types::{
-    CORE_CONSOLE_TYPE, CORE_NAMESPACE_TYPE, CORE_PROGRAM_TYPE, CORE_SYSTEM_TYPE,
-    CORE_TERMINAL_TYPE, Capability, DEVICE_BLOCK_STORAGE_TYPE, DEVICE_KEYBOARD_TYPE,
-    NET_RESOLVER_TYPE, ObjectId, SubjectId, Value,
+    CORE_NAMESPACE_TYPE, CORE_PROGRAM_TYPE, CORE_SYSTEM_TYPE, CORE_TERMINAL_TYPE, Capability,
+    DEVICE_BLOCK_STORAGE_TYPE, DEVICE_KEYBOARD_TYPE, NET_RESOLVER_TYPE, ObjectId, SubjectId, Value,
 };
 use ousject_auth::AuthService;
 use ousject_provider::{
     EffectRecoveryPolicy, ObjectProvider, ProviderError, ProviderOutcome, TerminalScreen,
 };
 use ousject_vm::{
-    ConsoleProvider, CooperativeScheduler, ProcessReaper, ProcessStatus, RunReport, SYSTEM_SUBJECT,
-    VirtualMachine,
+    CooperativeScheduler, ProcessReaper, ProcessStatus, RunReport, SYSTEM_SUBJECT,
+    TerminalProvider, VirtualMachine,
 };
 use praxis_compiler::compile_program_with_loader;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -48,9 +47,9 @@ pub(super) use hardware::{
 };
 pub(super) use options::{RuntimeOptions, open_manager, option_subject, parse_options};
 pub(super) use runtime::{
-    compile_source_file, discover_host_hardware, error_text, grant_console_access, host_block_path,
-    parse_object, print_report, run_hosted_process,
+    compile_source_file, discover_host_hardware, error_text, grant_terminal_access,
+    host_block_path, parse_object, print_report, run_hosted_process,
 };
-pub(super) use terminal::LinuxConsole;
+pub(super) use terminal::LinuxTerminal;
 #[cfg(test)]
 pub(super) use terminal::{InputMode, InputParser, KeyEvent, LinuxInputState, dispatch_event};

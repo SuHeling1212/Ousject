@@ -6,7 +6,7 @@ use super::*;
 fn praxis_object_creation_and_process_advance_are_atomic() {
     let backend = Arc::new(FaultBackend::default());
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm
         .create_process(&compile("item = object.create(\"core.text\", \"x\")").unwrap())
         .unwrap();
@@ -33,7 +33,7 @@ fn praxis_object_creation_and_process_advance_are_atomic() {
 fn praxis_object_replacement_and_process_advance_are_atomic() {
     let backend = Arc::new(FaultBackend::default());
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let program =
         compile("item = object.create(\"core.text\", \"old\")\nitem.replace(\"new\")").unwrap();
     let replace_position = program
@@ -73,7 +73,7 @@ fn praxis_object_replacement_and_process_advance_are_atomic() {
 fn praxis_link_and_process_advance_are_atomic() {
     let backend = Arc::new(FaultBackend::default());
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let program = compile(
         "root = object.create(\"core.namespace\", {})\nitem = object.create(\"core.text\", \"x\")\nroot.link(\"item\", item)",
     )
@@ -125,7 +125,7 @@ transaction {
 "#;
     let backend = Arc::new(FaultBackend::default());
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let program = compile(source).unwrap();
     let transaction_position = u32::try_from(
         program
@@ -177,7 +177,7 @@ func worker() {
     channel.value++
 }
 
-console = object.find("console")
+terminal = object.find("terminal")
 self = object.find("process")
 program = object.find("program")
 channel = object.create("Channel", {})
@@ -185,15 +185,15 @@ child = object.create("core.process", {
     entry: "worker",
     links: { channel: channel.id }
 })
-console.println(self.type)
-console.println(program.type)
-console.println(child.status)
+terminal.println(self.type)
+terminal.println(program.type)
+terminal.println(child.status)
 child.start()
-console.println(child.wait())
-console.println(channel.value)
+terminal.println(child.wait())
+terminal.println(channel.value)
 "#;
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm.create_process(&compile(source).unwrap()).unwrap();
     let report = vm.run(process, 1_000).unwrap();
     assert_eq!(report.status, ProcessStatus::Halted);
@@ -211,23 +211,23 @@ console.println(channel.value)
 #[test]
 fn collection_uses_variable_value_capabilities() {
     let source = r#"
-console = object.find("console")
+terminal = object.find("terminal")
 items = object.create("core.collection", [1, 2])
 items[1] = 9
-console.println(items[1])
+terminal.println(items[1])
 items.replace([7, 9, 11])
-console.println(items[2])
-console.println(#items)
-console.println(items.value)
+terminal.println(items[2])
+terminal.println(#items)
+terminal.println(items.value)
 
 mapping = object.create("core.collection", {"a": 1})
 mapping["b"] = 2
-console.println(mapping["a"])
-console.println(mapping["b"])
-console.println(#mapping)
+terminal.println(mapping["a"])
+terminal.println(mapping["b"])
+terminal.println(#mapping)
 "#;
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm.create_process(&compile(source).unwrap()).unwrap();
     let report = vm.run(process, 500).unwrap();
     assert_eq!(report.status, ProcessStatus::Halted);
@@ -252,7 +252,7 @@ fn praxis_object_api_can_grant_permissions() {
         "item = object.create(\"core.text\", \"shared\")\nitem.grant(\"{subject}\", \"view_value\")\n"
     );
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm.create_process(&compile(&source).unwrap()).unwrap();
     assert_eq!(vm.run(process, 100).unwrap().status, ProcessStatus::Halted);
     let item = vm.process_state(process).unwrap().variables["item"];

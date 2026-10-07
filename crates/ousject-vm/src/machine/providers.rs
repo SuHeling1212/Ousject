@@ -1,17 +1,16 @@
 #[derive(Debug)]
-struct ConsoleObjectProvider {
-    object: ObjectId,
-    driver: Arc<dyn ConsoleProvider>,
+pub(super) struct TerminalTransportProvider {
+    pub(super) object: ObjectId,
+    pub(super) driver: Arc<dyn TerminalProvider>,
     completed_this_boot: Mutex<BTreeMap<ObjectId, ProviderOutcome>>,
     secrets_this_boot: Mutex<BTreeMap<String, String>>,
 }
 
-impl ConsoleObjectProvider {
-    fn invoke_console(
+impl TerminalTransportProvider {
+    fn invoke_terminal(
         &self,
         process: Option<ObjectId>,
         object: ObjectId,
-        _state: &Value,
         capability: &str,
         arguments: &[Value],
         effect: ObjectId,
@@ -19,14 +18,29 @@ impl ConsoleObjectProvider {
         if object != self.object {
             return Err(ProviderError::UnsupportedCapability(capability.to_owned()));
         }
-        let mut completed = self
+        if let Some(outcome) = self
             .completed_this_boot
             .lock()
-            .map_err(|_| ProviderError::Unavailable)?;
-        if let Some(outcome) = completed.get(&effect) {
-            return Ok(outcome.clone());
+            .map_err(|_| ProviderError::Unavailable)?
+            .get(&effect)
+            .cloned()
+        {
+            return Ok(outcome);
         }
         let outcome = match (capability, arguments) {
+            ("create", [] | [Value::Record(_) | Value::Map(_)]) => {
+                let initial = arguments.first().cloned().unwrap_or(Value::Null);
+                let Value::Record(mut fields) = self.create(&initial)? else {
+                    unreachable!("Terminal create returns a Record")
+                };
+                fields.insert("parent_terminal".to_owned(), Value::Text(object.to_string()));
+                let request = CreateObject::new(
+                    CORE_TERMINAL_TYPE,
+                    Value::Record(fields).encode()?,
+                )
+                .with_parent(object);
+                ProviderOutcome::result(Value::Text(request.id.to_string())).with_created(request)
+            }
             ("print", [value]) => {
                 self.driver
                     .print(&value.to_string())
@@ -49,14 +63,16 @@ impl ConsoleObjectProvider {
             ("is_interactive", []) => {
                 ProviderOutcome::result(Value::Bool(self.driver.is_interactive()))
             }
-            ("read_line", []) => process
-                .map_or_else(
-                    || self.driver.try_read_line(),
-                    |process| self.driver.try_read_line_for(process),
-                )
-                .map_err(ProviderError::Adapter)?
-                .map(|line| ProviderOutcome::result(Value::Text(line)))
-                .ok_or(ProviderError::Pending)?,
+            ("read_line", []) => {
+                let line = process
+                    .map_or_else(
+                        || self.driver.try_read_line(),
+                        |process| self.driver.try_read_line_for(process),
+                    )
+                    .map_err(ProviderError::Adapter)?
+                    .ok_or(ProviderError::Pending)?;
+                ProviderOutcome::result(Value::Text(line))
+            }
             ("read_secret", []) => {
                 let secret = process
                     .map_or_else(
@@ -72,49 +88,100 @@ impl ConsoleObjectProvider {
                     .insert(token.clone(), secret);
                 ProviderOutcome::result(Value::Text(token))
             }
+            ("size" | "is_interactive" | "read_line" | "read_secret", _) => {
+                return Err(ProviderError::InvalidArguments(
+                    "Terminal method received invalid arguments",
+                ));
+            }
             _ => return Err(ProviderError::UnsupportedCapability(capability.to_owned())),
         };
-        completed.insert(effect, outcome.clone());
+        self.completed_this_boot
+            .lock()
+            .map_err(|_| ProviderError::Unavailable)?
+            .insert(effect, outcome.clone());
         Ok(outcome)
     }
 }
 
-impl ObjectProvider for ConsoleObjectProvider {
+impl ObjectProvider for TerminalTransportProvider {
     fn type_id(&self) -> TypeId {
-        CONSOLE_TYPE
+        CORE_TERMINAL_TYPE
     }
 
-    fn create(&self, _initial: &Value) -> Result<Value, ProviderError> {
-        Err(ProviderError::InvalidArguments(
-            "Console Objects are published by hardware discovery",
-        ))
+    fn user_creatable(&self) -> bool {
+        true
+    }
+
+    fn create(&self, initial: &Value) -> Result<Value, ProviderError> {
+        let mut fields = match initial {
+            Value::Null => BTreeMap::new(),
+            Value::Record(fields) | Value::Map(fields) => fields.clone(),
+            _ => {
+                return Err(ProviderError::InvalidArguments(
+                    "Terminal state must be a Record or null",
+                ));
+            }
+        };
+        fields.entry("columns".to_owned()).or_insert(Value::Integer(80));
+        fields.entry("rows".to_owned()).or_insert(Value::Integer(24));
+        fields
+            .entry("input_mode".to_owned())
+            .or_insert(Value::Text("raw".to_owned()));
+        fields.entry("echo".to_owned()).or_insert(Value::Bool(false));
+        fields
+            .entry("parent_terminal".to_owned())
+            .or_insert(Value::Null);
+        fields
+            .entry("foreground_process".to_owned())
+            .or_insert(Value::Null);
+        Ok(Value::Record(fields))
     }
 
     fn invoke(
         &self,
         object: ObjectId,
-        state: &Value,
+        _state: &Value,
         capability: &str,
         arguments: &[Value],
         effect: ObjectId,
     ) -> Result<ProviderOutcome, ProviderError> {
-        self.invoke_console(None, object, state, capability, arguments, effect)
+        self.invoke_terminal(None, object, capability, arguments, effect)
     }
 
     fn invoke_for_process(
         &self,
         process: ObjectId,
         object: ObjectId,
-        state: &Value,
+        _state: &Value,
         capability: &str,
         arguments: &[Value],
         effect: ObjectId,
     ) -> Result<ProviderOutcome, ProviderError> {
-        self.invoke_console(Some(process), object, state, capability, arguments, effect)
+        self.invoke_terminal(Some(process), object, capability, arguments, effect)
+    }
+
+    fn process_ended(&self, process: ObjectId) {
+        self.driver.release_process(process);
+    }
+
+    fn capabilities(&self) -> BTreeSet<String> {
+        [
+            "print",
+            "println",
+            "create",
+            "output",
+            "read_line",
+            "read_secret",
+            "size",
+            "is_interactive",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     }
 
     fn ephemeral_capabilities(&self) -> BTreeSet<String> {
-        BTreeSet::from(["render".to_owned()])
+        BTreeSet::from(["output".to_owned()])
     }
 
     fn invoke_ephemeral_for_process(
@@ -125,38 +192,18 @@ impl ObjectProvider for ConsoleObjectProvider {
         capability: &str,
         arguments: &[Value],
     ) -> Result<ProviderOutcome, ProviderError> {
-        if object != self.object || capability != "render" {
+        if object != self.object || capability != "output" {
             return Err(ProviderError::UnsupportedCapability(capability.to_owned()));
         }
-        let frame = match arguments {
-            [Value::Text(text)] => text.as_bytes(),
-            [Value::Bytes(bytes)] => bytes.as_slice(),
-            _ => {
-                return Err(ProviderError::InvalidArguments(
-                    "console.render expects one Text or Bytes frame",
-                ));
-            }
+        let [Value::Bytes(bytes)] = arguments else {
+            return Err(ProviderError::InvalidArguments(
+                "Terminal output expects Bytes",
+            ));
         };
-        self.driver
-            .render(frame)
-            .map_err(ProviderError::Adapter)?;
-        Ok(ProviderOutcome::result(Value::Null))
-    }
-
-    fn process_ended(&self, process: ObjectId) {
-        self.driver.release_process(process);
-    }
-
-    fn capabilities(&self) -> BTreeSet<String> {
-        BTreeSet::from([
-            "print".to_owned(),
-            "println".to_owned(),
-            "render".to_owned(),
-            "read_line".to_owned(),
-            "read_secret".to_owned(),
-            "size".to_owned(),
-            "is_interactive".to_owned(),
-        ])
+        self.driver.render(bytes).map_err(ProviderError::Adapter)?;
+        Ok(ProviderOutcome::result(Value::Integer(
+            i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+        )))
     }
 
     fn resolve_secret(&self, token: &str) -> Result<Option<String>, ProviderError> {

@@ -1,7 +1,7 @@
 func main() {
-console = object.find("console")
+terminal = object.find("terminal")
 store = object.find("store")
 
-console.println(store.stats())
-console.println(store.effects())
+terminal.println(store.stats())
+terminal.println(store.effects())
 }

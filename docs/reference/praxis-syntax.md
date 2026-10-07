@@ -7,8 +7,8 @@
 
 ```px
 func main() {
-    console = object.find("console")
-    console.println("Hello, Ousject")
+    terminal = object.find("terminal")
+    terminal.println("Hello, Ousject")
 }
 ```
 
@@ -166,7 +166,7 @@ alias link item
 try {
     value = 1 / 0
 } catch (error) {
-    console.println(error)
+    terminal.println(error)
 }
 ```
 

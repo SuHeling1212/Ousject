@@ -13,4 +13,5 @@ pub(crate) fn command_compile(arguments: &[String]) -> Result<(), String> {
         arguments[1]
     );
     Ok(())
+
 }

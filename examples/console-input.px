@@ -1,5 +1,0 @@
-func main() {
-console = object.find("console")
-line = console.read_line()
-console.println(line)
-}

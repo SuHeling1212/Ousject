@@ -15,7 +15,7 @@ item = "fresh"
 "#;
     let backend = Arc::new(FaultBackend::default());
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let program = compile(source).unwrap();
     let retire_position = u32::try_from(
         program

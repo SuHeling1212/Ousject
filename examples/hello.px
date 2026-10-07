@@ -1,15 +1,15 @@
 func main() {
 count = 0
-console = object.find("console")
+terminal = object.find("terminal")
 
 while count < 3 {
-    console.println("Ousject " + "running")
+    terminal.println("Ousject " + "running")
     count++
 }
 
 if count == 3 {
-    console.println(count)
+    terminal.println(count)
 } else {
-    console.println("unexpected")
+    terminal.println("unexpected")
 }
 }

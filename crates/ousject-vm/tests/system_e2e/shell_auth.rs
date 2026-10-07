@@ -1,21 +1,20 @@
 #![allow(clippy::wildcard_imports)]
 
-use super::persistent_terminal::ShellTerminalProvider;
 use super::*;
 
 #[test]
 fn praxis_initializes_local_and_logs_in_through_authentication_objects() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let program = compile(
         r#"
-console = object.find("console")
+terminal = object.find("terminal")
 authentication = object.find("authentication")
 users = object.find("users")
 authentication.initialize_local("local-password")
 users.create_user("alice", "alice-password")
 session = authentication.login("alice", "alice-password")
-console.println(session["subject"])
+terminal.println(session["subject"])
 authentication.change_password("alice", "new-password")
 authentication.logout(session["token"])
 "#,
@@ -35,17 +34,17 @@ authentication.logout(session["token"])
 #[test]
 fn shell_context_keeps_variables_and_current_user_between_command_processes() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let source = r#"
 func main() {
-console = object.find("console")
+terminal = object.find("terminal")
 authentication = object.find("authentication")
 users = object.find("users")
 authentication.initialize_local("local-password")
 users.create_user("alice", "alice-password")
 authentication.login("alice", "alice-password")
 identity = authentication.current_user()
-console.println(identity["name"])
+terminal.println(identity["name"])
 a_object = object.create("core.value", 123456789)
 a_id_object = object.create("core.value", a_object.id)
 context = {"a": a_object.id, "a_id": a_id_object.id}
@@ -63,7 +62,7 @@ second_process = object.find(second_process_id)
     second_process.wait()
     second_context = second_process.bindings()
     shared_object = object.find(second_context["a"])
-console.println(shared_object.value)
+terminal.println(shared_object.value)
 }
 "#;
     let process = vm
@@ -80,9 +79,9 @@ console.println(shared_object.value)
 #[test]
 fn system_shell_collects_bracket_and_backslash_continuations() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-    let driver = Arc::new(InputConsole {
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let driver = Arc::new(InputTerminal {
         lines: Mutex::new(VecDeque::from([
             "\r".to_owned(),
             "a = {".to_owned(),
@@ -95,9 +94,7 @@ fn system_shell_collects_bracket_and_backslash_continuations() {
         ])),
         reads: AtomicUsize::new(0),
     });
-    let vm = VirtualMachine::with_console(manager.clone(), console, driver.clone()).unwrap();
-    vm.register_provider(Arc::new(ShellTerminalProvider))
-        .unwrap();
+    let vm = VirtualMachine::with_terminal(manager.clone(), terminal, driver.clone()).unwrap();
     let setup = vm
         .create_process(
                 &compile_program(

@@ -2,23 +2,24 @@ use super::*;
 use tf_format::{Token, Value};
 
 #[test]
-fn compiles_variables_and_console_capability() {
-    let program =
-        compile("console = object.find(\"console\")\nanswer = 40 + 2\nconsole.println(answer)\n")
-            .unwrap();
+fn compiles_variables_and_terminal_capability() {
+    let program = compile(
+        "terminal = object.find(\"terminal\")\nanswer = 40 + 2\nterminal.println(answer)\n",
+    )
+    .unwrap();
     assert_eq!(
         program.tokens,
         vec![
-            Token::Push(Value::Text("console".to_owned())),
+            Token::Push(Value::Text("terminal".to_owned())),
             Token::BindFound {
-                name: "console".to_owned(),
+                name: "terminal".to_owned(),
                 arguments: 1,
             },
             Token::Push(Value::Integer(40)),
             Token::Push(Value::Integer(2)),
             Token::Add,
             Token::Store("answer".to_owned()),
-            Token::LoadIdentity("console".to_owned()),
+            Token::LoadIdentity("terminal".to_owned()),
             Token::Load("answer".to_owned()),
             Token::ObjectCall {
                 method: "println".to_owned(),
@@ -44,7 +45,7 @@ fn compiles_explicit_object_registry_calls() {
     }));
     assert!(compile("objects.create(\"core.text\", \"one\")").is_err());
     assert!(compile("io.println(\"old\")").is_err());
-    let discovered = compile("aaa = object.find(\"console\")\naaa.println(\"hello\")").unwrap();
+    let discovered = compile("aaa = object.find(\"terminal\")\naaa.println(\"hello\")").unwrap();
     assert!(discovered.tokens.contains(&Token::BindFound {
         name: "aaa".to_owned(),
         arguments: 1,
@@ -53,8 +54,8 @@ fn compiles_explicit_object_registry_calls() {
         method: "println".to_owned(),
         arguments: 1,
     }));
-    assert!(compile("object.call(\"console\", \"print\")").is_err());
-    assert!(compile("object.console()").is_err());
+    assert!(compile("object.call(\"terminal\", \"print\")").is_err());
+    assert!(compile("object.terminal()").is_err());
     assert!(compile("missing_call()").is_ok());
 }
 
@@ -62,14 +63,14 @@ fn compiles_explicit_object_registry_calls() {
 fn compiles_loop_and_condition() {
     let source = r#"
 count = 0
-console = object.find("console")
+terminal = object.find("terminal")
 while count < 3 {
     count++
 }
 if count == 3 {
-    console.println("ok")
+    terminal.println("ok")
 } else {
-    console.println("bad")
+    terminal.println("bad")
 }
 "#;
     let program = compile(source).unwrap();
@@ -98,12 +99,12 @@ fn reports_invalid_statement() {
 fn compiles_extended_control_flow() {
     let source = r#"
 value = 10 % 3
-console = object.find("console")
+terminal = object.find("terminal")
 value--
 if false && missing {
-    console.println("bad")
+    terminal.println("bad")
 } else if true or missing {
-    console.println(value)
+    terminal.println(value)
 }
 while value < 10 {
     value++
@@ -144,12 +145,12 @@ fn rejects_loop_control_outside_loop() {
 fn compiles_collections_indexing_and_length() {
     let source = r#"
 items = [1, 2, 3]
-console = object.find("console")
+terminal = object.find("terminal")
 items[0] = 10
 user = { name: "Ada", age: 18 }
 user["age"] = 19
 total = #items + #user
-console.println(items[0] + user["age"])
+terminal.println(items[0] + user["age"])
 "#;
     let program = compile(source).unwrap();
     assert!(program.tokens.contains(&Token::MakeArray(3)));
@@ -231,7 +232,7 @@ fn interactive_compilation_echoes_expressions_but_not_assignments() {
     assert_eq!(
         expression.tokens,
         vec![
-            Token::LoadIdentity("console".to_owned()),
+            Token::LoadIdentity("terminal".to_owned()),
             Token::Load("answer".to_owned()),
             Token::Push(Value::Integer(1)),
             Token::Add,

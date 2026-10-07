@@ -5,11 +5,11 @@ use super::*;
 #[test]
 fn assignment_copies_value_into_an_independent_object() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm
         .create_process(
             &compile(
-                "console = object.find(\"console\")\nitem = object.create(\"core.text\", \"one\")\ncopy = item\nconsole.println(copy == item)\nconsole.println(copy.value)",
+                "terminal = object.find(\"terminal\")\nitem = object.create(\"core.text\", \"one\")\ncopy = item\nterminal.println(copy == item)\nterminal.println(copy.value)",
             )
             .unwrap(),
         )
@@ -29,7 +29,7 @@ fn assignment_and_explicit_core_value_creation_bind_the_same_kind_of_object() {
 x = 46
 note = object.create("core.value", 42)
 hex_text = "00000000000000000000000000000001"
-aaa = object.find("console")
+aaa = object.find("terminal")
 aaa.println(x + 1)
 aaa.println(note + 1)
 aaa.println(x.type)
@@ -37,11 +37,11 @@ aaa.println(note.type)
 aaa.println(x.value)
 aaa.println(note.value)
 aaa.println(hex_text.value)
-aaa.println("named console object")
+aaa.println("named terminal object")
 "#;
     let program = compile(source).unwrap();
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm.create_process(&program).unwrap();
     assert_eq!(
         vm.run(process, 200).unwrap().output,
@@ -53,7 +53,7 @@ aaa.println("named console object")
             "46",
             "42",
             "00000000000000000000000000000001",
-            "named console object"
+            "named terminal object"
         ]
     );
     let state = vm.process_state(process).unwrap();
@@ -68,20 +68,20 @@ aaa.println("named console object")
     }
     assert_eq!(vm.variable(process, "x"), Ok(Value::Integer(46)));
     assert_eq!(vm.variable(process, "note"), Ok(Value::Integer(42)));
-    let console = vm.manager().read(context, process).unwrap().links()["console"];
-    assert_eq!(state.variables["aaa"], console);
+    let terminal = vm.manager().read(context, process).unwrap().links()["terminal"];
+    assert_eq!(state.variables["aaa"], terminal);
     assert_eq!(
-        vm.manager().inspect(context, console).unwrap().type_id,
-        CORE_CONSOLE_TYPE
+        vm.manager().inspect(context, terminal).unwrap().type_id,
+        CORE_TERMINAL_TYPE
     );
 }
 
 #[derive(Debug, Default)]
-struct RenderConsole {
+struct RenderTerminal {
     frames: Mutex<Vec<Vec<u8>>>,
 }
 
-impl ConsoleProvider for RenderConsole {
+impl TerminalProvider for RenderTerminal {
     fn println(&self, _text: &str) -> Result<(), String> {
         Ok(())
     }
@@ -93,16 +93,16 @@ impl ConsoleProvider for RenderConsole {
 }
 
 #[test]
-fn transient_console_render_batches_process_state_without_creating_effects() {
+fn transient_terminal_output_batches_process_state_without_creating_effects() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-    let driver = Arc::new(RenderConsole::default());
-    let vm = VirtualMachine::with_console(manager.clone(), console, driver.clone()).unwrap();
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let driver = Arc::new(RenderTerminal::default());
+    let vm = VirtualMachine::with_terminal(manager.clone(), terminal, driver.clone()).unwrap();
     let process = vm
         .create_process(
             &compile(
-                "console = object.find(\"console\")\nconsole.render(\"frame 1\")\nconsole.render(\"frame 2\")",
+                "terminal = object.find(\"terminal\")\nframe_one = \"frame 1\"\nframe_two = \"frame 2\"\nterminal.output(frame_one.utf8_bytes())\nterminal.output(frame_two.utf8_bytes())",
             )
             .unwrap(),
         )
@@ -181,7 +181,14 @@ impl ObjectProvider for ByteTerminal {
 #[test]
 fn arbitrary_binary_output_capabilities_use_the_ephemeral_provider_path() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager.clone());
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let vm = VirtualMachine::with_terminal_backend(
+        manager.clone(),
+        terminal,
+        Arc::new(RenderTerminal::default()),
+    )
+    .unwrap();
     let provider = Arc::new(ByteTerminal::default());
     vm.register_provider(provider.clone()).unwrap();
     let mut program = compile(
@@ -215,9 +222,7 @@ fn arbitrary_binary_output_capabilities_use_the_ephemeral_provider_path() {
 #[test]
 fn terminal_exposes_only_the_terminal_object_api() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let vm = vm_with_console(manager.clone());
-    vm.register_provider(Arc::new(ByteTerminal::default()))
-        .unwrap();
+    let vm = vm_with_terminal(manager.clone());
     let process = vm
         .create_process(
             &compile(
@@ -230,6 +235,10 @@ fn terminal_exposes_only_the_terminal_object_api() {
     let descriptor = format!("{:?}", vm.variable(process, "terminal_descriptor").unwrap());
     let types = format!("{:?}", vm.variable(process, "all_types").unwrap());
     assert!(descriptor.contains("core.terminal"), "{descriptor}");
+    assert!(
+        !types.contains("core.console"),
+        "old Console Type was retained: {types}"
+    );
     assert!(!types.contains("core.terminal_session"), "{types}");
     let Value::Array(capabilities) = vm.variable(process, "terminal_capabilities").unwrap() else {
         panic!("expected Terminal capability list");
@@ -246,7 +255,7 @@ fn terminal_exposes_only_the_terminal_object_api() {
 #[test]
 fn kernel_terminal_service_remains_the_root_when_child_terminals_exist() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
-    let _first_vm = vm_with_console(manager.clone());
+    let _first_vm = vm_with_terminal(manager.clone());
     let system = AccessContext::new(SYSTEM_SUBJECT);
     let root = manager
         .query(system, &ObjectQuery::new().with_type(CORE_TERMINAL_TYPE))
@@ -268,7 +277,7 @@ fn kernel_terminal_service_remains_the_root_when_child_terminals_exist() {
     transaction.expect(root.id, root.version).create(child);
     manager.commit(transaction).unwrap();
 
-    let vm = vm_with_console(manager);
+    let vm = vm_with_terminal(manager);
     let process = vm
         .create_process(&compile("terminal = object.find(\"terminal\")").unwrap())
         .unwrap();
@@ -299,12 +308,12 @@ impl SnapshotBackend for FaultBackend {
 }
 
 #[derive(Debug)]
-struct FaultingConsole {
+struct FaultingTerminal {
     backend: Arc<FaultBackend>,
     deliveries: AtomicUsize,
 }
 
-impl ConsoleProvider for FaultingConsole {
+impl TerminalProvider for FaultingTerminal {
     fn println(&self, _text: &str) -> Result<(), String> {
         self.deliveries.fetch_add(1, Ordering::SeqCst);
         self.backend.fail_next.store(true, Ordering::SeqCst);
@@ -313,18 +322,18 @@ impl ConsoleProvider for FaultingConsole {
 }
 
 #[test]
-fn console_output_has_a_durable_effect_and_is_not_repeated_after_completion_failure() {
+fn terminal_output_has_a_durable_effect_and_is_not_repeated_after_completion_failure() {
     let backend = Arc::new(FaultBackend::default());
     let manager = Arc::new(InMemoryObjectManager::open_with_backend(backend.clone()).unwrap());
-    let console =
-        VirtualMachine::publish_console(&manager, &Value::Record(BTreeMap::new())).unwrap();
-    let driver = Arc::new(FaultingConsole {
+    let terminal =
+        VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+    let driver = Arc::new(FaultingTerminal {
         backend,
         deliveries: AtomicUsize::new(0),
     });
-    let vm = VirtualMachine::with_console(manager.clone(), console, driver.clone()).unwrap();
+    let vm = VirtualMachine::with_terminal(manager.clone(), terminal, driver.clone()).unwrap();
     let program =
-        compile("console = object.find(\"console\")\nconsole.println(\"hello\")").unwrap();
+        compile("terminal = object.find(\"terminal\")\nterminal.println(\"hello\")").unwrap();
     let call = program
         .tokens
         .iter()
