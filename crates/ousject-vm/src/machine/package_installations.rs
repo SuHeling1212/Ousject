@@ -2617,7 +2617,7 @@ impl VirtualMachine {
                     )
                 {
                     return Err(VmError::Provider(
-                        "Package Module is loaded in an active Terminal Session".to_owned(),
+                        "Package Module is loaded in an active Terminal".to_owned(),
                     ));
                 }
             }

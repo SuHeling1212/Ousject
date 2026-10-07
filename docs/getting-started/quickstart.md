@@ -94,8 +94,8 @@ TF 是预发布格式，目前不承诺跨版本兼容。
 首次启动会初始化最高本地用户 `local` 并要求设置密码。之后启动需要登录；普通命令通过
 `--session <token>` 使用认证会话。密码不应以明文持久化。
 
-Shell 输入 `exit` 只退出当前前端，保留该用户的持久 Terminal Session；下次登录会重新连接，
-之前定义的变量仍可使用。输入 `close-session` 才会关闭并清理当前会话。
+Shell 输入 `exit` 只退出当前前端，保留该用户的持久 Shell 子 Terminal 和 Process；下次登录会
+重新连接，之前定义的变量仍可使用。输入 `close-terminal` 才会关闭当前 Shell Terminal。
 
 `system/` 中的程序属于 Praxis 用户空间。它们通过 Object 能力访问系统服务，不直接调用
 宿主文件 API 或 Rust CLI API。重复安装未变化的程序会复用现有 Program；替换后不再引用的旧

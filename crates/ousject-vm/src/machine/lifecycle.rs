@@ -201,7 +201,7 @@ impl VirtualMachine {
                 state.status,
                 ProcessStatus::Halted | ProcessStatus::Terminated | ProcessStatus::Failed
             ) {
-                self.wake_process_waiters(process.id)?;
+                self.notify_process_ended(process.id)?;
             }
             if state.status == ProcessStatus::Ready {
                 ready.push(process.id);
@@ -431,6 +431,7 @@ impl VirtualMachine {
                 output: Vec::new(),
             });
         }
+        self.providers.seal().map_err(VmError::from)?;
         let owner = ObjectId::new();
         let Some(mut lease) = self.claim_worker_lease(process, owner)? else {
             let state = self.process_state(process)?;

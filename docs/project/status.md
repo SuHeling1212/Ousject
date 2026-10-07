@@ -33,10 +33,15 @@
 | Module Registry | 已实现 | services 测试 |
 | 本地 Package 生命周期 | 已实现核心流程 | package lifecycle 测试 |
 | Console 兼容 API | 已实现 | CLI Console Provider 与 durable effect/输入测试 |
-| Terminal 字节流与 VT 屏幕子集 | 已实现第一阶段 | `HostTerminalProvider`、`TerminalScreen` 单测与 binary ephemeral VM e2e |
+| Terminal 字节流、VT 屏幕子集与 Child Terminal 路由 | 已实现宿主版子集 | `HostTerminalProvider`、`TerminalScreen`、CLI 路由测试与 Terminal Shell e2e |
 | Physical Display Provider | 未实现 | tty 不再作为 `device.display` 发布；无 framebuffer driver |
-| Keyboard/Network/Block Storage Provider | 各自旧 API 可用 | CLI hardware Provider 与相关测试 |
-| 跨设备统一 `input/output(Bytes)` API | 未完成 | 目前仅 Terminal 使用通用字节流方法 |
+| Terminal Binary `input/output(Bytes)` | 已实现 | Host Terminal raw/canonical input 与 screen output；ephemeral |
+| Network Binary `input/output(Bytes)` | 已实现 | TCP stream；网络收发通过 durable Effect |
+| Block Storage Binary `input/output(Bytes)` | 已实现 | 宿主文件顺序读写；读写通过 durable Effect，并保留 block API |
+| Keyboard Provider | 已实现高层事件 API | 宿主只提供按键事件，不伪造 HID/USB Bytes；`capture`、`next_event`、`poll_event(s)` |
+| Device 能力清单 | 已实现动态交集 | 运行时 `.capabilities` 取 Object 授权、Type 描述符和实际 Provider 能力的交集 |
+| User-space Driver 基础路径 | 可用现有机制表达，非独立框架 | Process、Capability、Package、普通 Object 与设备 Provider；尚无通用 Driver Manager/自动重启策略 |
+| Native Provider Registry | 已实现启动期封闭 | `VirtualMachine::register_provider` 只在第一次执行用户 Process 前可用；之后 Registry seal |
 | 裸机启动与真实驱动 | 未实现 | 不在当前宿主系统边界内 |
 
 ## Praxis 当前可验证能力
@@ -53,8 +58,9 @@
 - 子 Process、Channel、Timer、Console 输入和系统服务。
 - Terminal 字节输入/输出、VT 子集屏幕状态与 alternate-screen 快照。
 
-这不代表此前设计稿中的每种语法都已实现。完整语言参考将在后续文档批次中从 parser 和
-端到端测试重新生成。
+语法子集和运行时 API 以 [Praxis 语法参考](../reference/praxis-syntax.md)、
+[Praxis API 总表](../reference/praxis-api.md)、parser/VM 实现及端到端测试为准；文档不会把
+设计草案当作已实现能力。
 
 ## 运行与安全边界
 
@@ -79,18 +85,26 @@
 
 Ousject Process 不是 Linux Process。它是由 VM 执行并通过 OMS 持久化的 Object。
 
-## 明确未完成
+## 明确未完成或有意保留的边界
 
 - Bootloader、固件入口和 CPU 初始化；
 - 页表、物理/虚拟内存管理与独立分配器；
 - 中断、抢占式调度和多核内核启动；
 - PCI、USB、ACPI 等总线枚举；
 - 独立网络协议栈与真实硬件驱动；
-- 完整 VT100/xterm 兼容（本阶段只实现常见 TUI 序列子集）；
-- Keyboard、Network Endpoint、Block Storage 的统一 `input/output(Bytes)` 接口和驱动迁移；
-- 子 Terminal attach/PTY 与 screen 持久化；
+- 完整 VT100/xterm 兼容（仅实现常见 TUI 序列子集；屏幕缓冲区不持久化）；
+- 宿主 Keyboard 不提供 Binary `input/output`：OS 仅暴露高层键事件，故不声称有 HID/USB 字节流；
+- 物理 Display Provider、像素渲染后端与真实硬件驱动；
+- 通用 User-space Driver Manager、健康监控和自动重启策略；驱动可用普通 Process 与 Package
+  表达，但目前没有专门生命周期框架；
 - 稳定的持久格式、语言 ABI、Package 格式和 public API；
 - 发行版级安装、升级、签名、公证和兼容策略。
+
+Provider、Type 描述符和内建执行机制在用户空间执行开始后不可扩展。`types.register` 只登记
+Praxis 可用的普通 Type 描述信息，不会注册 Rust Provider 或 native Type 实现。Package、Market
+和 Praxis `import` 只处理 Praxis/数据资源，不加载 Rust 动态库，也不能修改 VM、OMS 或 Provider
+Registry。用户空间 Driver 可以持有获授权的 Device Object、运行在独立 Process 中，并发布普通
+Object 作为语义状态/服务入口；Driver 失败不会改变 Registry，但由上层策略决定是否重启。
 
 ## 验收
 
@@ -104,8 +118,9 @@ Ousject Process 不是 Linux Process。它是由 VM 执行并通过 OMS 持久�
 它们要求格式检查、严格 Clippy、全部 Workspace 测试和 CLI 系统冒烟测试同时通过。单独
 一份文档或演示成功不能替代这些验收。
 
-## 文档状态
+## 相关文档
 
-2026-10-07 开始按新的信息架构重写文档。当前已完成入口、快速开始、构建验证、架构、
-对象模型、持久化和本状态页。Praxis、CLI、Object API、Package、Runtime internals、
-性能与 Roadmap 仍在后续批次中重写。
+- [快速开始](../getting-started/quickstart.md)
+- [系统架构](../concepts/architecture.md)
+- [Praxis 语法](../reference/praxis-syntax.md)
+- [Praxis API](../reference/praxis-api.md)

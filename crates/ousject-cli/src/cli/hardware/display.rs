@@ -1,5 +1,6 @@
 use super::super::{
-    BTreeMap, BTreeSet, Mutex, ObjectId, ObjectProvider, ProviderError, ProviderOutcome, Value,
+    BTreeMap, BTreeSet, EffectRecoveryPolicy, Mutex, ObjectId, ObjectProvider, ProviderError,
+    ProviderOutcome, Value,
 };
 
 #[derive(Debug)]
@@ -105,7 +106,15 @@ impl<P: ObjectProvider> ObjectProvider for CachedProvider<P> {
         self.inner.process_ended(process);
     }
 
+    fn object_retired(&self, object: ObjectId) {
+        self.inner.object_retired(object);
+    }
+
     fn capabilities(&self) -> BTreeSet<String> {
         self.inner.capabilities()
+    }
+
+    fn effect_recovery_policy(&self, capability: &str) -> EffectRecoveryPolicy {
+        self.inner.effect_recovery_policy(capability)
     }
 }

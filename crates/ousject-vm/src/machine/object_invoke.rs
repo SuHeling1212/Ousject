@@ -3,6 +3,22 @@
 use super::*;
 
 impl VirtualMachine {
+    fn runtime_type_descriptor_value(&self, descriptor: &TypeDescriptor) -> Value {
+        let mut value = type_descriptor_value(descriptor);
+        if let Value::Record(fields) = &mut value {
+            fields.insert(
+                "capabilities".to_owned(),
+                Value::Array(
+                    self.effective_domain_capabilities(descriptor.id, descriptor)
+                        .into_iter()
+                        .map(Value::Text)
+                        .collect(),
+                ),
+            );
+        }
+        value
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn invoke_object(
         &self,
@@ -18,55 +34,44 @@ impl VirtualMachine {
             .require_capability(self.context, object, Capability::Invoke)?;
         let header = self.manager.inspect(self.context, object)?;
         match (header.type_id, capability, arguments) {
-            (CORE_TERMINAL_TYPE, "open", []) => Ok((
+            (CORE_TERMINAL_TYPE, "shell", []) => Ok((
                 Value::Text(
-                    self.open_terminal_session(current_state.subject)?
+                    self.open_terminal_shell(object, current_state.subject, transaction)?
                         .to_string(),
                 ),
                 None,
             )),
-            (CORE_TERMINAL_SESSION_TYPE, "submit", [Value::Text(source)]) => Ok((
+            (CORE_TERMINAL_TYPE, "submit", [Value::Text(source)]) => Ok((
                 Value::Text(
-                    self.terminal_session_submit(
-                        object,
-                        current_state.subject,
-                        source,
-                        transaction,
-                    )?
-                    .to_string(),
-                ),
-                None,
-            )),
-            (CORE_TERMINAL_SESSION_TYPE, "process", []) => Ok((
-                Value::Text(
-                    self.terminal_session_process(object, current_state.subject)?
+                    self.terminal_submit(object, current_state.subject, source, transaction)?
                         .to_string(),
                 ),
                 None,
             )),
-            (CORE_TERMINAL_SESSION_TYPE, "history", []) => Ok((
-                self.terminal_session_history(object, current_state.subject)?,
+            (CORE_TERMINAL_TYPE, "process", []) => Ok((
+                Value::Text(
+                    self.terminal_process(object, current_state.subject)?
+                        .to_string(),
+                ),
                 None,
             )),
-            (CORE_TERMINAL_SESSION_TYPE, "pending_input", []) => Ok((
-                self.terminal_session_pending_input(object, current_state.subject)?,
+            (CORE_TERMINAL_TYPE, "history", []) => {
+                Ok((self.terminal_history(object, current_state.subject)?, None))
+            }
+            (CORE_TERMINAL_TYPE, "pending_input", []) => Ok((
+                self.terminal_pending_input(object, current_state.subject)?,
                 None,
             )),
-            (CORE_TERMINAL_SESSION_TYPE, "save_input", [Value::Text(source)]) => {
-                self.terminal_session_save_input(
-                    object,
-                    current_state.subject,
-                    source,
-                    transaction,
-                )?;
+            (CORE_TERMINAL_TYPE, "save_input", [Value::Text(source)]) => {
+                self.terminal_save_input(object, current_state.subject, source, transaction)?;
                 Ok((Value::Null, None))
             }
             (
-                CORE_TERMINAL_SESSION_TYPE,
+                CORE_TERMINAL_TYPE,
                 "update_size",
                 [Value::Integer(columns), Value::Integer(rows)],
             ) => {
-                self.terminal_session_update_size(
+                self.terminal_update_size(
                     object,
                     current_state.subject,
                     *columns,
@@ -75,19 +80,13 @@ impl VirtualMachine {
                 )?;
                 Ok((Value::Null, None))
             }
-            (CORE_TERMINAL_SESSION_TYPE, "cancel", []) => {
-                self.terminal_session_cancel(object, current_state.subject, transaction)?;
+            (CORE_TERMINAL_TYPE, "cancel", []) => {
+                self.terminal_cancel(object, current_state.subject, transaction)?;
                 Ok((Value::Null, None))
             }
-            (CORE_TERMINAL_SESSION_TYPE, "close", []) => {
+            (CORE_TERMINAL_TYPE, "close", []) => {
                 let owner = current_state.subject;
-                self.terminal_session_close(
-                    current_process,
-                    current_state,
-                    object,
-                    owner,
-                    transaction,
-                )?;
+                self.terminal_close(current_process, current_state, object, owner, transaction)?;
                 Ok((Value::Null, None))
             }
             (
@@ -868,7 +867,7 @@ impl VirtualMachine {
                     self.manager
                         .types()?
                         .iter()
-                        .map(type_descriptor_value)
+                        .map(|descriptor| self.runtime_type_descriptor_value(descriptor))
                         .collect(),
                 ),
                 None,
@@ -945,7 +944,7 @@ impl VirtualMachine {
                 Ok((Value::Text(format!("{:?}", program.tokens)), None))
             }
             (CORE_TYPE_REGISTRY_TYPE, "descriptor", [Value::Text(name)]) => Ok((
-                type_descriptor_value(&self.manager.type_by_name(name)?),
+                self.runtime_type_descriptor_value(&self.manager.type_by_name(name)?),
                 None,
             )),
             (CORE_PROVIDER_REGISTRY_TYPE, "providers", []) => {

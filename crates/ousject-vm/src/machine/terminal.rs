@@ -3,43 +3,73 @@
 use super::*;
 
 impl VirtualMachine {
-    pub(super) fn open_terminal_session(&self, owner: SubjectId) -> Result<ObjectId, VmError> {
-        for header in self.manager.query(
+    /// Opens or reuses the user's shell state on a child Terminal Object.
+    pub(super) fn open_terminal_shell(
+        &self,
+        parent_terminal: ObjectId,
+        owner: SubjectId,
+        transaction: &mut Transaction,
+    ) -> Result<ObjectId, VmError> {
+        for terminal in self.manager.query(
             self.context,
-            &ObjectQuery::new().with_type(CORE_TERMINAL_SESSION_TYPE),
+            &ObjectQuery::new().with_type(CORE_TERMINAL_TYPE),
         )? {
-            let Value::Record(fields) = self.manager.value(self.context, header.id)? else {
+            if terminal.parent_id != Some(parent_terminal) {
+                continue;
+            }
+            let Value::Record(fields) = self.manager.value(self.context, terminal.id)? else {
                 continue;
             };
             if fields.get("owner") == Some(&Value::Text(owner.to_string()))
                 && fields.get("active") == Some(&Value::Bool(true))
             {
-                return Ok(header.id);
+                return Ok(terminal.id);
             }
         }
 
-        let session = ObjectId::new();
+        let provider = self.providers.get(CORE_TERMINAL_TYPE)?;
+        let parent_state = self.manager.value(self.context, parent_terminal)?;
+        let parent_version = self.manager.inspect(self.context, parent_terminal)?.version;
+        let created = provider.invoke(
+            parent_terminal,
+            &parent_state,
+            "create",
+            &[],
+            ObjectId::new(),
+        )?;
+        let mut terminal_request = created
+            .created
+            .into_iter()
+            .next()
+            .ok_or_else(|| invalid_state("Terminal Provider did not create a child"))?;
+        let terminal = terminal_request.id;
+        let Value::Record(mut fields) = Value::decode(&terminal_request.state)? else {
+            return Err(invalid_state("Terminal Provider state is not a Record"));
+        };
         let program_id = ObjectId::new();
         let process = ObjectId::new();
-        let program = Program {
-            tokens: vec![Token::Halt],
-        };
-        let session_value = Value::Record(BTreeMap::from([
+        fields.extend([
             ("owner".to_owned(), Value::Text(owner.to_string())),
             ("program".to_owned(), Value::Text(program_id.to_string())),
             ("process".to_owned(), Value::Text(process.to_string())),
             ("history".to_owned(), Value::Array(Vec::new())),
             ("pending_input".to_owned(), Value::Text(String::new())),
-            ("columns".to_owned(), Value::Null),
-            ("rows".to_owned(), Value::Null),
             ("active".to_owned(), Value::Bool(true)),
             ("module_instances".to_owned(), Value::Array(Vec::new())),
-        ]));
-        let session_request =
-            CreateObject::new(CORE_TERMINAL_SESSION_TYPE, session_value.encode()?).with_id(session);
+            (
+                "parent_terminal".to_owned(),
+                Value::Text(parent_terminal.to_string()),
+            ),
+        ]);
+        terminal_request.state = Value::Record(fields).encode()?;
+        terminal_request.capabilities = self.manager.type_by_id(CORE_TERMINAL_TYPE)?.capabilities;
+        transaction.expect(parent_terminal, parent_version);
+        let program = Program {
+            tokens: vec![Token::Halt],
+        };
         let program_request = CreateObject::new(PROGRAM_TYPE, program.encode()?)
             .with_id(program_id)
-            .with_parent(session);
+            .with_parent(terminal);
         let mut variables = self.kernel_services.clone();
         if let Some(console) = self.console_provider {
             variables.insert("console".to_owned(), console);
@@ -64,7 +94,7 @@ impl VirtualMachine {
         let mut process_request =
             CreateObject::new(PROCESS_TYPE, encode_process_state(&process_state)?)
                 .with_id(process)
-                .with_parent(session)
+                .with_parent(terminal)
                 .with_link("program", program_id)
                 .with_link("process", process);
         if let Some(console) = self.console_provider {
@@ -73,60 +103,55 @@ impl VirtualMachine {
         for (name, service) in &self.kernel_services {
             process_request = process_request.with_link(name.clone(), *service);
         }
-
-        let mut transaction = self.manager.begin(self.context);
         transaction
-            .create(session_request)
+            .create(terminal_request)
             .create(program_request)
             .create(process_request);
-        self.manager.commit(transaction)?;
-        Ok(session)
+        Ok(terminal)
     }
 
-    pub(super) fn terminal_session_process(
+    pub(super) fn terminal_process(
         &self,
-        session: ObjectId,
+        terminal: ObjectId,
         owner: SubjectId,
     ) -> Result<ObjectId, VmError> {
-        let fields = self.terminal_session_fields(session)?;
-        Self::validate_terminal_session_owner(&fields, owner)?;
+        let fields = self.terminal_fields(terminal)?;
+        Self::validate_terminal_owner(&fields, owner)?;
         terminal_field_id(&fields, "process")
     }
 
-    pub(super) fn terminal_session_history(
+    pub(super) fn terminal_history(
         &self,
-        session: ObjectId,
+        terminal: ObjectId,
         owner: SubjectId,
     ) -> Result<Value, VmError> {
-        let fields = self.terminal_session_fields(session)?;
-        Self::validate_terminal_session_owner(&fields, owner)?;
+        let fields = self.terminal_fields(terminal)?;
+        Self::validate_terminal_owner(&fields, owner)?;
         fields
             .get("history")
             .cloned()
-            .ok_or_else(|| invalid_state("Terminal Session has no history"))
+            .ok_or_else(|| invalid_state("Terminal has no history"))
     }
 
-    pub(super) fn terminal_session_submit(
+    pub(super) fn terminal_submit(
         &self,
-        session: ObjectId,
+        terminal: ObjectId,
         owner: SubjectId,
         source: &str,
         transaction: &mut Transaction,
     ) -> Result<ObjectId, VmError> {
-        let session_view = self.manager.read(self.context, session)?;
-        let mut fields = terminal_record(session_view.state())?;
-        Self::validate_terminal_session_owner(&fields, owner)?;
+        let terminal_view = self.manager.read(self.context, terminal)?;
+        let mut fields = terminal_record(terminal_view.state())?;
+        Self::validate_terminal_owner(&fields, owner)?;
         if fields.get("active") != Some(&Value::Bool(true)) {
-            return Err(VmError::TypeError("Terminal Session is closed"));
+            return Err(VmError::TypeError("Terminal is closed"));
         }
         let process = terminal_field_id(&fields, "process")?;
         let program_id = terminal_field_id(&fields, "program")?;
         let process_view = self.manager.read(self.context, process)?;
         let mut process_state = decode_process_state(process_view.state())?;
         if process_state.subject != owner {
-            return Err(VmError::TypeError(
-                "Terminal Session Process owner mismatch",
-            ));
+            return Err(VmError::TypeError("Terminal Process owner mismatch"));
         }
         if matches!(
             process_state.status,
@@ -135,9 +160,7 @@ impl VirtualMachine {
                 | ProcessStatus::Waiting
                 | ProcessStatus::Suspended
         ) {
-            return Err(VmError::TypeError(
-                "Terminal Session Process is still active",
-            ));
+            return Err(VmError::TypeError("Terminal Process is still active"));
         }
         if process_state.status == ProcessStatus::Failed {
             process_state.stack.clear();
@@ -167,7 +190,7 @@ impl VirtualMachine {
         process_state.ended_at_unix_ms = None;
 
         let Some(Value::Array(mut history)) = fields.remove("history") else {
-            return Err(invalid_state("Terminal Session history is malformed"));
+            return Err(invalid_state("Terminal history is malformed"));
         };
         history.push(Value::Text(sanitize_terminal_history_source(source)));
         if history.len() > 100 {
@@ -176,7 +199,7 @@ impl VirtualMachine {
         fields.insert("history".to_owned(), Value::Array(history));
         fields.insert("pending_input".to_owned(), Value::Text(String::new()));
         self.stage_terminal_module_instances(
-            session,
+            terminal,
             process,
             owner,
             &mut fields,
@@ -184,10 +207,10 @@ impl VirtualMachine {
             transaction,
         )?;
         transaction
-            .expect(session, session_view.header().version)
+            .expect(terminal, terminal_view.header().version)
             .expect(process, process_view.header().version)
             .expect(program_id, program_view.header().version)
-            .update_state(session, Value::Record(fields).encode()?)
+            .update_state(terminal, Value::Record(fields).encode()?)
             .update_state(process, encode_process_state(&process_state)?)
             .update_state(program_id, program.encode()?);
         Ok(process)
@@ -195,7 +218,7 @@ impl VirtualMachine {
 
     fn stage_terminal_module_instances(
         &self,
-        session: ObjectId,
+        terminal: ObjectId,
         process: ObjectId,
         owner: SubjectId,
         fields: &mut BTreeMap<String, Value>,
@@ -252,7 +275,7 @@ impl VirtualMachine {
             let instance = ObjectId::new();
             let instance_fields = BTreeMap::from([
                 ("module".to_owned(), Value::Text(module.to_string())),
-                ("session".to_owned(), Value::Text(session.to_string())),
+                ("terminal".to_owned(), Value::Text(terminal.to_string())),
                 ("process".to_owned(), Value::Text(process.to_string())),
                 ("owner".to_owned(), Value::Text(owner.to_string())),
                 ("status".to_owned(), Value::Text("active".to_owned())),
@@ -264,11 +287,11 @@ impl VirtualMachine {
                         Value::Record(instance_fields).encode()?,
                     )
                     .with_id(instance)
-                    .with_parent(session)
+                    .with_parent(terminal)
                     .with_grant(owner, Capability::Inspect)
                     .with_grant(owner, Capability::ViewValue),
                 )
-                .set_link(*module, format!("instance:{session}"), instance);
+                .set_link(*module, format!("instance:{terminal}"), instance);
             instance_ids.insert(instance);
         }
         fields.insert(
@@ -283,20 +306,20 @@ impl VirtualMachine {
         Ok(())
     }
 
-    pub(super) fn terminal_session_close(
+    pub(super) fn terminal_close(
         &self,
         current_process: ObjectId,
         current_state: &mut ProcessState,
-        session: ObjectId,
+        terminal: ObjectId,
         owner: SubjectId,
         transaction: &mut Transaction,
     ) -> Result<(), VmError> {
-        let session_view = self.manager.read(self.context, session)?;
-        if session_view.header().type_id != CORE_TERMINAL_SESSION_TYPE {
-            return Err(VmError::TypeError("Object is not a Terminal Session"));
+        let terminal_view = self.manager.read(self.context, terminal)?;
+        if terminal_view.header().type_id != CORE_TERMINAL_TYPE {
+            return Err(VmError::TypeError("Object is not a Terminal"));
         }
-        let mut fields = terminal_record(session_view.state())?;
-        Self::validate_terminal_session_owner(&fields, owner)?;
+        let mut fields = terminal_record(terminal_view.state())?;
+        Self::validate_terminal_owner(&fields, owner)?;
         if fields.get("active") != Some(&Value::Bool(true)) {
             return Ok(());
         }
@@ -310,9 +333,7 @@ impl VirtualMachine {
             decode_process_state(process_view.state())?
         };
         if process_state.subject != owner {
-            return Err(VmError::TypeError(
-                "Terminal Session Process owner mismatch",
-            ));
+            return Err(VmError::TypeError("Terminal Process owner mismatch"));
         }
         if process != current_process
             && matches!(
@@ -324,7 +345,7 @@ impl VirtualMachine {
             )
         {
             return Err(VmError::TypeError(
-                "cannot close a Terminal Session while its Process is active",
+                "cannot close a Terminal while its Process is active",
             ));
         }
 
@@ -355,7 +376,7 @@ impl VirtualMachine {
                 .read(AccessContext::new(SYSTEM_SUBJECT), module)?;
             transaction
                 .expect(module, module_view.header().version)
-                .remove_link(module, format!("instance:{session}"));
+                .remove_link(module, format!("instance:{terminal}"));
             instance_fields.insert("status".to_owned(), Value::Text("unloaded".to_owned()));
             transaction
                 .expect(instance_id, instance_view.header().version)
@@ -366,9 +387,9 @@ impl VirtualMachine {
         fields.insert("pending_input".to_owned(), Value::Text(String::new()));
         fields.insert("module_instances".to_owned(), Value::Array(Vec::new()));
         transaction
-            .expect(session, session_view.header().version)
+            .expect(terminal, terminal_view.header().version)
             .expect(process, process_view.header().version)
-            .update_state(session, Value::Record(fields).encode()?);
+            .update_state(terminal, Value::Record(fields).encode()?);
 
         process_state.status = ProcessStatus::Terminated;
         process_state.stack.clear();
@@ -394,42 +415,42 @@ impl VirtualMachine {
         Ok(())
     }
 
-    pub(super) fn terminal_session_save_input(
+    pub(super) fn terminal_save_input(
         &self,
-        session: ObjectId,
+        terminal: ObjectId,
         owner: SubjectId,
         source: &str,
         transaction: &mut Transaction,
     ) -> Result<(), VmError> {
-        let view = self.manager.read(self.context, session)?;
+        let view = self.manager.read(self.context, terminal)?;
         let mut fields = terminal_record(view.state())?;
-        Self::validate_terminal_session_owner(&fields, owner)?;
+        Self::validate_terminal_owner(&fields, owner)?;
         fields.insert(
             "pending_input".to_owned(),
             Value::Text(sanitize_terminal_history_source(source)),
         );
         transaction
-            .expect(session, view.header().version)
-            .update_state(session, Value::Record(fields).encode()?);
+            .expect(terminal, view.header().version)
+            .update_state(terminal, Value::Record(fields).encode()?);
         Ok(())
     }
 
-    pub(super) fn terminal_session_pending_input(
+    pub(super) fn terminal_pending_input(
         &self,
-        session: ObjectId,
+        terminal: ObjectId,
         owner: SubjectId,
     ) -> Result<Value, VmError> {
-        let fields = self.terminal_session_fields(session)?;
-        Self::validate_terminal_session_owner(&fields, owner)?;
+        let fields = self.terminal_fields(terminal)?;
+        Self::validate_terminal_owner(&fields, owner)?;
         fields
             .get("pending_input")
             .cloned()
-            .ok_or_else(|| invalid_state("Terminal Session has no pending input"))
+            .ok_or_else(|| invalid_state("Terminal has no pending input"))
     }
 
-    pub(super) fn terminal_session_update_size(
+    pub(super) fn terminal_update_size(
         &self,
-        session: ObjectId,
+        terminal: ObjectId,
         owner: SubjectId,
         columns: i64,
         rows: i64,
@@ -445,26 +466,26 @@ impl VirtualMachine {
             .ok()
             .filter(|value| *value > 0)
             .ok_or(VmError::TypeError("terminal rows must be from 1 to 65535"))?;
-        let view = self.manager.read(self.context, session)?;
+        let view = self.manager.read(self.context, terminal)?;
         let mut fields = terminal_record(view.state())?;
-        Self::validate_terminal_session_owner(&fields, owner)?;
+        Self::validate_terminal_owner(&fields, owner)?;
         fields.insert("columns".to_owned(), Value::Integer(i64::from(columns)));
         fields.insert("rows".to_owned(), Value::Integer(i64::from(rows)));
         transaction
-            .expect(session, view.header().version)
-            .update_state(session, Value::Record(fields).encode()?);
+            .expect(terminal, view.header().version)
+            .update_state(terminal, Value::Record(fields).encode()?);
         Ok(())
     }
 
-    pub(super) fn terminal_session_cancel(
+    pub(super) fn terminal_cancel(
         &self,
-        session: ObjectId,
+        terminal: ObjectId,
         owner: SubjectId,
         transaction: &mut Transaction,
     ) -> Result<(), VmError> {
-        let view = self.manager.read(self.context, session)?;
+        let view = self.manager.read(self.context, terminal)?;
         let mut fields = terminal_record(view.state())?;
-        Self::validate_terminal_session_owner(&fields, owner)?;
+        Self::validate_terminal_owner(&fields, owner)?;
         let process = terminal_field_id(&fields, "process")?;
         let process_view = self.manager.read(self.context, process)?;
         let mut process_state = decode_process_state(process_view.state())?;
@@ -478,28 +499,26 @@ impl VirtualMachine {
         process_state.ended_at_unix_ms = Some(unix_time_millis());
         fields.insert("pending_input".to_owned(), Value::Text(String::new()));
         transaction
-            .expect(session, view.header().version)
+            .expect(terminal, view.header().version)
             .expect(process, process_view.header().version)
-            .update_state(session, Value::Record(fields).encode()?)
+            .update_state(terminal, Value::Record(fields).encode()?)
             .update_state(process, encode_process_state(&process_state)?);
         Ok(())
     }
 
-    pub(super) fn interrupt_terminal_session(
+    pub(super) fn interrupt_terminal(
         &self,
-        session: ObjectId,
+        terminal: ObjectId,
         owner: SubjectId,
     ) -> Result<(), VmError> {
-        let session_view = self.manager.read(self.context, session)?;
-        let mut fields = terminal_record(session_view.state())?;
-        Self::validate_terminal_session_owner(&fields, owner)?;
+        let terminal_view = self.manager.read(self.context, terminal)?;
+        let mut fields = terminal_record(terminal_view.state())?;
+        Self::validate_terminal_owner(&fields, owner)?;
         let process = terminal_field_id(&fields, "process")?;
         let process_view = self.manager.read(self.context, process)?;
         let mut process_state = decode_process_state(process_view.state())?;
         if process_state.subject != owner {
-            return Err(VmError::TypeError(
-                "Terminal Session Process owner mismatch",
-            ));
+            return Err(VmError::TypeError("Terminal Process owner mismatch"));
         }
         process_state.status = ProcessStatus::Halted;
         process_state.stack.clear();
@@ -512,37 +531,32 @@ impl VirtualMachine {
         fields.insert("pending_input".to_owned(), Value::Text(String::new()));
         let mut transaction = self.manager.begin(self.context);
         transaction
-            .expect(session, session_view.header().version)
+            .expect(terminal, terminal_view.header().version)
             .expect(process, process_view.header().version)
-            .update_state(session, Value::Record(fields).encode()?)
+            .update_state(terminal, Value::Record(fields).encode()?)
             .update_state(process, encode_process_state(&process_state)?);
         self.manager.commit(transaction)?;
         self.notify_process_ended(process)?;
         Ok(())
     }
 
-    fn terminal_session_fields(
-        &self,
-        session: ObjectId,
-    ) -> Result<BTreeMap<String, Value>, VmError> {
-        let view = self.manager.read(self.context, session)?;
-        if view.header().type_id != CORE_TERMINAL_SESSION_TYPE {
-            return Err(VmError::TypeError("Object is not a Terminal Session"));
+    fn terminal_fields(&self, terminal: ObjectId) -> Result<BTreeMap<String, Value>, VmError> {
+        let view = self.manager.read(self.context, terminal)?;
+        if !matches!(view.header().type_id, CORE_TERMINAL_TYPE) {
+            return Err(VmError::TypeError("Object is not an interactive Terminal"));
         }
         let fields = terminal_record(view.state())?;
         Ok(fields)
     }
 
-    fn validate_terminal_session_owner(
+    fn validate_terminal_owner(
         fields: &BTreeMap<String, Value>,
         owner: SubjectId,
     ) -> Result<(), VmError> {
         if fields.get("owner") == Some(&Value::Text(owner.to_string())) {
             Ok(())
         } else {
-            Err(VmError::TypeError(
-                "Terminal Session belongs to another user",
-            ))
+            Err(VmError::TypeError("Terminal belongs to another user"))
         }
     }
 }
@@ -550,7 +564,7 @@ impl VirtualMachine {
 fn terminal_record(bytes: &[u8]) -> Result<BTreeMap<String, Value>, VmError> {
     match Value::decode(bytes)? {
         Value::Record(fields) => Ok(fields),
-        _ => Err(invalid_state("Terminal Session state is not a Record")),
+        _ => Err(invalid_state("Terminal state is not a Record")),
     }
 }
 
@@ -558,8 +572,8 @@ fn terminal_field_id(fields: &BTreeMap<String, Value>, name: &str) -> Result<Obj
     match fields.get(name) {
         Some(Value::Text(value)) => value
             .parse()
-            .map_err(|_| invalid_state("Terminal Session contains an invalid ObjectId")),
-        _ => Err(invalid_state("Terminal Session is missing an ObjectId")),
+            .map_err(|_| invalid_state("Terminal contains an invalid ObjectId")),
+        _ => Err(invalid_state("Terminal is missing an ObjectId")),
     }
 }
 

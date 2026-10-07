@@ -195,6 +195,10 @@ fn index_get(collection: &Value, index: &Value) -> Result<Value, VmError> {
             .nth(index_position(*index)?)
             .map(|character| Value::Text(character.to_string()))
             .ok_or(VmError::IndexOutOfBounds),
+        (Value::Bytes(value), Value::Integer(index)) => value
+            .get(index_position(*index)?)
+            .map(|byte| Value::Integer(i64::from(*byte)))
+            .ok_or(VmError::IndexOutOfBounds),
         _ => Err(VmError::TypeError("value does not support this index")),
     }
 }

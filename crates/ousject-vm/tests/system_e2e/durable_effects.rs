@@ -213,28 +213,34 @@ fn arbitrary_binary_output_capabilities_use_the_ephemeral_provider_path() {
 }
 
 #[test]
-fn terminal_provider_keeps_the_legacy_open_service_compatible() {
+fn terminal_exposes_only_the_terminal_object_api() {
     let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
     let vm = vm_with_console(manager.clone());
     vm.register_provider(Arc::new(ByteTerminal::default()))
         .unwrap();
     let process = vm
         .create_process(
-            &compile("terminal = object.find(\"terminal\")\nsession_id = terminal.open()").unwrap(),
+            &compile(
+                "types = object.find(\"types\")\nterminal_descriptor = types.descriptor(\"core.terminal\")\nall_types = types.types()\nterminal = object.find(\"terminal\")\nterminal_capabilities = terminal.capabilities",
+            )
+            .unwrap(),
         )
         .unwrap();
     assert_eq!(vm.run(process, 100).unwrap().status, ProcessStatus::Halted);
-    let Value::Text(session) = vm.variable(process, "session_id").unwrap() else {
-        panic!("legacy terminal.open returns a Session Object ID");
+    let descriptor = format!("{:?}", vm.variable(process, "terminal_descriptor").unwrap());
+    let types = format!("{:?}", vm.variable(process, "all_types").unwrap());
+    assert!(descriptor.contains("core.terminal"), "{descriptor}");
+    assert!(!types.contains("core.terminal_session"), "{types}");
+    let Value::Array(capabilities) = vm.variable(process, "terminal_capabilities").unwrap() else {
+        panic!("expected Terminal capability list");
     };
-    let session: ObjectId = session.parse().unwrap();
-    assert_eq!(
-        vm.manager()
-            .inspect(AccessContext::new(SYSTEM_SUBJECT), session)
-            .unwrap()
-            .type_id,
-        CORE_TERMINAL_SESSION_TYPE
-    );
+    assert!(!capabilities.contains(&Value::Text("open".to_owned())));
+    assert!(capabilities.contains(&Value::Text("shell".to_owned())));
+
+    let obsolete_entry = vm
+        .create_process(&compile("terminal = object.find(\"terminal\")\nterminal.open()").unwrap())
+        .unwrap();
+    assert!(vm.run(obsolete_entry, 100).is_err());
 }
 
 #[test]

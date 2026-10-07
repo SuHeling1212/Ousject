@@ -9,15 +9,15 @@ try {
     prompt = current_user["name"] + ">"
 } catch (identity_error) {
 }
-terminal_id = terminal.open()
-session = object.find(terminal_id)
-process_id = session.process()
+terminal_id = terminal.shell()
+shell_terminal = object.find(terminal_id)
+process_id = shell_terminal.process()
 process = object.find(process_id)
-pending_source = session.pending_input()
+pending_source = shell_terminal.pending_input()
 
 if console.is_interactive() {
     dimensions = console.size()
-    session.update_size(dimensions["columns"], dimensions["rows"])
+    shell_terminal.update_size(dimensions["columns"], dimensions["rows"])
 }
 
 running = true
@@ -34,12 +34,12 @@ while running {
         pending_source = ""
 
     if source == "\r" {
-        session.cancel()
-        session.save_input("")
+        shell_terminal.cancel()
+        shell_terminal.save_input("")
     } else if source == "exit" {
         running = false
-    } else if source == "close-session" {
-        session.close()
+    } else if source == "close-terminal" {
+        shell_terminal.close()
         running = false
     } else if source == "objects" {
         type_list = types.types()
@@ -118,7 +118,7 @@ while running {
         }
 
         while (round_depth > 0 or curly_depth > 0 or square_depth > 0) or continue_slash {
-            session.save_input(source)
+            shell_terminal.save_input(source)
             console.print("... ")
             continuation = console.read_line()
             explicit_join = #continuation > 0 and continuation[#continuation - 1] == "\\"
@@ -182,8 +182,8 @@ while running {
             }
         }
         try {
-            session.save_input("")
-            session.submit(source)
+            shell_terminal.save_input("")
+            shell_terminal.submit(source)
             status = process.wait()
             if status == "failed" {
                 console.println(process.error)

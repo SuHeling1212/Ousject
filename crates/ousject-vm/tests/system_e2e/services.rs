@@ -53,35 +53,37 @@ fn local_installs_praxis_module_source_and_program_atomically() {
         Arc::new(ModuleTestConsole(Arc::clone(&output))),
     )
     .unwrap();
+    vm.register_provider(Arc::new(super::persistent_terminal::ShellTerminalProvider))
+        .unwrap();
     let source = r#"
 modules = object.find("modules")
 module_id = modules.install("greeter", "0.1.0", "func greeting() { return \"hello\" }", ["console.println"])
 module_list = modules.modules()
 modules.enable(module_id)
 terminal = object.find("terminal")
-terminal_id = terminal.open()
-session = object.find(terminal_id)
-terminal_process_id = session.process()
+terminal_id = terminal.shell()
+shell_terminal = object.find(terminal_id)
+terminal_process_id = shell_terminal.process()
 terminal_process = object.find(terminal_process_id)
-session.submit("import \"greeter\"\ngreeting()")
+shell_terminal.submit("import \"greeter\"\ngreeting()")
 terminal_process.wait()
-session.submit("answer = greeting()")
+shell_terminal.submit("answer = greeting()")
 terminal_process.wait()
 modules.disable(module_id)
-session.submit("answer = greeting()")
+shell_terminal.submit("answer = greeting()")
 terminal_process.wait()
 upgraded_module_id = modules.upgrade(module_id, "0.2.0", "func greeting() { return \"bonjour\" }", ["console.println"])
 modules.enable(upgraded_module_id)
-session.submit("import \"greeter\"\ngreeting()")
+shell_terminal.submit("import \"greeter\"\ngreeting()")
 terminal_process.wait()
-session.submit("answer2 = greeting()")
+shell_terminal.submit("answer2 = greeting()")
 terminal_process.wait()
 modules.disable(upgraded_module_id)
 modules.rollback(upgraded_module_id, module_id)
 modules.enable(module_id)
-session.submit("import \"greeter\"\ngreeting()")
+shell_terminal.submit("import \"greeter\"\ngreeting()")
 terminal_process.wait()
-session.submit("answer3 = greeting()")
+shell_terminal.submit("answer3 = greeting()")
 terminal_process.wait()
 modules.disable(module_id)
 module_history = modules.modules()
@@ -199,6 +201,8 @@ fn praxis_modules_lock_dependencies_and_verify_source_hashes() {
         Arc::new(ModuleTestConsole(output)),
     )
     .unwrap();
+    vm.register_provider(Arc::new(super::persistent_terminal::ShellTerminalProvider))
+        .unwrap();
     let source = r#"
 modules = object.find("modules")
 dependency_id = modules.install("greeter", "1.0.0", "func greeting() { return \"hello\" }", [])
@@ -206,22 +210,22 @@ modules.enable(dependency_id)
 consumer_id = modules.install("wrapper", "1.0.0", "import \"greeter\"\nfunc wrapped_greeting() { return greeting() }", [], [dependency_id])
 modules.enable(consumer_id)
 terminal = object.find("terminal")
-terminal_id = terminal.open()
-session = object.find(terminal_id)
-session_process_id = session.process()
-session_process = object.find(session_process_id)
-session.submit("import \"wrapper\"\nanswer = wrapped_greeting()")
-session_process.wait()
+terminal_id = terminal.shell()
+shell_terminal = object.find(terminal_id)
+shell_process_id = shell_terminal.process()
+shell_process = object.find(shell_process_id)
+shell_terminal.submit("import \"wrapper\"\nanswer = wrapped_greeting()")
+shell_process.wait()
 dependency_v2 = modules.upgrade(dependency_id, "2.0.0", "func greeting() { return \"new\" }", [])
 modules.enable(dependency_v2)
-session.submit("import \"wrapper\"\nanswer2 = wrapped_greeting()")
-session_process.wait()
+shell_terminal.submit("import \"wrapper\"\nanswer2 = wrapped_greeting()")
+shell_process.wait()
 module_instances = modules.instances(consumer_id)
 "#;
     let process = vm.create_process(&compile(source).unwrap()).unwrap();
     let report = vm.run(process, 10_000).unwrap();
     assert_eq!(report.status, ProcessStatus::Halted, "{report:?}");
-    let Value::Text(terminal_process) = vm.variable(process, "session_process_id").unwrap() else {
+    let Value::Text(terminal_process) = vm.variable(process, "shell_process_id").unwrap() else {
         panic!("expected terminal Process id");
     };
     let terminal_process = terminal_process.parse().unwrap();
@@ -246,7 +250,7 @@ module_instances = modules.instances(consumer_id)
             .unwrap()
             .len(),
         2,
-        "the terminal session has one persistent instance for each imported Module"
+        "the terminal shell_terminal has one persistent instance for each imported Module"
     );
 
     let invalid = vm
@@ -299,8 +303,8 @@ bad = modules.install("bad-wrapper", "1.0.0", "import \"greeter\"", [])"#,
         .create_process(
             &compile(
                 r#"terminal = object.find("terminal")
-session = object.find(terminal.open())
-session.submit("import \"wrapper\"")"#,
+shell_terminal = object.find(terminal.shell())
+shell_terminal.submit("import \"wrapper\"")"#,
             )
             .unwrap(),
         )
@@ -312,7 +316,7 @@ session.submit("import \"wrapper\"")"#,
 #[allow(clippy::too_many_lines)]
 fn module_uninstall_respects_dependencies_and_active_instances() {
     let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
-    let vm = vm_with_console(Arc::clone(&manager));
+    let vm = vm_with_shell_terminal(Arc::clone(&manager));
     let setup = compile(
         r#"
 modules = object.find("modules")
@@ -391,10 +395,10 @@ modules.enable(consumer_id)
     let import_base = compile(
         r#"
 terminal = object.find("terminal")
-session = object.find(terminal.open())
-session_process = object.find(session.process())
-session.submit("import \"base\"")
-session_process.wait()
+shell_terminal = object.find(terminal.shell())
+shell_process = object.find(shell_terminal.process())
+shell_terminal.submit("import \"base\"")
+shell_process.wait()
 "#,
     )
     .unwrap();
@@ -483,27 +487,27 @@ modules.enable(wrapper_id)
 
     {
         let manager = Arc::new(InMemoryObjectManager::open_persistent(&path).unwrap());
-        let vm = vm_with_console(Arc::clone(&manager));
+        let vm = vm_with_shell_terminal(Arc::clone(&manager));
         let shell = compile(
             r#"
 terminal = object.find("terminal")
-session = object.find(terminal.open())
-session_process_id = session.process()
-session_process = object.find(session_process_id)
-session.submit("import \"wrapper\"\nanswer = wrapped_greeting()")
-session_process.wait()
+shell_terminal = object.find(terminal.shell())
+shell_process_id = shell_terminal.process()
+shell_process = object.find(shell_process_id)
+shell_terminal.submit("import \"wrapper\"\nanswer = wrapped_greeting()")
+shell_process.wait()
 "#,
         )
         .unwrap();
         let process = vm.create_process(&shell).unwrap();
         let report = vm.run(process, 2_000).unwrap();
         assert_eq!(report.status, ProcessStatus::Halted, "{report:?}");
-        let Value::Text(session_process_id) = vm.variable(process, "session_process_id").unwrap()
+        let Value::Text(shell_process_id) = vm.variable(process, "shell_process_id").unwrap()
         else {
             panic!("expected terminal Process id");
         };
         assert_eq!(
-            vm.variable(session_process_id.parse().unwrap(), "answer"),
+            vm.variable(shell_process_id.parse().unwrap(), "answer"),
             Ok(Value::Text("hello".to_owned()))
         );
         let instance_query = compile(&format!(

@@ -63,8 +63,8 @@ pub(crate) fn discover_host_hardware(
     )
     .map_err(error_text)?;
     let terminal = LinuxConsole::new()?;
-    let vm =
-        VirtualMachine::with_console(manager, console, terminal.clone()).map_err(error_text)?;
+    let vm = VirtualMachine::with_console(manager.clone(), console, terminal.clone())
+        .map_err(error_text)?;
     let terminal_object = vm
         .manager()
         .query(
@@ -78,9 +78,10 @@ pub(crate) fn discover_host_hardware(
         .ok_or_else(|| "kernel did not publish a Terminal Object".to_owned())?;
     vm.register_provider(Arc::new(HostNetworkProvider::default()))
         .map_err(error_text)?;
-    vm.register_provider(Arc::new(HostTerminalProvider::new(
+    vm.register_provider(Arc::new(HostTerminalProvider::with_manager(
         terminal_object,
         terminal.clone(),
+        manager,
     )))
     .map_err(error_text)?;
     vm.register_provider(Arc::new(CachedProvider::new(HostKeyboardProvider {

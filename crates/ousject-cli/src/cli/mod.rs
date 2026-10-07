@@ -12,7 +12,9 @@ use oms_types::{
     NET_RESOLVER_TYPE, ObjectId, SubjectId, Value,
 };
 use ousject_auth::AuthService;
-use ousject_provider::{ObjectProvider, ProviderError, ProviderOutcome, TerminalScreen};
+use ousject_provider::{
+    EffectRecoveryPolicy, ObjectProvider, ProviderError, ProviderOutcome, TerminalScreen,
+};
 use ousject_vm::{
     ConsoleProvider, CooperativeScheduler, ProcessReaper, ProcessStatus, RunReport, SYSTEM_SUBJECT,
     VirtualMachine,

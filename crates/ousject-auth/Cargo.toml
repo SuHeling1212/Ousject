@@ -5,8 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+argon2 = "0.5.3"
 oms-runtime = { path = "../oms-runtime" }
 oms-types = { path = "../oms-types" }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+sha2 = "0.10.9"
+subtle = "2.6.1"
 
 [lints]
 workspace = true

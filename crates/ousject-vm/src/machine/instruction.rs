@@ -321,7 +321,14 @@ impl VirtualMachine {
             .ok_or(VmError::StackUnderflow)?;
         let receiver = &state.stack[receiver_index];
         let object = object_id(receiver)?;
-        let type_id = self.manager.inspect(self.context, object)?.type_id;
+        let type_id = match self.manager.inspect(self.context, object) {
+            Ok(header) => header.type_id,
+            // A Value assigned earlier in this same execution slice may still
+            // be staged in PendingWrites. Let the ordinary call path flush the
+            // staged Object before resolving its Provider/type capabilities.
+            Err(OmsError::NotFound(_)) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
         let Ok(provider) = self.providers.get(type_id) else {
             return Ok(false);
         };

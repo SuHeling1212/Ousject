@@ -30,7 +30,7 @@ flowchart TB
         CLI[ousject-cli]
         Terminal[Terminal stream]
         Devices[Keyboard / Network / Storage]
-        Display[Physical Display driver]
+        Display[Physical Display driver (not implemented)]
         Network[Resolver / TCP]
         Storage[FileSnapshotBackend]
     end
@@ -45,7 +45,7 @@ flowchart TB
     Runtime --> Types
     Provider --> Terminal
     Provider --> Devices
-    Provider -. optional driver .-> Display
+    Provider -. optional future driver .-> Display
     Provider --> Network
     Runtime --> Storage
     CLI --> Compiler
@@ -123,11 +123,25 @@ math, crypto, time, terminal, modules, packages, market, audit, resolver
 网络和设备等真实能力仍需要每次启动时由宿主 Provider 重新连接。
 
 Provider 用于实现 Object 的领域能力。普通程序不能通过伪造 Type 或能力字符串创建物理
-设备 Object；`CreationPolicy::ProviderOnly` 的对象只能由可信路径发布。Terminal 是字节流
-接口并维护自己的虚拟屏幕；Display 是可选的物理显示设备，不能用 stdout 适配器伪装。
-Terminal 的 `input`/`output`/`snapshot` 由 Provider 声明为 ephemeral 操作，不为每个输入
-字节或输出帧生成持久 Effect。Terminal 的尺寸与输入模式仍存入 OMS；当前屏幕缓冲区是本次
-启动期内存状态，重启后由后续输出重新建立。
+设备 Object；`CreationPolicy::ProviderOnly` 的对象只能由可信路径发布。VM 在第一次执行
+用户 Process 前封闭 Provider Registry；宿主必须在启动阶段注册所有 native Provider，之后
+注册会返回 `Sealed`。内建 Type 描述符的 schema/creation contract 在 VM 构建时固定；反射 API
+会把 Provider-backed Type 的领域能力与当前注册的 Provider 求交集，避免把不存在的方法宣传成
+可执行。Praxis `types.register` 只能登记普通 Type 描述信息，不会注册 native Provider 或 native
+Type 实现。
+
+Terminal 是字节流接口并维护自己的虚拟屏幕；Display 是可选的物理像素设备，不能用 stdout
+适配器伪装。当前 CLI Terminal Renderer 从 styled-cell/damage view 将 Screen 渲染到宿主 tty；
+它只实现常见 VT 子集。Terminal 的 `input`/`output`/`snapshot` 是 ephemeral 操作，不为每个
+输入字节或输出帧生成持久 Effect。尺寸、输入模式、父子层级和 foreground Process ID 存入 OMS；
+Screen cells、parser 临时状态、host tty handle 和渲染缓存不持久化。
+
+设备共享 `input(maximum) -> Bytes` 与 `output(bytes)` 作为方向性 Binary 基础，但具体 Provider
+只公布其实际支持的方法：Terminal 的交互字节流为 ephemeral；TCP Network 和 Block Storage
+读写走 durable Effect；Keyboard 只暴露宿主高层按键事件，不伪造 USB/HID Bytes；当前没有
+Physical Display Provider。高级语义 API（如 Network `connect`、Storage `load_block`、Keyboard
+`next_event`）继续保留。`.capabilities` 会和实际 Provider 能力取交集，不把静态声明当成可执行
+保证。
 
 ## 用户空间边界
 
@@ -142,6 +156,13 @@ Rust CLI 目前负责：
 - 提供开发与灾难恢复命令。
 
 CLI 不是 Ousject 用户空间 Shell。
+
+用户空间 Driver 沿用现有的 Process、Package、Object、Capability、Parent/Link 和 `input/output`
+机制：Driver Process 只获得被明确授权的 Device Object，可以创建普通 Object 保存语义状态，
+并通过 Namespace/Link 发布给应用。没有 `core.driver_manager`、native 插件加载器或自动重启
+服务；进程失败由 Scheduler 隔离，不会修改已 seal 的 Provider Registry，重启策略属于上层。
+Praxis Module/Package 是用户空间代码与资源，绝不是 Kernel Module；Market 下载和 `import`
+不能加载 Rust dylib 或 patch VM/OMS。
 
 ## 当前不是哪些东西
 

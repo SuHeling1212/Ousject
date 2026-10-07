@@ -5,6 +5,8 @@
 //! modes). It is deliberately a screen model, not a host display driver.
 
 use std::collections::BTreeSet;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalColor {
@@ -13,10 +15,16 @@ pub enum TerminalColor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TerminalStyle {
     pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub blink: bool,
     pub underline: bool,
     pub inverse: bool,
+    pub hidden: bool,
+    pub strikethrough: bool,
     pub foreground: Option<TerminalColor>,
     pub background: Option<TerminalColor>,
 }
@@ -27,6 +35,46 @@ pub struct TerminalCell {
     /// Zero marks the continuation column of a wide character.
     pub width: u8,
     pub style: TerminalStyle,
+}
+
+/// Complete renderer input for one incremental Terminal update.
+#[derive(Debug, Clone)]
+pub struct TerminalRenderView<'a> {
+    pub columns: usize,
+    pub rows: usize,
+    pub cells: &'a [Vec<TerminalCell>],
+    pub dirty_rows: Vec<usize>,
+    pub cursor: (usize, usize),
+    pub modes: TerminalModes,
+    pub title: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalModes {
+    pub cursor_visible: bool,
+    pub screen: TerminalScreenModes,
+    pub input: TerminalInputModes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalScreenModes {
+    pub alternate_screen: bool,
+    pub autowrap: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalInputModes {
+    pub application_cursor: bool,
+    pub bracketed_paste: bool,
+    pub mouse_tracking: MouseTracking,
+    pub sgr_mouse: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GlyphPosition {
+    alternate: bool,
+    row: usize,
+    column: usize,
 }
 
 impl Default for TerminalCell {
@@ -83,9 +131,11 @@ enum ParserState {
 
 /// Mutable terminal screen state maintained independently of any physical display.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TerminalScreen {
     main: Buffer,
     alternate: Option<Buffer>,
+    in_alternate: bool,
     parser: ParserState,
     sequence: Vec<u8>,
     utf8_pending: Vec<u8>,
@@ -94,7 +144,22 @@ pub struct TerminalScreen {
     cursor_visible: bool,
     autowrap: bool,
     bracketed_paste: bool,
+    application_cursor: bool,
+    mouse_tracking: MouseTracking,
+    sgr_mouse: bool,
+    alternate_saved_cursor: Option<(usize, usize)>,
+    mode_saved_cursor: Option<(usize, usize)>,
+    last_printed: Option<GlyphPosition>,
     dirty_rows: BTreeSet<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseTracking {
+    #[default]
+    Disabled,
+    PressRelease,
+    ButtonMotion,
+    AnyMotion,
 }
 
 impl TerminalScreen {
@@ -105,6 +170,7 @@ impl TerminalScreen {
         Self {
             main: Buffer::new(columns, rows),
             alternate: None,
+            in_alternate: false,
             parser: ParserState::Ground,
             sequence: Vec::new(),
             utf8_pending: Vec::new(),
@@ -113,16 +179,30 @@ impl TerminalScreen {
             cursor_visible: true,
             autowrap: true,
             bracketed_paste: false,
+            application_cursor: false,
+            mouse_tracking: MouseTracking::Disabled,
+            sgr_mouse: false,
+            alternate_saved_cursor: None,
+            mode_saved_cursor: None,
+            last_printed: None,
             dirty_rows: (0..rows).collect(),
         }
     }
 
     fn active(&self) -> &Buffer {
-        self.alternate.as_ref().unwrap_or(&self.main)
+        if self.in_alternate {
+            self.alternate.as_ref().unwrap_or(&self.main)
+        } else {
+            &self.main
+        }
     }
 
     fn active_mut(&mut self) -> &mut Buffer {
-        self.alternate.as_mut().unwrap_or(&mut self.main)
+        if self.in_alternate {
+            self.alternate.as_mut().unwrap_or(&mut self.main)
+        } else {
+            &mut self.main
+        }
     }
 
     #[must_use]
@@ -142,7 +222,7 @@ impl TerminalScreen {
 
     #[must_use]
     pub fn is_alternate_screen(&self) -> bool {
-        self.alternate.is_some()
+        self.in_alternate
     }
 
     #[must_use]
@@ -153,6 +233,21 @@ impl TerminalScreen {
     #[must_use]
     pub fn bracketed_paste(&self) -> bool {
         self.bracketed_paste
+    }
+
+    #[must_use]
+    pub fn application_cursor(&self) -> bool {
+        self.application_cursor
+    }
+
+    #[must_use]
+    pub fn mouse_tracking(&self) -> MouseTracking {
+        self.mouse_tracking
+    }
+
+    #[must_use]
+    pub fn sgr_mouse(&self) -> bool {
+        self.sgr_mouse
     }
 
     #[must_use]
@@ -194,6 +289,39 @@ impl TerminalScreen {
         std::mem::take(&mut self.dirty_rows).into_iter().collect()
     }
 
+    /// Marks every row dirty, for example when this Screen becomes the active
+    /// host-rendered Terminal again after a child exits.
+    pub fn mark_all_dirty(&mut self) {
+        self.dirty_rows = (0..self.rows()).collect();
+    }
+
+    /// Borrows styled cells and consumes the accumulated damage set.
+    pub fn render_view(&mut self) -> TerminalRenderView<'_> {
+        let dirty_rows = self.take_dirty_rows();
+        let buffer = self.active();
+        TerminalRenderView {
+            columns: buffer.columns(),
+            rows: buffer.rows(),
+            cells: &buffer.cells,
+            dirty_rows,
+            cursor: (buffer.row, buffer.column),
+            modes: TerminalModes {
+                cursor_visible: self.cursor_visible,
+                screen: TerminalScreenModes {
+                    alternate_screen: self.in_alternate,
+                    autowrap: self.autowrap,
+                },
+                input: TerminalInputModes {
+                    application_cursor: self.application_cursor,
+                    bracketed_paste: self.bracketed_paste,
+                    mouse_tracking: self.mouse_tracking,
+                    sgr_mouse: self.sgr_mouse,
+                },
+            },
+            title: &self.title,
+        }
+    }
+
     /// Resizes both screen buffers and marks every row dirty.
     pub fn resize(&mut self, columns: usize, rows: usize) {
         let columns = columns.clamp(1, 512);
@@ -202,6 +330,7 @@ impl TerminalScreen {
         if let Some(alternate) = &mut self.alternate {
             resize_buffer(alternate, columns, rows);
         }
+        self.last_printed = None;
         self.dirty_rows = (0..rows).collect();
     }
 
@@ -225,17 +354,23 @@ impl TerminalScreen {
                 self.parser = ParserState::Escape;
             }
             b'\r' => {
+                self.last_printed = None;
                 let buffer = self.active_mut();
                 buffer.column = 0;
                 buffer.wrap_pending = false;
             }
-            b'\n' | 0x0b | 0x0c => self.line_feed(),
+            b'\n' | 0x0b | 0x0c => {
+                self.last_printed = None;
+                self.line_feed();
+            }
             0x08 => {
+                self.last_printed = None;
                 let buffer = self.active_mut();
                 buffer.column = buffer.column.saturating_sub(1);
                 buffer.wrap_pending = false;
             }
             0x09 => {
+                self.last_printed = None;
                 let buffer = self.active_mut();
                 let stop = (buffer.column / 8 + 1) * 8;
                 buffer.column = stop.min(buffer.columns().saturating_sub(1));
@@ -302,19 +437,28 @@ impl TerminalScreen {
                 buffer.saved_cursor = (buffer.row, buffer.column);
             }
             b'8' => {
+                self.last_printed = None;
                 let buffer = self.active_mut();
                 (buffer.row, buffer.column) = buffer.saved_cursor;
                 clamp_cursor(buffer);
-                let row = buffer.row;
-                self.mark_row(row);
             }
-            b'D' => self.line_feed(),
+            b'D' => {
+                self.last_printed = None;
+                self.line_feed();
+            }
             b'E' => {
+                self.last_printed = None;
                 self.active_mut().column = 0;
                 self.line_feed();
             }
-            b'M' => self.reverse_index(),
-            b'c' => self.reset(),
+            b'M' => {
+                self.last_printed = None;
+                self.reverse_index();
+            }
+            b'c' => {
+                self.last_printed = None;
+                self.reset();
+            }
             _ => {}
         }
     }
@@ -380,14 +524,41 @@ impl TerminalScreen {
             let enable = final_byte == b'h';
             for value in values {
                 match value {
+                    1 => self.application_cursor = enable,
                     25 => self.cursor_visible = enable,
                     7 => self.autowrap = enable,
-                    1049 => self.alternate_screen(enable),
+                    47 | 1047 | 1049 => self.alternate_screen(value, enable),
+                    1048 => self.save_or_restore_mode_cursor(enable),
+                    1000 => {
+                        self.mouse_tracking = if enable {
+                            MouseTracking::PressRelease
+                        } else {
+                            MouseTracking::Disabled
+                        };
+                    }
+                    1002 => {
+                        self.mouse_tracking = if enable {
+                            MouseTracking::ButtonMotion
+                        } else {
+                            MouseTracking::Disabled
+                        };
+                    }
+                    1003 => {
+                        self.mouse_tracking = if enable {
+                            MouseTracking::AnyMotion
+                        } else {
+                            MouseTracking::Disabled
+                        };
+                    }
+                    1006 => self.sgr_mouse = enable,
                     2004 => self.bracketed_paste = enable,
                     _ => {}
                 }
             }
             return;
+        }
+        if final_byte != b'm' {
+            self.last_printed = None;
         }
         match final_byte {
             b'A' => self.move_cursor(0, -movement(first)),
@@ -414,6 +585,10 @@ impl TerminalScreen {
             b'@' => self.insert_chars(positive(first)),
             b'P' => self.delete_chars(positive(first)),
             b'X' => self.erase_chars(positive(first)),
+            b'L' => self.insert_lines(positive(first)),
+            b'M' => self.delete_lines(positive(first)),
+            b'S' => self.scroll_up(positive(first)),
+            b'T' => self.scroll_down(positive(first)),
             b'm' => self.sgr(&values),
             b's' => {
                 let buffer = self.active_mut();
@@ -423,8 +598,6 @@ impl TerminalScreen {
                 let buffer = self.active_mut();
                 (buffer.row, buffer.column) = buffer.saved_cursor;
                 clamp_cursor(buffer);
-                let row = buffer.row;
-                self.mark_row(row);
             }
             b'r' => self.set_scroll_region(&values),
             _ => {}
@@ -432,26 +605,16 @@ impl TerminalScreen {
     }
 
     fn put_character(&mut self, character: char) {
-        let width = character_width(character);
-        if width == 0 {
-            let dirty = {
-                let buffer = self.active_mut();
-                let column = buffer
-                    .column
-                    .saturating_sub(usize::from(!buffer.wrap_pending));
-                let row = buffer.row;
-                if let Some(cell) = buffer.cells[row].get_mut(column) {
-                    cell.text.push(character);
-                    Some(row)
-                } else {
-                    None
-                }
-            };
-            if let Some(row) = dirty {
-                self.mark_row(row);
-            }
+        if self.extend_last_grapheme(character) {
             return;
         }
+        let mut text = character.to_string();
+        let measured_width = UnicodeWidthStr::width(text.as_str());
+        if measured_width == 0 {
+            text.insert(0, '\u{25cc}');
+        }
+        let mut width =
+            u8::try_from(UnicodeWidthStr::width(text.as_str()).clamp(1, 2)).unwrap_or(2);
         let should_wrap = {
             let buffer = self.active();
             buffer.wrap_pending && self.autowrap
@@ -474,18 +637,21 @@ impl TerminalScreen {
             let buffer = self.active();
             (buffer.row, buffer.column, buffer.columns())
         };
-        let style = self.style.clone();
-        let mut cell = TerminalCell {
-            text: character.to_string(),
-            width,
-            style: style.clone(),
-        };
         if width == 2 && column + 1 >= columns {
-            cell.width = 1;
+            width = 1;
+        }
+        let style = self.style.clone();
+        self.clear_glyph_at(row, column);
+        if width == 2 && column + 1 < columns {
+            self.clear_glyph_at(row, column + 1);
         }
         {
             let buffer = self.active_mut();
-            buffer.cells[row][column] = cell;
+            buffer.cells[row][column] = TerminalCell {
+                text,
+                width,
+                style: style.clone(),
+            };
             if width == 2 && column + 1 < columns {
                 buffer.cells[row][column + 1] = TerminalCell {
                     width: 0,
@@ -500,7 +666,97 @@ impl TerminalScreen {
                 buffer.column += usize::from(width);
             }
         }
+        self.last_printed = Some(GlyphPosition {
+            alternate: self.in_alternate,
+            row,
+            column,
+        });
         self.mark_row(row);
+    }
+
+    fn extend_last_grapheme(&mut self, character: char) -> bool {
+        let Some(position) = self.last_printed else {
+            return false;
+        };
+        if position.alternate != self.in_alternate {
+            return false;
+        }
+        let Some(previous) = self
+            .active()
+            .cells
+            .get(position.row)
+            .and_then(|row| row.get(position.column))
+            .filter(|cell| cell.width > 0 && !cell.text.is_empty())
+            .map(|cell| cell.text.clone())
+        else {
+            return false;
+        };
+        let mut grapheme = previous;
+        grapheme.push(character);
+        if grapheme.graphemes(true).count() != 1 {
+            return false;
+        }
+        let width =
+            u8::try_from(UnicodeWidthStr::width(grapheme.as_str()).clamp(1, 2)).unwrap_or(2);
+        let old_width = self.active().cells[position.row][position.column].width;
+        let columns = self.active().columns();
+        let style = self.active().cells[position.row][position.column]
+            .style
+            .clone();
+        {
+            let buffer = self.active_mut();
+            buffer.cells[position.row][position.column].text = grapheme;
+            buffer.cells[position.row][position.column].width = width;
+            if old_width == 2 && width == 1 && position.column + 1 < columns {
+                buffer.cells[position.row][position.column + 1] = TerminalCell {
+                    style: style.clone(),
+                    ..TerminalCell::default()
+                };
+            } else if width == 2 && position.column + 1 < columns {
+                buffer.cells[position.row][position.column + 1] = TerminalCell {
+                    width: 0,
+                    style,
+                    ..TerminalCell::default()
+                };
+            }
+            let end = position.column + usize::from(width);
+            if end >= columns {
+                buffer.column = columns - 1;
+                buffer.wrap_pending = true;
+            } else {
+                buffer.column = end;
+                buffer.wrap_pending = false;
+            }
+        }
+        self.mark_row(position.row);
+        true
+    }
+
+    fn clear_glyph_at(&mut self, row: usize, column: usize) {
+        let columns = self.active().columns();
+        let Some(cell) = self
+            .active()
+            .cells
+            .get(row)
+            .and_then(|cells| cells.get(column))
+        else {
+            return;
+        };
+        let width = cell.width;
+        let start = if width == 0 {
+            column.saturating_sub(1)
+        } else {
+            column
+        };
+        let clear_end = if width == 0 || width == 2 {
+            (start + 2).min(columns)
+        } else {
+            (start + 1).min(columns)
+        };
+        let buffer = self.active_mut();
+        for index in start..clear_end {
+            buffer.cells[row][index] = TerminalCell::default();
+        }
     }
 
     fn move_cursor(&mut self, columns: isize, rows: isize) {
@@ -514,22 +770,21 @@ impl TerminalScreen {
             .saturating_add_signed(rows)
             .min(buffer.rows() - 1);
         buffer.wrap_pending = false;
-        let row = buffer.row;
-        self.mark_row(row);
+        self.last_printed = None;
     }
 
     fn set_column(&mut self, column: usize) {
         let buffer = self.active_mut();
         buffer.column = column.min(buffer.columns() - 1);
         buffer.wrap_pending = false;
+        self.last_printed = None;
     }
 
     fn set_row(&mut self, row: usize) {
         let buffer = self.active_mut();
         buffer.row = row.min(buffer.rows() - 1);
         buffer.wrap_pending = false;
-        let row = buffer.row;
-        self.mark_row(row);
+        self.last_printed = None;
     }
 
     fn set_cursor(&mut self, row: usize, column: usize) {
@@ -537,48 +792,98 @@ impl TerminalScreen {
         buffer.row = row.min(buffer.rows() - 1);
         buffer.column = column.min(buffer.columns() - 1);
         buffer.wrap_pending = false;
-        let row = buffer.row;
-        self.mark_row(row);
+        self.last_printed = None;
     }
 
     fn line_feed(&mut self) {
-        let buffer = self.active_mut();
-        buffer.wrap_pending = false;
-        if buffer.row == buffer.scroll_bottom {
-            let top = buffer.scroll_top;
-            let bottom = buffer.scroll_bottom;
-            buffer.cells.remove(top);
-            buffer.cells.insert(bottom, blank_row(buffer.columns()));
-            self.dirty_rows.extend(top..=bottom);
-        } else {
-            buffer.row = (buffer.row + 1).min(buffer.rows() - 1);
-            let row = buffer.row;
-            self.dirty_rows.insert(row);
+        let scroll = {
+            let buffer = self.active_mut();
+            buffer.wrap_pending = false;
+            if buffer.row == buffer.scroll_bottom {
+                Some(buffer.scroll_bottom - buffer.scroll_top + 1)
+            } else {
+                buffer.row = (buffer.row + 1).min(buffer.rows() - 1);
+                let row = buffer.row;
+                self.dirty_rows.insert(row);
+                None
+            }
+        };
+        if scroll.is_some() {
+            self.scroll_up(1);
         }
     }
 
     fn reverse_index(&mut self) {
-        let buffer = self.active_mut();
-        buffer.wrap_pending = false;
-        if buffer.row == buffer.scroll_top {
-            let top = buffer.scroll_top;
-            let bottom = buffer.scroll_bottom;
-            buffer.cells.remove(bottom);
-            buffer.cells.insert(top, blank_row(buffer.columns()));
-            self.dirty_rows.extend(top..=bottom);
-        } else {
-            buffer.row = buffer.row.saturating_sub(1);
-            let row = buffer.row;
-            self.dirty_rows.insert(row);
+        let scroll = {
+            let buffer = self.active_mut();
+            buffer.wrap_pending = false;
+            if buffer.row == buffer.scroll_top {
+                Some(buffer.scroll_bottom - buffer.scroll_top + 1)
+            } else {
+                buffer.row = buffer.row.saturating_sub(1);
+                let row = buffer.row;
+                self.dirty_rows.insert(row);
+                None
+            }
+        };
+        if scroll.is_some() {
+            self.scroll_down(1);
         }
+    }
+
+    fn insert_lines(&mut self, count: usize) {
+        let (row, top, bottom, columns) = {
+            let buffer = self.active();
+            (
+                buffer.row,
+                buffer.scroll_top,
+                buffer.scroll_bottom,
+                buffer.columns(),
+            )
+        };
+        if row < top || row > bottom {
+            return;
+        }
+        let count = count.min(bottom - row + 1);
+        let buffer = self.active_mut();
+        for _ in 0..count {
+            buffer.cells.remove(bottom);
+            buffer.cells.insert(row, blank_row(columns));
+        }
+        self.dirty_rows.extend(row..=bottom);
+        self.last_printed = None;
+    }
+
+    fn delete_lines(&mut self, count: usize) {
+        let (row, top, bottom, columns) = {
+            let buffer = self.active();
+            (
+                buffer.row,
+                buffer.scroll_top,
+                buffer.scroll_bottom,
+                buffer.columns(),
+            )
+        };
+        if row < top || row > bottom {
+            return;
+        }
+        let count = count.min(bottom - row + 1);
+        let buffer = self.active_mut();
+        for _ in 0..count {
+            buffer.cells.remove(row);
+            buffer.cells.insert(bottom, blank_row(columns));
+        }
+        self.dirty_rows.extend(row..=bottom);
+        self.last_printed = None;
     }
 
     fn erase_display(&mut self, mode: usize) {
         let (row, column) = self.cursor();
         let rows = self.rows();
+        let columns = self.columns();
         match mode {
             0 => {
-                self.erase_range(row, column, self.columns());
+                self.erase_range(row, column, columns);
                 for index in row + 1..rows {
                     self.clear_row(index);
                 }
@@ -610,7 +915,11 @@ impl TerminalScreen {
 
     fn erase_chars(&mut self, count: usize) {
         let (row, column) = self.cursor();
-        self.erase_range(row, column, (column + count).min(self.columns()));
+        self.erase_range(
+            row,
+            column,
+            column.saturating_add(count).min(self.columns()),
+        );
     }
 
     fn erase_range(&mut self, row: usize, start: usize, end: usize) {
@@ -623,6 +932,8 @@ impl TerminalScreen {
                 ..TerminalCell::default()
             };
         }
+        normalize_wide_row(&mut buffer.cells[row]);
+        self.last_printed = None;
         self.mark_row(row);
     }
 
@@ -635,6 +946,7 @@ impl TerminalScreen {
                 ..TerminalCell::default()
             })
             .collect();
+        self.last_printed = None;
         self.mark_row(row);
     }
 
@@ -653,6 +965,8 @@ impl TerminalScreen {
             );
             buffer.cells[row].pop();
         }
+        normalize_wide_row(&mut buffer.cells[row]);
+        self.last_printed = None;
         self.mark_row(row);
     }
 
@@ -668,6 +982,8 @@ impl TerminalScreen {
                 ..TerminalCell::default()
             });
         }
+        normalize_wide_row(&mut buffer.cells[row]);
+        self.last_printed = None;
         self.mark_row(row);
     }
 
@@ -679,11 +995,23 @@ impl TerminalScreen {
             match value {
                 0 => self.style = TerminalStyle::default(),
                 1 => self.style.bold = true,
+                2 => self.style.dim = true,
+                3 => self.style.italic = true,
                 4 => self.style.underline = true,
+                5 | 6 => self.style.blink = true,
                 7 => self.style.inverse = true,
-                22 => self.style.bold = false,
+                8 => self.style.hidden = true,
+                9 => self.style.strikethrough = true,
+                22 => {
+                    self.style.bold = false;
+                    self.style.dim = false;
+                }
+                23 => self.style.italic = false,
                 24 => self.style.underline = false,
+                25 => self.style.blink = false,
                 27 => self.style.inverse = false,
+                28 => self.style.hidden = false,
+                29 => self.style.strikethrough = false,
                 30..=37 => {
                     self.style.foreground = Some(TerminalColor::Indexed(
                         u8::try_from(value - 30).unwrap_or_default(),
@@ -747,33 +1075,125 @@ impl TerminalScreen {
         }
     }
 
-    fn set_scroll_region(&mut self, values: &[usize]) {
+    fn scroll_up(&mut self, count: usize) {
+        let (top, bottom, columns) = {
+            let buffer = self.active();
+            (buffer.scroll_top, buffer.scroll_bottom, buffer.columns())
+        };
+        let count = count.min(bottom - top + 1);
         let buffer = self.active_mut();
+        for _ in 0..count {
+            buffer.cells.remove(top);
+            buffer.cells.insert(bottom, blank_row(columns));
+        }
+        self.dirty_rows.extend(top..=bottom);
+        self.last_printed = None;
+    }
+
+    fn scroll_down(&mut self, count: usize) {
+        let (top, bottom, columns) = {
+            let buffer = self.active();
+            (buffer.scroll_top, buffer.scroll_bottom, buffer.columns())
+        };
+        let count = count.min(bottom - top + 1);
+        let buffer = self.active_mut();
+        for _ in 0..count {
+            buffer.cells.remove(bottom);
+            buffer.cells.insert(top, blank_row(columns));
+        }
+        self.dirty_rows.extend(top..=bottom);
+        self.last_printed = None;
+    }
+
+    fn set_scroll_region(&mut self, values: &[usize]) {
+        let rows = self.rows();
         let top = positive(values.first().copied().unwrap_or(0)) - 1;
-        let bottom = positive(values.get(1).copied().unwrap_or(0)) - 1;
-        if top < bottom && bottom < buffer.rows() {
+        let bottom = if values.get(1).copied().unwrap_or(0) == 0 {
+            rows - 1
+        } else {
+            positive(values.get(1).copied().unwrap_or(0)) - 1
+        };
+        if top < bottom && bottom < rows {
+            let buffer = self.active_mut();
             buffer.scroll_top = top;
             buffer.scroll_bottom = bottom;
             buffer.row = top;
             buffer.column = 0;
+            buffer.wrap_pending = false;
+            self.last_printed = None;
+            self.mark_row(top);
         }
     }
 
-    fn alternate_screen(&mut self, enable: bool) {
-        if enable && self.alternate.is_none() {
-            self.alternate = Some(Buffer::new(self.main.columns(), self.main.rows()));
-        } else if !enable && self.alternate.take().is_some() {
-            self.dirty_rows = (0..self.main.rows()).collect();
+    fn save_or_restore_mode_cursor(&mut self, save: bool) {
+        if save {
+            let buffer = self.active();
+            self.mode_saved_cursor = Some((buffer.row, buffer.column));
+        } else if let Some((row, column)) = self.mode_saved_cursor.take() {
+            let buffer = self.active_mut();
+            buffer.row = row.min(buffer.rows() - 1);
+            buffer.column = column.min(buffer.columns() - 1);
+            buffer.wrap_pending = false;
+            let row = buffer.row;
+            self.last_printed = None;
+            self.mark_row(row);
         }
+    }
+
+    fn alternate_screen(&mut self, mode: usize, enable: bool) {
+        let columns = self.main.columns();
+        let rows = self.main.rows();
+        match (mode, enable) {
+            (47, true) => {
+                self.alternate
+                    .get_or_insert_with(|| Buffer::new(columns, rows));
+                self.in_alternate = true;
+            }
+            (47, false) => self.in_alternate = false,
+            (1047, true) => {
+                self.alternate = Some(Buffer::new(columns, rows));
+                self.in_alternate = true;
+            }
+            (1047, false) => {
+                self.in_alternate = false;
+                self.alternate = None;
+            }
+            (1049, true) => {
+                if !self.in_alternate {
+                    self.alternate_saved_cursor = Some((self.main.row, self.main.column));
+                }
+                self.alternate = Some(Buffer::new(columns, rows));
+                self.in_alternate = true;
+            }
+            (1049, false) => {
+                self.in_alternate = false;
+                self.alternate = None;
+                if let Some((row, column)) = self.alternate_saved_cursor.take() {
+                    self.main.row = row.min(self.main.rows() - 1);
+                    self.main.column = column.min(self.main.columns() - 1);
+                    self.main.wrap_pending = false;
+                }
+            }
+            _ => {}
+        }
+        self.last_printed = None;
+        self.dirty_rows = (0..rows).collect();
     }
 
     fn reset(&mut self) {
         self.main = Buffer::new(self.main.columns(), self.main.rows());
         self.alternate = None;
+        self.in_alternate = false;
         self.style = TerminalStyle::default();
         self.cursor_visible = true;
         self.autowrap = true;
+        self.application_cursor = false;
         self.bracketed_paste = false;
+        self.mouse_tracking = MouseTracking::Disabled;
+        self.sgr_mouse = false;
+        self.alternate_saved_cursor = None;
+        self.mode_saved_cursor = None;
+        self.last_printed = None;
         self.dirty_rows = (0..self.main.rows()).collect();
     }
 
@@ -798,6 +1218,22 @@ fn blank_cells(columns: usize, rows: usize) -> Vec<Vec<TerminalCell>> {
     (0..rows).map(|_| blank_row(columns)).collect()
 }
 
+fn normalize_wide_row(cells: &mut [TerminalCell]) {
+    for column in 0..cells.len() {
+        if cells[column].width == 0 {
+            if column == 0 || cells[column - 1].width != 2 {
+                cells[column] = TerminalCell::default();
+            }
+        } else if cells[column].width == 2
+            && cells
+                .get(column + 1)
+                .is_none_or(|continuation| continuation.width != 0)
+        {
+            cells[column].width = 1;
+        }
+    }
+}
+
 fn resize_buffer(buffer: &mut Buffer, columns: usize, rows: usize) {
     buffer.cells.resize_with(rows, || blank_row(columns));
     for row in &mut buffer.cells {
@@ -816,38 +1252,6 @@ fn clamp_cursor(buffer: &mut Buffer) {
     buffer.wrap_pending = false;
 }
 
-fn character_width(character: char) -> u8 {
-    let code = u32::from(character);
-    if character.is_control()
-        || (0x0300..=0x036f).contains(&code)
-        || (0x1ab0..=0x1aff).contains(&code)
-        || (0x1dc0..=0x1dff).contains(&code)
-        || (0xfe00..=0xfe0f).contains(&code)
-        || (0xfe20..=0xfe2f).contains(&code)
-        || (0xe0100..=0xe01ef).contains(&code)
-        || code == 0x200d
-        || (0x1f3fb..=0x1f3ff).contains(&code)
-    {
-        return 0;
-    }
-    if (0x1100..=0x115f).contains(&code)
-        || (0x2329..=0x232a).contains(&code)
-        || (0x2e80..=0xa4cf).contains(&code)
-        || (0xac00..=0xd7a3).contains(&code)
-        || (0xf900..=0xfaff).contains(&code)
-        || (0xfe10..=0xfe19).contains(&code)
-        || (0xfe30..=0xfe6f).contains(&code)
-        || (0xff00..=0xff60).contains(&code)
-        || (0xffe0..=0xffe6).contains(&code)
-        || (0x1f300..=0x1faff).contains(&code)
-        || (0x20000..=0x3fffd).contains(&code)
-    {
-        2
-    } else {
-        1
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -861,6 +1265,16 @@ mod tests {
         assert_eq!(screen.cell(0, 2).unwrap().width, 2);
         assert_eq!(screen.cell(0, 3).unwrap().width, 0);
         assert_eq!(screen.take_dirty_rows(), vec![0]);
+        assert_eq!(screen.take_dirty_rows(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn cursor_motion_does_not_mark_unchanged_rows_dirty() {
+        let mut screen = TerminalScreen::new(8, 4);
+        screen.take_dirty_rows();
+        screen.write(b"\x1b[H\x1b[B\x1b[C\x1b[s\x1b[4;8H\x1b[u\x1b7\x1b[2;2H\x1b8");
+
+        assert_eq!(screen.cursor(), (1, 1));
         assert_eq!(screen.take_dirty_rows(), Vec::<usize>::new());
     }
 
@@ -910,5 +1324,119 @@ mod tests {
         assert_eq!(screen.row_text(0).as_deref(), Some("thre"));
         assert_eq!(screen.row_text(1).as_deref(), Some("e"));
         assert_eq!(screen.title(), "demo");
+    }
+
+    #[test]
+    fn sgr_tracks_full_attributes_and_reset_groups() {
+        let mut screen = TerminalScreen::new(8, 2);
+        screen.write(b"\x1b[1;2;3;4;5;7;8;9;38;5;200;48;2;1;2;3mX");
+        let style = &screen.cell(0, 0).unwrap().style;
+        assert!(style.bold);
+        assert!(style.dim);
+        assert!(style.italic);
+        assert!(style.underline);
+        assert!(style.blink);
+        assert!(style.inverse);
+        assert!(style.hidden);
+        assert!(style.strikethrough);
+        assert_eq!(style.foreground, Some(TerminalColor::Indexed(200)));
+        assert_eq!(style.background, Some(TerminalColor::Rgb(1, 2, 3)));
+
+        screen.write(b"\x1b[22;23;24;25;27;28;29;39;49mY");
+        let style = &screen.cell(0, 1).unwrap().style;
+        assert!(!style.bold && !style.dim);
+        assert!(!style.italic);
+        assert!(!style.underline);
+        assert!(!style.blink);
+        assert!(!style.inverse);
+        assert!(!style.hidden);
+        assert!(!style.strikethrough);
+        assert_eq!(style.foreground, None);
+        assert_eq!(style.background, None);
+    }
+
+    #[test]
+    fn line_insert_delete_scroll_and_index_operations_respect_margins() {
+        let mut screen = TerminalScreen::new(4, 4);
+        screen.write(b"A\r\nB\r\nC\r\nD");
+        screen.write(b"\x1b[2;1H\x1b[1L");
+        assert_eq!(screen.row_text(0).as_deref(), Some("A"));
+        assert_eq!(screen.row_text(1).as_deref(), Some(""));
+        assert_eq!(screen.row_text(2).as_deref(), Some("B"));
+        assert_eq!(screen.row_text(3).as_deref(), Some("C"));
+
+        screen.write(b"\x1b[3;1H\x1b[1M");
+        assert_eq!(screen.row_text(2).as_deref(), Some("C"));
+        assert_eq!(screen.row_text(3).as_deref(), Some(""));
+
+        screen.write(b"\x1b[1;4r\x1b[1S");
+        assert_eq!(screen.row_text(0).as_deref(), Some(""));
+        assert_eq!(screen.row_text(1).as_deref(), Some("C"));
+
+        screen.write(b"\x1b[1;1H\x1bM");
+        assert_eq!(screen.row_text(0).as_deref(), Some(""));
+        assert_eq!(screen.row_text(1).as_deref(), Some(""));
+        assert_eq!(screen.row_text(2).as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn alternate_modes_preserve_primary_and_obey_clear_and_cursor_rules() {
+        let mut screen = TerminalScreen::new(12, 3);
+        screen.write(b"\x1b[2;4Hmain");
+        let main_cursor = screen.cursor();
+        screen.write(b"\x1b[?47halt\x1b[?47l");
+        assert_eq!(screen.row_text(1).as_deref(), Some("   main"));
+        assert_eq!(screen.cursor(), main_cursor);
+        screen.write(b"\x1b[?47h");
+        assert_eq!(screen.row_text(0).as_deref(), Some("alt"));
+        screen.write(b"\x1b[?47l\x1b[?1047h");
+        assert_eq!(screen.row_text(0).as_deref(), Some(""));
+        screen.write(b"temp\x1b[?1047l");
+        assert_eq!(screen.row_text(1).as_deref(), Some("   main"));
+
+        screen.write(b"\x1b[?1048h\x1b[1;1H\x1b[?1048l");
+        assert_eq!(screen.cursor(), main_cursor);
+        screen.write(b"\x1b[?1049halt\x1b[?1049l");
+        assert_eq!(screen.row_text(1).as_deref(), Some("   main"));
+        assert_eq!(screen.cursor(), main_cursor);
+    }
+
+    #[test]
+    fn unicode_graphemes_and_widths_survive_stream_chunk_boundaries() {
+        let mut screen = TerminalScreen::new(16, 2);
+        screen.write("Aあ你e".as_bytes());
+        screen.write("\u{301}".as_bytes());
+        screen.write("👩".as_bytes());
+        screen.write("\u{200d}".as_bytes());
+        screen.write("💻".as_bytes());
+        assert_eq!(screen.cell(0, 1).unwrap().width, 2);
+        assert_eq!(screen.cell(0, 3).unwrap().width, 2);
+        assert_eq!(screen.cell(0, 5).unwrap().text, "e\u{301}");
+        assert_eq!(screen.cell(0, 6).unwrap().text, "👩\u{200d}💻");
+        assert_eq!(screen.cell(0, 6).unwrap().width, 2);
+        assert_eq!(screen.cell(0, 7).unwrap().width, 0);
+        assert_eq!(
+            screen.row_text(0).as_deref(),
+            Some("Aあ你e\u{301}👩\u{200d}💻")
+        );
+    }
+
+    #[test]
+    fn private_cursor_and_mouse_modes_are_reported_in_render_view() {
+        let mut screen = TerminalScreen::new(6, 2);
+        screen.write(b"\x1b[?1h\x1b[?1002h\x1b[?1006h\x1b[31mX");
+        assert!(screen.application_cursor());
+        assert_eq!(screen.mouse_tracking(), MouseTracking::ButtonMotion);
+        assert!(screen.sgr_mouse());
+        {
+            let view = screen.render_view();
+            assert_eq!(view.dirty_rows, [0, 1]);
+            assert_eq!(view.cells[0][0].text, "X");
+            assert_eq!(
+                view.cells[0][0].style.foreground,
+                Some(TerminalColor::Indexed(1))
+            );
+        }
+        assert_eq!(screen.take_dirty_rows(), Vec::<usize>::new());
     }
 }

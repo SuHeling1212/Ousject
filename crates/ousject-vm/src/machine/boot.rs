@@ -62,11 +62,14 @@ impl VirtualMachine {
         })
     }
 
-    /// Registers a domain-capability Provider for this boot.
+    /// Registers a domain-capability Provider during trusted boot, before the
+    /// first Process is executed. The Provider Registry is sealed on the first
+    /// runnable Process slice; later registration attempts fail.
     ///
     /// # Errors
     ///
-    /// Returns an error if another Provider already owns the same Type.
+    /// Returns an error if another Provider owns the Type or user-space has
+    /// already caused the Registry to be sealed.
     pub fn register_provider(&self, provider: Arc<dyn ObjectProvider>) -> Result<(), VmError> {
         self.providers.register(provider).map_err(VmError::from)
     }

@@ -14,6 +14,8 @@ enum HostEndpoint {
 pub(crate) struct HostNetworkProvider {
     endpoints: Mutex<BTreeMap<ObjectId, HostEndpoint>>,
     completed: Mutex<BTreeMap<ObjectId, ProviderOutcome>>,
+    completed_objects: Mutex<BTreeMap<ObjectId, ObjectId>>,
+    parents: Mutex<BTreeMap<ObjectId, ObjectId>>,
 }
 
 impl ObjectProvider for HostNetworkProvider {
@@ -111,6 +113,10 @@ impl ObjectProvider for HostNetworkProvider {
                     .lock()
                     .map_err(|_| ProviderError::Unavailable)?
                     .insert(child, HostEndpoint::Stream(stream));
+                self.parents
+                    .lock()
+                    .map_err(|_| ProviderError::Unavailable)?
+                    .insert(child, object);
                 let child_state = network_state("tcp", "connected", Some(peer.to_string()));
                 let request = oms_runtime::CreateObject::new(
                     oms_types::NET_ENDPOINT_TYPE,
@@ -143,6 +149,30 @@ impl ObjectProvider for HostNetworkProvider {
                 ProviderOutcome::result(Value::Integer(i64::try_from(bytes.len()).map_err(
                     |_| ProviderError::Adapter("sent byte count is too large".to_owned()),
                 )?))
+            }
+            ("output", [Value::Bytes(bytes)]) => {
+                let mut endpoints = self
+                    .endpoints
+                    .lock()
+                    .map_err(|_| ProviderError::Unavailable)?;
+                let Some(HostEndpoint::Stream(stream)) = endpoints.get_mut(&object) else {
+                    return Err(ProviderError::Adapter(
+                        "Endpoint is not connected".to_owned(),
+                    ));
+                };
+                stream.write_all(bytes).map_err(adapter_error)?;
+                ProviderOutcome::result(Value::Integer(i64::try_from(bytes.len()).map_err(
+                    |_| ProviderError::Adapter("sent byte count is too large".to_owned()),
+                )?))
+            }
+            ("input", [Value::Integer(maximum)]) => {
+                let maximum = usize::try_from(*maximum)
+                    .ok()
+                    .filter(|value| *value > 0 && *value <= 16 * 1024 * 1024)
+                    .ok_or(ProviderError::InvalidArguments(
+                        "input size must be between 1 and 16777216",
+                    ))?;
+                receive_from(&self.endpoints, object, maximum)?
             }
             ("receive", [] | [Value::Null]) => receive_from(&self.endpoints, object, 65_536)?,
             ("receive", [Value::Integer(maximum)]) => {
@@ -178,14 +208,65 @@ impl ObjectProvider for HostNetworkProvider {
             .lock()
             .map_err(|_| ProviderError::Unavailable)?
             .insert(effect, outcome.clone());
+        self.completed_objects
+            .lock()
+            .map_err(|_| ProviderError::Unavailable)?
+            .insert(effect, object);
         Ok(outcome)
     }
 
+    fn object_retired(&self, object: ObjectId) {
+        let Ok(mut parents) = self.parents.lock() else {
+            return;
+        };
+        let mut retired = BTreeSet::from([object]);
+        loop {
+            let children = parents
+                .iter()
+                .filter(|(_, parent)| retired.contains(parent))
+                .map(|(child, _)| *child)
+                .filter(|child| !retired.contains(child))
+                .collect::<Vec<_>>();
+            if children.is_empty() {
+                break;
+            }
+            retired.extend(children);
+        }
+        for endpoint in &retired {
+            parents.remove(endpoint);
+        }
+        drop(parents);
+
+        if let Ok(mut endpoints) = self.endpoints.lock() {
+            for endpoint in &retired {
+                if let Some(HostEndpoint::Stream(stream)) = endpoints.remove(endpoint) {
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+                endpoints.remove(endpoint);
+            }
+        }
+        if let (Ok(mut owners), Ok(mut completed)) =
+            (self.completed_objects.lock(), self.completed.lock())
+        {
+            let effects = owners
+                .iter()
+                .filter(|(_, owner)| retired.contains(owner))
+                .map(|(effect, _)| *effect)
+                .collect::<Vec<_>>();
+            for effect in effects {
+                owners.remove(&effect);
+                completed.remove(&effect);
+            }
+        }
+    }
+
     fn capabilities(&self) -> BTreeSet<String> {
-        ["connect", "listen", "accept", "send", "receive", "close"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        [
+            "connect", "listen", "accept", "send", "receive", "close", "input", "output",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     }
 }
 

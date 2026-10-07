@@ -43,6 +43,22 @@ mod tests {
     }
 
     #[test]
+    fn praxis_can_index_binary_bytes_without_text_conversion() {
+        let vm = vm_with_console(Arc::new(InMemoryObjectManager::new(1).unwrap()));
+        let program = praxis_compiler::compile(
+            "text = \"A\"\nbytes = text.utf8_bytes()\nfirst = bytes[0]\nlength = #bytes",
+        )
+        .unwrap();
+        let process = vm.create_process(&program).unwrap();
+        let report = vm.run(process, 100).unwrap_or_else(|error| {
+            panic!("run failed: {error:?}; process={:?}", vm.process_state(process))
+        });
+        assert_eq!(report.status, ProcessStatus::Halted);
+        assert_eq!(vm.variable(process, "first"), Ok(Value::Integer(65)));
+        assert_eq!(vm.variable(process, "length"), Ok(Value::Integer(1)));
+    }
+
+    #[test]
     fn timer_sleep_suspends_without_blocking_the_process_worker() {
         let vm = vm_with_console(Arc::new(InMemoryObjectManager::new(1).unwrap()));
         let program = praxis_compiler::compile(

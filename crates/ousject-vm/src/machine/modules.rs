@@ -219,7 +219,7 @@ impl VirtualMachine {
                     )
                 {
                     return Err(VmError::Provider(
-                        "Module is loaded in an active Terminal Session".to_owned(),
+                        "Module is loaded in an active Terminal".to_owned(),
                     ));
                 }
             } else if link_name.starts_with("dependent:") {

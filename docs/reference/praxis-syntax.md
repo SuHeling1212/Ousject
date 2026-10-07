@@ -213,8 +213,8 @@ a++
 a + 1
 ```
 
-`exit` 只退出当前 Shell 前端，保留 Terminal Session；`close-session` 才关闭并清空该会话
-上下文。提交的代码发生可捕获错误时，Shell 输出错误并继续读取下一条命令。
+`exit` 只退出当前 Shell 前端，保留其 Terminal Object 和交互 Process；`close-terminal` 才关闭
+Shell Terminal。提交的代码发生可捕获错误时，Shell 输出错误并继续读取下一条命令。
 
 ## 当前没有的语法
 

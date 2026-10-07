@@ -19,6 +19,7 @@ impl VirtualMachine {
         transaction.expect(process, version);
         let args = pop_call_arguments(&mut state.stack, arguments)?;
         let mut ended_processes = Vec::new();
+        let mut retired_objects = Vec::new();
         let (result, output) = if registry {
             self.registry_call(process, state.program, method, &args, &mut transaction)?
         } else {
@@ -42,6 +43,24 @@ impl VirtualMachine {
                     state.stack.push(Value::Text(
                         process_status_name(child_state.status).to_owned(),
                     ));
+                    state.token_position = next;
+                    transaction.update_state(process, encode_process_state(state)?);
+                    self.manager.commit(transaction)?;
+                    return Ok(None);
+                }
+
+                // `wait()` is a cooperative join, not a blocking wait on an
+                // external event. If the child has yielded on IPC or input,
+                // report that state so the caller can deliver the event and
+                // call `wait()` again. Otherwise a single process trying to
+                // drive both sides of a Channel would deadlock itself.
+                if child_state.status == ProcessStatus::Waiting
+                    && matches!(
+                        child_state.wait_reason,
+                        WaitReason::Ipc(_) | WaitReason::Input(_)
+                    )
+                {
+                    state.stack.push(Value::Text("suspended".to_owned()));
                     state.token_position = next;
                     transaction.update_state(process, encode_process_state(state)?);
                     self.manager.commit(transaction)?;
@@ -136,6 +155,7 @@ impl VirtualMachine {
                 explicit.extend(args);
                 let (result, output) = if method == "retire" {
                     self.retire_object(process, state, object_id(&receiver)?, &mut transaction)?;
+                    retired_objects.push(object_id(&receiver)?);
                     (Value::Null, None)
                 } else {
                     (
@@ -165,36 +185,43 @@ impl VirtualMachine {
                 if receiver_type == PROCESS_TYPE && method == "terminate" {
                     ended_processes.push(receiver_id);
                 }
-                if receiver_type == CORE_TERMINAL_SESSION_TYPE
-                    && matches!(method, "cancel" | "close")
-                {
-                    if let Ok(process_id) =
-                        self.terminal_session_process(receiver_id, state.subject)
-                    {
+                if receiver_type == CORE_TERMINAL_TYPE && matches!(method, "cancel" | "close") {
+                    if let Ok(process_id) = self.terminal_process(receiver_id, state.subject) {
                         ended_processes.push(process_id);
                     }
                 }
                 let object = object_id(&receiver)?;
                 let type_id = self.manager.inspect(self.context, object)?.type_id;
-                if self.providers.get(type_id).is_ok()
-                    && !(receiver_type == CORE_TERMINAL_TYPE && method == "open")
-                {
+                let terminal_kernel_method = receiver_type == CORE_TERMINAL_TYPE
+                    && matches!(
+                        method,
+                        "shell"
+                            | "submit"
+                            | "process"
+                            | "history"
+                            | "pending_input"
+                            | "save_input"
+                            | "update_size"
+                            | "cancel"
+                            | "close"
+                    );
+                if self.providers.get(type_id).is_ok() && !terminal_kernel_method {
                     return self
                         .step_provider_call(process, version, state, next, object, method, &args);
                 }
-                if receiver_type == CORE_PACKAGE_INSTALLATION_TYPE
-                    || domain_method
+                if (receiver_type == CORE_TERMINAL_TYPE && terminal_kernel_method)
+                    || receiver_type == CORE_PACKAGE_INSTALLATION_TYPE
+                    || (domain_method
                         && matches!(
                             receiver_type,
                             CORE_PACKAGE_REGISTRY_TYPE
                                 | CORE_PACKAGE_MARKET_TYPE
                                 | CORE_PACKAGE_DOWNLOAD_TYPE
-                                | CORE_TERMINAL_SESSION_TYPE
-                        )
+                        ))
                 {
                     self.manager
                         .require_capability(self.context, object, Capability::Invoke)?;
-                    // Package and Terminal Session handlers validate Subject
+                    // Package and Terminal handlers validate Subject
                     // ownership and stage protected Objects in the same
                     // transaction that advances this caller's Process.
                     transaction = self.manager.begin(AccessContext::new(SYSTEM_SUBJECT));
@@ -209,6 +236,11 @@ impl VirtualMachine {
         self.manager.commit(transaction)?;
         for ended_process in ended_processes {
             self.notify_process_ended(ended_process)?;
+        }
+        for retired_object in retired_objects {
+            self.providers
+                .object_retired(retired_object)
+                .map_err(VmError::from)?;
         }
         Ok(output)
     }

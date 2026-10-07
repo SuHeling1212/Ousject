@@ -143,10 +143,8 @@ impl VirtualMachine {
                     .map(|capability| Value::Text(format!("{capability:?}")))
                     .collect();
                 capabilities.extend(
-                    descriptor
-                        .domain_capabilities
-                        .iter()
-                        .cloned()
+                    self.effective_domain_capabilities(header.type_id, &descriptor)
+                        .into_iter()
                         .map(Value::Text),
                 );
                 if header.type_id == INSTANCE_TYPE {
@@ -192,6 +190,53 @@ impl VirtualMachine {
             _ => return Ok(None),
         };
         Ok(Some(value))
+    }
+
+    pub(super) fn effective_domain_capabilities(
+        &self,
+        type_id: TypeId,
+        descriptor: &TypeDescriptor,
+    ) -> BTreeSet<String> {
+        let provider_backed_device = matches!(
+            type_id,
+            CORE_TERMINAL_TYPE
+                | NET_ENDPOINT_TYPE
+                | NET_RESOLVER_TYPE
+                | DEVICE_DISPLAY_TYPE
+                | DEVICE_SENSOR_TYPE
+                | DEVICE_KEYBOARD_TYPE
+                | DEVICE_BLOCK_STORAGE_TYPE
+        );
+        if !provider_backed_device {
+            return descriptor.domain_capabilities.clone();
+        }
+
+        let mut supported = BTreeSet::new();
+        if let Ok(provider) = self.providers.get(type_id) {
+            supported.extend(provider.capabilities());
+            supported.extend(provider.ephemeral_capabilities());
+        }
+        if type_id == CORE_TERMINAL_TYPE {
+            // Shell state methods are VM intrinsics stored on Terminal
+            // Objects; they are not host Provider operations.
+            supported.extend(
+                [
+                    "shell",
+                    "submit",
+                    "process",
+                    "history",
+                    "pending_input",
+                    "save_input",
+                    "update_size",
+                    "cancel",
+                    "close",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+        }
+        supported.retain(|capability| descriptor.domain_capabilities.contains(capability));
+        supported
     }
 
     #[allow(clippy::too_many_arguments)]

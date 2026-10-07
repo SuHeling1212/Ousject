@@ -1,5 +1,6 @@
 #![allow(clippy::wildcard_imports)]
 
+use super::persistent_terminal::ShellTerminalProvider;
 use super::*;
 
 #[test]
@@ -95,6 +96,8 @@ fn system_shell_collects_bracket_and_backslash_continuations() {
         reads: AtomicUsize::new(0),
     });
     let vm = VirtualMachine::with_console(manager.clone(), console, driver.clone()).unwrap();
+    vm.register_provider(Arc::new(ShellTerminalProvider))
+        .unwrap();
     let setup = vm
         .create_process(
                 &compile_program(
@@ -125,22 +128,24 @@ fn system_shell_collects_bracket_and_backslash_continuations() {
         "Shell reported an error: {:?}",
         report.output
     );
-    let sessions = manager
+    let child_terminals = manager
         .query(
             AccessContext::new(SYSTEM_SUBJECT),
-            &ObjectQuery::new().with_type(CORE_TERMINAL_SESSION_TYPE),
+            &ObjectQuery::new().with_type(CORE_TERMINAL_TYPE),
         )
+        .unwrap()
+        .into_iter()
+        .filter(|terminal| terminal.parent_id.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(child_terminals.len(), 1);
+    let terminal = manager
+        .value(AccessContext::new(SYSTEM_SUBJECT), child_terminals[0].id)
         .unwrap();
-    assert_eq!(sessions.len(), 1);
-    let session_id = sessions[0].id;
-    let session = manager
-        .value(AccessContext::new(SYSTEM_SUBJECT), session_id)
-        .unwrap();
-    let Value::Record(session_fields) = session else {
-        panic!("Terminal Session should be stored as a Record");
+    let Value::Record(terminal_fields) = terminal else {
+        panic!("Terminal should be stored as a Record");
     };
-    let Value::Text(process_id) = &session_fields["process"] else {
-        panic!("Terminal Session should refer to its persistent Process");
+    let Value::Text(process_id) = &terminal_fields["process"] else {
+        panic!("Terminal should refer to its persistent Process");
     };
     let process_id = process_id.parse().unwrap();
     let state = vm.process_state(process_id).unwrap();

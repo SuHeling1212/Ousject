@@ -1,17 +1,37 @@
+func cursor_at(x, y) {
+    position = "\e[H"
+    row = 0
+    while row < y + 2 {
+        position = position + "\e[B"
+        row++
+    }
+    column = 0
+    while column < x + 1 {
+        position = position + "\e[C"
+        column++
+    }
+    return position
+}
+
 func main() {
     console = object.find("console")
-    keyboards = object.query("device.keyboard")
-    if #keyboards == 0 {
-        console.println("Snake needs an interactive terminal with keyboard support.")
+    if !console.is_interactive() {
+        console.println("Snake needs an interactive host terminal.")
         return
     }
 
-    keyboard = object.find(keyboards[0])
+    root_terminal = object.find("terminal")
+    child_terminal_id = root_terminal.create()
+    terminal = object.find(child_terminal_id)
     time = object.find("time")
     math = object.find("math")
 
     width = 24
     height = 14
+    terminal.resize(width + 2, height + 4)
+    terminal.configure({input_mode: "raw", echo: false})
+    terminal.foreground()
+
     capacity = 64
     snake_x = [10, 11, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     snake_y = [7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -23,7 +43,8 @@ func main() {
     won = false
     quit_requested = false
     started = false
-    frame_dirty = true
+    started_banner_drawn = false
+    escape_state = 0
 
     food_clear = false
     while !food_clear {
@@ -39,44 +60,97 @@ func main() {
         }
     }
 
-    keyboard.capture()
-    while running {
-        events = keyboard.poll_events(32)
-        event_index = 0
-        while event_index < #events {
-            event = events[event_index]
-            key = event["key"]
+    border = "+"
+    column = 0
+    while column < width {
+        border = border + "-"
+        column++
+    }
+    border = border + "+\r\n"
+    frame = "\e[?1049h\e[?1h\e[?2004h\e[?1000h\e[?1006h\e[2J\e[H"
+    frame = frame + "SNAKE: WASD/arrows q=quit\r\n" + border
+    row_index = 0
+    while row_index < height {
+        frame = frame + "|"
+        column = 0
+        while column < width {
+            cell = " "
+            if column == food_x and row_index == food_y {
+                cell = "*"
+            }
+            part = 0
+            while part < snake_length {
+                if snake_x[part] == column and snake_y[part] == row_index {
+                    if part == snake_length - 1 {
+                        cell = "@"
+                    } else {
+                        cell = "o"
+                    }
+                }
+                part++
+            }
+            frame = frame + cell
+            column++
+        }
+        frame = frame + "|\r\n"
+        row_index++
+    }
+    frame = frame + border
+    terminal.output(frame.utf8_bytes())
 
-            if key == "q" or event["text"] == "q" or event["text"] == "Q" or key == "escape" {
+    while running {
+        input_bytes = terminal.input(64)
+        input_index = 0
+        while input_index < #input_bytes {
+            key = input_bytes[input_index]
+            if escape_state == 1 {
+                if key == 91 or key == 79 {
+                    escape_state = 2
+                } else {
+                    escape_state = 0
+                }
+            } else if escape_state == 2 {
+                if key == 65 and direction != 3 {
+                    direction = 1
+                    started = true
+                } else if key == 67 and direction != 4 {
+                    direction = 2
+                    started = true
+                } else if key == 66 and direction != 1 {
+                    direction = 3
+                    started = true
+                } else if key == 68 and direction != 2 {
+                    direction = 4
+                    started = true
+                }
+                escape_state = 0
+            } else if key == 27 {
+                escape_state = 1
+            } else if key == 113 or key == 81 or key == 3 {
                 running = false
                 quit_requested = true
-                frame_dirty = true
-            }
-            if (key == "arrow_up" or event["text"] == "w" or event["text"] == "W") and direction != 3 {
+            } else if (key == 119 or key == 87) and direction != 3 {
                 direction = 1
                 started = true
-                frame_dirty = true
-            }
-            if (key == "arrow_right" or event["text"] == "d" or event["text"] == "D") and direction != 4 {
+            } else if (key == 100 or key == 68) and direction != 4 {
                 direction = 2
                 started = true
-                frame_dirty = true
-            }
-            if (key == "arrow_down" or event["text"] == "s" or event["text"] == "S") and direction != 1 {
+            } else if (key == 115 or key == 83) and direction != 1 {
                 direction = 3
                 started = true
-                frame_dirty = true
-            }
-            if (key == "arrow_left" or event["text"] == "a" or event["text"] == "A") and direction != 2 {
+            } else if (key == 97 or key == 65) and direction != 2 {
                 direction = 4
                 started = true
-                frame_dirty = true
             }
-            event_index++
+            input_index++
         }
 
+        old_head_x = snake_x[snake_length - 1]
+        old_head_y = snake_y[snake_length - 1]
+        old_tail_x = snake_x[0]
+        old_tail_y = snake_y[0]
+
         if running and started {
-            frame_dirty = true
             head = snake_length - 1
             next_x = snake_x[head]
             next_y = snake_y[head]
@@ -133,55 +207,32 @@ func main() {
                     }
                 }
             }
+
+            if !started_banner_drawn {
+                banner_update = "\e[1;1HSNAKE: arrows/WASD q=quit\e[K"
+                terminal.output(banner_update.utf8_bytes())
+                started_banner_drawn = true
+            }
+            if !collision {
+                update = cursor_at(old_head_x, old_head_y) + "o"
+                if !eating {
+                    update = update + cursor_at(old_tail_x, old_tail_y) + " "
+                }
+                update = update + cursor_at(next_x, next_y) + "@"
+                if eating and running {
+                    update = update + cursor_at(food_x, food_y) + "*"
+                }
+                terminal.output(update.utf8_bytes())
+            }
         }
 
-        if frame_dirty {
-            border = "+"
-            column = 0
-            while column < width {
-                border = border + "-"
-                column++
-            }
-            border = border + "+\n"
-            if started {
-                frame = "\e[2J\e[H" + "SNAKE  |  arrows/WASD move  |  q quits\n" + border
+        if !running and !quit_requested {
+            if won {
+                status = cursor_at(0, height + 1) + "You filled the snake! You win."
             } else {
-                frame = "\e[2J\e[H" + "SNAKE  |  press arrows/WASD to start  |  q quits\n" + border
+                status = cursor_at(0, height + 1) + "Game over."
             }
-            row_index = 0
-            while row_index < height {
-                frame = frame + "|"
-                column = 0
-                while column < width {
-                    cell = " "
-                    if column == food_x and row_index == food_y {
-                        cell = "*"
-                    }
-                    part = 0
-                    while part < snake_length {
-                        if snake_x[part] == column and snake_y[part] == row_index {
-                            if part == snake_length - 1 {
-                                cell = "@"
-                            } else {
-                                cell = "o"
-                            }
-                        }
-                        part++
-                    }
-                    frame = frame + cell
-                    column++
-                }
-                frame = frame + "|\n"
-                row_index++
-            }
-            frame = frame + border
-            if !running and !quit_requested and won {
-                frame = frame + "You filled the snake! You win.\n"
-            } else if !running and !quit_requested {
-                frame = frame + "Game over.\n"
-            }
-            console.render(frame)
-            frame_dirty = false
+            terminal.output(status.utf8_bytes())
         }
 
         if running {
@@ -193,6 +244,7 @@ func main() {
             time.sleep(delay)
         }
     }
-    keyboard.release()
+    cleanup = "\e[?1006l\e[?1000l\e[?2004l\e[?1l\e[?1049l\e[0m"
+    terminal.output(cleanup.utf8_bytes())
     console.println("Snake exited.")
 }

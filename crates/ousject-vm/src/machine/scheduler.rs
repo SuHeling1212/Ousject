@@ -84,7 +84,14 @@ impl<'a> CooperativeScheduler<'a> {
                                 self.enqueue(process);
                             }
                         }
-                        WaitReason::None | WaitReason::Ipc(_) => {}
+                        WaitReason::Ipc(_) => {
+                            // A Process.wait caller is a cooperative driver.
+                            // Let it resume with "suspended" when its child
+                            // reaches an external IPC wait, so the caller can
+                            // perform the send/receive that makes progress.
+                            self.vm.wake_process_waiters(process)?;
+                        }
+                        WaitReason::None => {}
                     }
                 }
 
@@ -95,29 +102,21 @@ impl<'a> CooperativeScheduler<'a> {
                         AccessContext::new(SYSTEM_SUBJECT),
                         process,
                     )?.parent_id;
-                    let session = parent.filter(|parent| {
+                    let terminal = parent.filter(|parent| {
                         self.vm
                             .manager
                             .inspect(AccessContext::new(SYSTEM_SUBJECT), *parent)
-                            .is_ok_and(|header| header.type_id == CORE_TERMINAL_SESSION_TYPE)
+                            .is_ok_and(|header| {
+                                header.type_id == CORE_TERMINAL_TYPE
+                            })
                     });
-                    if let (Some(session), Some(driver)) = (session, &self.vm.console_driver) {
+                    if let (Some(terminal), Some(driver)) = (terminal, &self.vm.console_driver) {
                         if driver.is_interactive() {
                             driver
                                 .begin_interrupt_watch(process)
                                 .map_err(VmError::Provider)?;
-                            entry.insert(session);
+                            entry.insert(terminal);
                         }
-                    }
-                }
-            }
-
-            if let Some(driver) = &self.vm.console_driver {
-                for (process, session) in &interrupt_watches {
-                    if driver.take_interrupt(*process).map_err(VmError::Provider)? {
-                        let state = self.vm.process_state(*process)?;
-                        self.vm.interrupt_terminal_session(*session, state.subject)?;
-                        notified.insert(*process);
                     }
                 }
             }
@@ -145,6 +144,22 @@ impl<'a> CooperativeScheduler<'a> {
                         // Another Worker owns this Process. Leave the durable
                         // waiter in place for that Worker to wake.
                         return Ok(());
+                    }
+                }
+
+                // Poll after giving a Ready process an execution slice. An
+                // interrupt is intended to cancel active work, not consume a
+                // pending Ctrl-C before a newly submitted command has begun.
+                if let Some(driver) = &self.vm.console_driver {
+                    for (watched, terminal) in &interrupt_watches {
+                        if driver
+                            .take_interrupt(*watched)
+                            .map_err(VmError::Provider)?
+                        {
+                            let state = self.vm.process_state(*watched)?;
+                            self.vm.interrupt_terminal(*terminal, state.subject)?;
+                            notified.insert(*watched);
+                        }
                     }
                 }
                 continue;
@@ -267,7 +282,12 @@ impl<'a> CooperativeScheduler<'a> {
                                 self.enqueue(process);
                             }
                         }
-                        WaitReason::None | WaitReason::Ipc(_) => {}
+                        WaitReason::Ipc(_) => {
+                            if notified.insert(process) {
+                                self.vm.wake_process_waiters(process)?;
+                            }
+                        }
+                        WaitReason::None => {}
                     },
                     ProcessStatus::Halted | ProcessStatus::Terminated | ProcessStatus::Failed => {
                         sleepers.remove(&process);

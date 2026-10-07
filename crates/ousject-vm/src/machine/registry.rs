@@ -224,7 +224,7 @@ impl VirtualMachine {
                 };
                 if instance.get("status") == Some(&Value::Text("active".to_owned())) {
                     return Err(VmError::Provider(
-                        "Module is loaded in an active Terminal Session".to_owned(),
+                        "Module is loaded in an active Terminal".to_owned(),
                     ));
                 }
             }

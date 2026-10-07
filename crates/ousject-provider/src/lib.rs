@@ -2,7 +2,10 @@
 
 mod terminal_screen;
 
-pub use terminal_screen::{TerminalCell, TerminalColor, TerminalScreen, TerminalStyle};
+pub use terminal_screen::{
+    MouseTracking, TerminalCell, TerminalColor, TerminalInputModes, TerminalModes,
+    TerminalRenderView, TerminalScreen, TerminalScreenModes, TerminalStyle,
+};
 
 use oms_runtime::CreateObject;
 use oms_types::{CORE_EFFECT_TYPE, ObjectId, TypeId, Value, ValueError};
@@ -19,6 +22,7 @@ pub enum ProviderError {
     Adapter(String),
     EffectState(&'static str),
     Pending,
+    Sealed,
     Value(ValueError),
     Unavailable,
 }
@@ -145,6 +149,9 @@ pub trait ObjectProvider: fmt::Debug + Send + Sync {
     /// Releases any boot-scoped resources leased by a Process that ended.
     fn process_ended(&self, _process: ObjectId) {}
 
+    /// Releases any boot-scoped resources associated with a retired Object.
+    fn object_retired(&self, _object: ObjectId) {}
+
     /// Controls what the VM may do when the host restarts after this Provider
     /// began an external operation but before its result was committed.
     fn effect_recovery_policy(&self, _capability: &str) -> EffectRecoveryPolicy {
@@ -167,7 +174,13 @@ pub trait ObjectProvider: fmt::Debug + Send + Sync {
 
 #[derive(Debug, Default)]
 pub struct ProviderRegistry {
-    providers: RwLock<BTreeMap<TypeId, Arc<dyn ObjectProvider>>>,
+    state: RwLock<RegistryContents>,
+}
+
+#[derive(Debug, Default)]
+struct RegistryContents {
+    providers: BTreeMap<TypeId, Arc<dyn ObjectProvider>>,
+    sealed: bool,
 }
 
 impl ProviderRegistry {
@@ -180,18 +193,46 @@ impl ProviderRegistry {
     ///
     /// # Errors
     ///
-    /// Returns `Duplicate` when a Provider is already active for that Type.
+    /// Returns `Duplicate` when a Provider is already active for that Type, or
+    /// `Sealed` after user-space execution begins.
     pub fn register(&self, provider: Arc<dyn ObjectProvider>) -> Result<(), ProviderError> {
         let type_id = provider.type_id();
-        let mut providers = self
-            .providers
-            .write()
-            .map_err(|_| ProviderError::Unavailable)?;
-        if providers.contains_key(&type_id) {
+        let mut state = self.state.write().map_err(|_| ProviderError::Unavailable)?;
+        if state.sealed {
+            return Err(ProviderError::Sealed);
+        }
+        if state.providers.contains_key(&type_id) {
             return Err(ProviderError::Duplicate(type_id));
         }
-        providers.insert(type_id, provider);
+        state.providers.insert(type_id, provider);
         Ok(())
+    }
+
+    /// Permanently closes the registration phase for this runtime instance.
+    /// Repeated sealing is safe and does not alter the Provider set.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unavailable` if the registry lock is poisoned.
+    pub fn seal(&self) -> Result<(), ProviderError> {
+        self.state
+            .write()
+            .map_err(|_| ProviderError::Unavailable)?
+            .sealed = true;
+        Ok(())
+    }
+
+    /// Reports whether this runtime has begun user-space execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unavailable` if the registry lock is poisoned.
+    pub fn is_sealed(&self) -> Result<bool, ProviderError> {
+        Ok(self
+            .state
+            .read()
+            .map_err(|_| ProviderError::Unavailable)?
+            .sealed)
     }
 
     /// Returns the active Provider for a Type.
@@ -200,9 +241,10 @@ impl ProviderRegistry {
     ///
     /// Returns `Missing` or `Unavailable` when dispatch is impossible.
     pub fn get(&self, type_id: TypeId) -> Result<Arc<dyn ObjectProvider>, ProviderError> {
-        self.providers
+        self.state
             .read()
             .map_err(|_| ProviderError::Unavailable)?
+            .providers
             .get(&type_id)
             .cloned()
             .ok_or(ProviderError::Missing(type_id))
@@ -216,9 +258,10 @@ impl ProviderRegistry {
     /// Returns `Unavailable` if the registry lock is poisoned.
     pub fn types(&self) -> Result<Vec<TypeId>, ProviderError> {
         Ok(self
-            .providers
+            .state
             .read()
             .map_err(|_| ProviderError::Unavailable)?
+            .providers
             .keys()
             .copied()
             .collect())
@@ -230,12 +273,22 @@ impl ProviderRegistry {
     ///
     /// Returns `Unavailable` if the registry lock is poisoned.
     pub fn process_ended(&self, process: ObjectId) -> Result<(), ProviderError> {
-        let providers = self
-            .providers
-            .read()
-            .map_err(|_| ProviderError::Unavailable)?;
-        for provider in providers.values() {
+        let state = self.state.read().map_err(|_| ProviderError::Unavailable)?;
+        for provider in state.providers.values() {
             provider.process_ended(process);
+        }
+        Ok(())
+    }
+
+    /// Notifies Providers after a durable Object retirement has committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unavailable` if the registry lock is poisoned.
+    pub fn object_retired(&self, object: ObjectId) -> Result<(), ProviderError> {
+        let state = self.state.read().map_err(|_| ProviderError::Unavailable)?;
+        for provider in state.providers.values() {
+            provider.object_retired(object);
         }
         Ok(())
     }
@@ -530,6 +583,34 @@ fn integer(fields: &BTreeMap<String, Value>, key: &str) -> Result<i64, ProviderE
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct StubProvider;
+
+    impl ObjectProvider for StubProvider {
+        fn type_id(&self) -> TypeId {
+            oms_types::CORE_TERMINAL_TYPE
+        }
+
+        fn create(&self, _initial: &Value) -> Result<Value, ProviderError> {
+            Ok(Value::Null)
+        }
+
+        fn invoke(
+            &self,
+            _object: ObjectId,
+            _state: &Value,
+            _capability: &str,
+            _arguments: &[Value],
+            _effect: ObjectId,
+        ) -> Result<ProviderOutcome, ProviderError> {
+            Ok(ProviderOutcome::result(Value::Null))
+        }
+
+        fn capabilities(&self) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+    }
+
     #[test]
     fn effect_round_trips_without_losing_request_or_result() {
         let effect = EffectRecord::pending(
@@ -541,6 +622,21 @@ mod tests {
         )
         .complete(Value::Integer(3));
         assert_eq!(EffectRecord::decode(&effect.encode().unwrap()), Ok(effect));
+    }
+
+    #[test]
+    fn provider_registry_seals_without_changing_its_boot_snapshot() {
+        let registry = ProviderRegistry::new();
+        registry.register(Arc::new(StubProvider)).unwrap();
+        let registered = registry.types().unwrap();
+        assert!(!registry.is_sealed().unwrap());
+        registry.seal().unwrap();
+        assert!(registry.is_sealed().unwrap());
+        assert_eq!(registry.types().unwrap(), registered);
+        assert_eq!(
+            registry.register(Arc::new(StubProvider)),
+            Err(ProviderError::Sealed)
+        );
     }
 
     #[test]

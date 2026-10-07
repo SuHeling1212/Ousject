@@ -127,7 +127,6 @@ pub const CORE_OBJECT_STORE_TYPE: TypeId = TypeId::from_u128(0x110e);
 pub const CORE_MATH_TYPE: TypeId = TypeId::from_u128(0x110f);
 pub const CORE_TIME_TYPE: TypeId = TypeId::from_u128(0x1110);
 pub const CORE_TERMINAL_TYPE: TypeId = TypeId::from_u128(0x1111);
-pub const CORE_TERMINAL_SESSION_TYPE: TypeId = TypeId::from_u128(0x1112);
 pub const CORE_MODULE_TYPE: TypeId = TypeId::from_u128(0x1113);
 pub const CORE_MODULE_REGISTRY_TYPE: TypeId = TypeId::from_u128(0x1114);
 pub const CORE_MODULE_INSTANCE_TYPE: TypeId = TypeId::from_u128(0x1115);
