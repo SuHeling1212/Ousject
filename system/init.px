@@ -14,12 +14,19 @@ if !authentication.local_initialized() {
     setup = object.find(setup_id)
     setup_process_id = setup.execute()
     setup_process = object.find(setup_process_id)
-    setup_process.wait()
+    setup_status = setup_process.wait()
+    if setup_status == "failed" {
+        console.println(setup_process.error)
+        return
+    }
 }
 
 login_id = programs.resolve("login")
 login = object.find(login_id)
 login_process_id = login.execute()
 login_process = object.find(login_process_id)
-login_process.wait()
+login_status = login_process.wait()
+if login_status == "failed" {
+    console.println(login_process.error)
+}
 }

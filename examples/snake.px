@@ -1,0 +1,198 @@
+func main() {
+    console = object.find("console")
+    keyboards = object.query("device.keyboard")
+    if #keyboards == 0 {
+        console.println("Snake needs an interactive terminal with keyboard support.")
+        return
+    }
+
+    keyboard = object.find(keyboards[0])
+    time = object.find("time")
+    math = object.find("math")
+
+    width = 24
+    height = 14
+    capacity = 64
+    snake_x = [10, 11, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    snake_y = [7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    snake_length = 3
+    direction = 2
+    food_x = 5
+    food_y = 5
+    running = true
+    won = false
+    quit_requested = false
+    started = false
+    frame_dirty = true
+
+    food_clear = false
+    while !food_clear {
+        food_clear = true
+        food_x = math.random_integer(1, width - 2)
+        food_y = math.random_integer(1, height - 2)
+        part = 0
+        while part < snake_length {
+            if snake_x[part] == food_x and snake_y[part] == food_y {
+                food_clear = false
+            }
+            part++
+        }
+    }
+
+    keyboard.capture()
+    while running {
+        events = keyboard.poll_events(32)
+        event_index = 0
+        while event_index < #events {
+            event = events[event_index]
+            key = event["key"]
+
+            if key == "q" or event["text"] == "q" or event["text"] == "Q" or key == "escape" {
+                running = false
+                quit_requested = true
+                frame_dirty = true
+            }
+            if (key == "arrow_up" or event["text"] == "w" or event["text"] == "W") and direction != 3 {
+                direction = 1
+                started = true
+                frame_dirty = true
+            }
+            if (key == "arrow_right" or event["text"] == "d" or event["text"] == "D") and direction != 4 {
+                direction = 2
+                started = true
+                frame_dirty = true
+            }
+            if (key == "arrow_down" or event["text"] == "s" or event["text"] == "S") and direction != 1 {
+                direction = 3
+                started = true
+                frame_dirty = true
+            }
+            if (key == "arrow_left" or event["text"] == "a" or event["text"] == "A") and direction != 2 {
+                direction = 4
+                started = true
+                frame_dirty = true
+            }
+            event_index++
+        }
+
+        if running and started {
+            frame_dirty = true
+            head = snake_length - 1
+            next_x = snake_x[head]
+            next_y = snake_y[head]
+            if direction == 1 { next_y-- }
+            if direction == 2 { next_x++ }
+            if direction == 3 { next_y++ }
+            if direction == 4 { next_x-- }
+
+            eating = next_x == food_x and next_y == food_y
+            collision = next_x <= 0 or next_x >= width - 1 or next_y <= 0 or next_y >= height - 1
+            part = 0
+            if !eating { part = 1 }
+            while part < snake_length {
+                if snake_x[part] == next_x and snake_y[part] == next_y {
+                    collision = true
+                }
+                part++
+            }
+
+            if collision {
+                running = false
+            } else {
+                if eating {
+                    if snake_length < capacity {
+                        snake_length++
+                    } else {
+                        running = false
+                        won = true
+                    }
+                } else {
+                    part = 0
+                    while part < snake_length - 1 {
+                        snake_x[part] = snake_x[part + 1]
+                        snake_y[part] = snake_y[part + 1]
+                        part++
+                    }
+                }
+                snake_x[snake_length - 1] = next_x
+                snake_y[snake_length - 1] = next_y
+
+                if eating and running {
+                    food_clear = false
+                    while !food_clear {
+                        food_clear = true
+                        food_x = math.random_integer(1, width - 2)
+                        food_y = math.random_integer(1, height - 2)
+                        part = 0
+                        while part < snake_length {
+                            if snake_x[part] == food_x and snake_y[part] == food_y {
+                                food_clear = false
+                            }
+                            part++
+                        }
+                    }
+                }
+            }
+        }
+
+        if frame_dirty {
+            border = "+"
+            column = 0
+            while column < width {
+                border = border + "-"
+                column++
+            }
+            border = border + "+\n"
+            if started {
+                frame = "\e[2J\e[H" + "SNAKE  |  arrows/WASD move  |  q quits\n" + border
+            } else {
+                frame = "\e[2J\e[H" + "SNAKE  |  press arrows/WASD to start  |  q quits\n" + border
+            }
+            row_index = 0
+            while row_index < height {
+                frame = frame + "|"
+                column = 0
+                while column < width {
+                    cell = " "
+                    if column == food_x and row_index == food_y {
+                        cell = "*"
+                    }
+                    part = 0
+                    while part < snake_length {
+                        if snake_x[part] == column and snake_y[part] == row_index {
+                            if part == snake_length - 1 {
+                                cell = "@"
+                            } else {
+                                cell = "o"
+                            }
+                        }
+                        part++
+                    }
+                    frame = frame + cell
+                    column++
+                }
+                frame = frame + "|\n"
+                row_index++
+            }
+            frame = frame + border
+            if !running and !quit_requested and won {
+                frame = frame + "You filled the snake! You win.\n"
+            } else if !running and !quit_requested {
+                frame = frame + "Game over.\n"
+            }
+            console.render(frame)
+            frame_dirty = false
+        }
+
+        if running {
+            delay = 100
+            if started {
+                delay = 230 - snake_length
+                if delay < 120 { delay = 120 }
+            }
+            time.sleep(delay)
+        }
+    }
+    keyboard.release()
+    console.println("Snake exited.")
+}

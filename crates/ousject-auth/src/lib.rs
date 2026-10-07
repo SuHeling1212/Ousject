@@ -30,6 +30,7 @@ pub fn sha256_digest(message: &[u8]) -> [u8; 32] {
 pub enum AuthError {
     Oms(OmsError),
     InvalidName,
+    EmptyPassword,
     DuplicateUser,
     InvalidCredentials,
     InvalidToken,
@@ -41,7 +42,10 @@ pub enum AuthError {
 
 impl fmt::Display for AuthError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{self:?}")
+        match self {
+            Self::EmptyPassword => formatter.write_str("password cannot be empty"),
+            _ => write!(formatter, "{self:?}"),
+        }
     }
 }
 
@@ -144,13 +148,12 @@ impl AuthService {
         password: &str,
         transaction: &mut Transaction,
     ) -> Result<UserIdentity, AuthError> {
-        if name == LOCAL_USER_NAME
-            || name.trim() != name
-            || name.is_empty()
-            || name.contains('\0')
-            || password.is_empty()
+        if name == LOCAL_USER_NAME || name.trim() != name || name.is_empty() || name.contains('\0')
         {
             return Err(AuthError::InvalidName);
+        }
+        if password.is_empty() {
+            return Err(AuthError::EmptyPassword);
         }
         if self.find_user(name)?.is_some() {
             return Err(AuthError::DuplicateUser);
@@ -190,7 +193,7 @@ impl AuthService {
         transaction: &mut Transaction,
     ) -> Result<UserIdentity, AuthError> {
         if password.is_empty() {
-            return Err(AuthError::InvalidName);
+            return Err(AuthError::EmptyPassword);
         }
         if self.find_user(LOCAL_USER_NAME)?.is_some()
             || self
@@ -429,7 +432,7 @@ impl AuthService {
         transaction: &mut Transaction,
     ) -> Result<(), AuthError> {
         if password.is_empty() {
-            return Err(AuthError::InvalidName);
+            return Err(AuthError::EmptyPassword);
         }
         let Some((object, value)) = self.find_user(name)? else {
             return Err(AuthError::InvalidCredentials);
@@ -894,6 +897,7 @@ mod tests {
     fn local_is_the_unique_named_highest_system_user() {
         let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
         let auth = AuthService::with_test_settings(manager, Arc::new(FixedEntropy));
+        assert_eq!(auth.initialize_local(""), Err(AuthError::EmptyPassword));
         let local = auth.initialize_local("local password").unwrap();
 
         assert_eq!(local.name, LOCAL_USER_NAME);

@@ -2,9 +2,17 @@ func main() {
 console = object.find("console")
 authentication = object.find("authentication")
 
-console.print("Create the local password: ")
-password = console.read_secret()
-identity = authentication.initialize_local(password)
-console.println("local initialized")
-console.println(identity)
+initialized = false
+while !initialized {
+    try {
+        console.print("Create the local password: ")
+        password = console.read_secret()
+        identity = authentication.initialize_local(password)
+        console.println("local initialized")
+        console.println(identity)
+        initialized = true
+    } catch (error) {
+        console.println(error)
+    }
+}
 }

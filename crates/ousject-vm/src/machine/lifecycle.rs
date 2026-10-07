@@ -197,6 +197,12 @@ impl VirtualMachine {
                 }
                 self.manager.commit(transaction)?;
             }
+            if matches!(
+                state.status,
+                ProcessStatus::Halted | ProcessStatus::Terminated | ProcessStatus::Failed
+            ) {
+                self.wake_process_waiters(process.id)?;
+            }
             if state.status == ProcessStatus::Ready {
                 ready.push(process.id);
             }
@@ -359,6 +365,53 @@ impl VirtualMachine {
     /// failures. Reaching the step limit releases the Worker lease and returns
     /// the Process to `Ready` for another scheduling turn.
     pub fn run(&self, process: ObjectId, step_limit: u64) -> Result<RunReport, VmError> {
+        let mut total_steps = 0;
+        let mut output = Vec::new();
+        loop {
+            let remaining = step_limit.saturating_sub(total_steps);
+            let report = self.run_slice(process, remaining)?;
+            total_steps = total_steps.saturating_add(report.steps);
+            output.extend(report.output);
+
+            let state = self.process_state(process)?;
+            let WaitReason::Process(child) = state.wait_reason else {
+                return Ok(RunReport {
+                    process,
+                    steps: total_steps,
+                    status: state.status,
+                    output,
+                });
+            };
+            if state.status != ProcessStatus::Waiting {
+                return Ok(RunReport {
+                    process,
+                    steps: total_steps,
+                    status: state.status,
+                    output,
+                });
+            }
+
+            CooperativeScheduler::new(self).run_process_wait(process, child)?;
+            let state = self.process_state(process)?;
+            if state.status != ProcessStatus::Ready || total_steps >= step_limit {
+                return Ok(RunReport {
+                    process,
+                    steps: total_steps,
+                    status: state.status,
+                    output,
+                });
+            }
+        }
+    }
+
+    /// Executes one leased Process slice without driving any Process it waits
+    /// for. The cooperative scheduler uses this primitive to keep leases
+    /// scoped to one Process at a time.
+    pub(super) fn run_slice(
+        &self,
+        process: ObjectId,
+        step_limit: u64,
+    ) -> Result<RunReport, VmError> {
         let current = self.process_state(process)?;
         if current.status == ProcessStatus::Waiting
             && timer_deadline(&current.wait_reason)

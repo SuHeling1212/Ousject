@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cargo_local="$project_root/scripts/cargo-local"
+
+cd "$project_root"
+"$cargo_local" build --locked --release -p ousject-cli
+
+binary="$project_root/target/release/ousject"
+if [ ! -x "$binary" ]; then
+    echo "Build completed without producing executable: $binary" >&2
+    exit 1
+fi
+
+echo "Build complete: $binary"

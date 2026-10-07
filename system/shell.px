@@ -38,6 +38,9 @@ while running {
         session.save_input("")
     } else if source == "exit" {
         running = false
+    } else if source == "close-session" {
+        session.close()
+        running = false
     } else if source == "objects" {
         type_list = types.types()
         type_index = 0
@@ -181,11 +184,13 @@ while running {
         try {
             session.save_input("")
             session.submit(source)
-            process.wait()
+            status = process.wait()
+            if status == "failed" {
+                console.println(process.error)
+            }
         } catch (error) {
             console.println(error)
         }
     }
 }
-session.close()
 }

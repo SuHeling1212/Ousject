@@ -158,7 +158,7 @@ pub(crate) fn run_hosted_process(
             });
         }
         if vm.poll_pending_effect(process).map_err(error_text)? {
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(50));
             continue;
         }
         if let Some(delay) = vm.time_until_wake(process).map_err(error_text)? {

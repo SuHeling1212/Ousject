@@ -240,6 +240,7 @@ impl<'a> Lexer<'a> {
                     let escaped = self.peek().ok_or_else(|| self.error("unfinished escape"))?;
                     self.position += 1;
                     value.push(match escaped {
+                        b'e' => '\u{1b}',
                         b'n' => '\n',
                         b'r' => '\r',
                         b't' => '\t',

@@ -34,6 +34,7 @@ impl VirtualMachine {
             .links()
             .get("$effect")
             .copied();
+        let is_new_effect = existing_effect.is_none();
         let effect = if let Some(effect) = existing_effect {
             let record = EffectRecord::decode(self.manager.read(system, effect)?.state())
                 .map_err(VmError::from)?;
@@ -115,13 +116,15 @@ impl VirtualMachine {
                 running
                     .expect(effect, effect_view.header().version)
                     .update_state(effect, record.encode().map_err(VmError::from)?);
-                self.stage_audit_event(
-                    state.subject,
-                    "effect.running",
-                    effect,
-                    Value::Record(BTreeMap::new()),
-                    &mut running,
-                )?;
+                if is_new_effect {
+                    self.stage_audit_event(
+                        state.subject,
+                        "effect.running",
+                        effect,
+                        Value::Record(BTreeMap::new()),
+                        &mut running,
+                    )?;
+                }
                 self.manager.commit(running)?;
             }
             provider.invoke_for_process(
@@ -213,13 +216,15 @@ impl VirtualMachine {
                     .expect(effect, effect_view.header().version)
                     .update_state(effect, record.retry().encode().map_err(VmError::from)?)
                     .update_state(process, encode_process_state(state)?);
-                self.stage_audit_event(
-                    state.subject,
-                    "effect.pending",
-                    effect,
-                    Value::Record(BTreeMap::new()),
-                    &mut pending,
-                )?;
+                if is_new_effect {
+                    self.stage_audit_event(
+                        state.subject,
+                        "effect.pending",
+                        effect,
+                        Value::Record(BTreeMap::new()),
+                        &mut pending,
+                    )?;
+                }
                 self.manager.commit(pending)?;
                 Ok(None)
             }

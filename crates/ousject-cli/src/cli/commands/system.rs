@@ -25,6 +25,13 @@ pub(crate) fn command_system_install(arguments: &[String]) -> Result<(), String>
                     if fields.get("name") == Some(&Value::Text("system".to_owned()))
             )
         });
+    let current = installed
+        .as_ref()
+        .map(|item| manager.read(context, item.id).map_err(error_text))
+        .transpose()?;
+    let current_links = current
+        .as_ref()
+        .map_or_else(BTreeMap::new, |view| view.links().clone());
     let directory = Path::new(&positional[0]);
     let mut entries = std::fs::read_dir(directory)
         .map_err(error_text)?
@@ -45,6 +52,7 @@ pub(crate) fn command_system_install(arguments: &[String]) -> Result<(), String>
     )
     .with_id(namespace);
     let mut programs = Vec::new();
+    let mut new_program_ids = std::collections::BTreeSet::new();
     for entry in entries {
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("px") {
@@ -56,28 +64,105 @@ pub(crate) fn command_system_install(arguments: &[String]) -> Result<(), String>
             .ok_or_else(|| "system program name is not UTF-8".to_owned())?
             .to_owned();
         let program = compile_source_file(&path)?;
-        let request = CreateObject::new(CORE_PROGRAM_TYPE, program.encode().map_err(error_text)?);
-        namespace_request.links.insert(name, request.id);
-        programs.push(request);
+        let encoded = program.encode().map_err(error_text)?;
+        let unchanged = current_links.get(&name).and_then(|id| {
+            manager.read(context, *id).ok().and_then(|view| {
+                (view.header().type_id == CORE_PROGRAM_TYPE && view.state() == encoded.as_slice())
+                    .then_some(*id)
+            })
+        });
+        let program_id = if let Some(program_id) = unchanged {
+            program_id
+        } else {
+            let request = CreateObject::new(CORE_PROGRAM_TYPE, encoded).with_parent(namespace);
+            let id = request.id;
+            programs.push(request);
+            id
+        };
+        namespace_request.links.insert(name, program_id);
+        new_program_ids.insert(program_id);
     }
     if !namespace_request.links.contains_key("init") {
         return Err("system directory has no init.px".to_owned());
     }
+    let namespace_links = namespace_request.links.clone();
     let mut transaction = manager.begin(context);
+    if installed.is_none() {
+        namespace_request.links.clear();
+        transaction.create(namespace_request);
+    }
     for program in programs {
         transaction.create(program);
     }
+    let active_objects = manager.list(context).map_err(error_text)?;
+    let stale_programs = current_links
+        .values()
+        .copied()
+        .filter(|program| !new_program_ids.contains(program))
+        .chain(
+            active_objects
+                .iter()
+                .filter(|object| {
+                    object.type_id == CORE_PROGRAM_TYPE && object.parent_id == Some(namespace)
+                })
+                .map(|object| object.id)
+                .filter(|program| !new_program_ids.contains(program)),
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+    for program in &new_program_ids {
+        if let Ok(view) = manager.read(context, *program) {
+            if view.header().parent_id != Some(namespace) {
+                if let Some(parent) = view.header().parent_id {
+                    let parent_version = manager
+                        .inspect(context, parent)
+                        .map_err(error_text)?
+                        .version;
+                    transaction.expect(parent, parent_version);
+                }
+                transaction
+                    .expect(*program, view.header().version)
+                    .reparent(*program, Some(namespace));
+            }
+        }
+    }
     if let Some(installed) = installed {
-        let current = manager.read(context, installed.id).map_err(error_text)?;
         transaction.expect(installed.id, installed.version);
-        for name in current.links().keys() {
+        for name in current_links.keys() {
             transaction.remove_link(installed.id, name.clone());
         }
-        for (name, program) in namespace_request.links {
+        for (name, program) in namespace_links {
             transaction.set_link(installed.id, name, program);
         }
     } else {
-        transaction.create(namespace_request);
+        for (name, program) in namespace_links {
+            transaction.set_link(namespace, name, program);
+        }
+    }
+    for program in stale_programs {
+        let Ok(view) = manager.read(context, program) else {
+            continue;
+        };
+        if view.header().type_id != CORE_PROGRAM_TYPE || !view.children().is_empty() {
+            continue;
+        }
+        let referenced_elsewhere = active_objects.iter().any(|object| {
+            object.id != namespace
+                && manager
+                    .read(context, object.id)
+                    .is_ok_and(|source| source.links().values().any(|target| *target == program))
+        });
+        if !referenced_elsewhere {
+            if let Some(parent) = view.header().parent_id {
+                let parent_version = manager
+                    .inspect(context, parent)
+                    .map_err(error_text)?
+                    .version;
+                transaction.expect(parent, parent_version);
+            }
+            transaction
+                .expect(program, view.header().version)
+                .tombstone(program);
+        }
     }
     manager.commit(transaction).map_err(error_text)?;
     println!("installed system programs in namespace={namespace}");

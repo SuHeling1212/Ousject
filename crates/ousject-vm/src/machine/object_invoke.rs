@@ -1130,9 +1130,6 @@ impl VirtualMachine {
                 )?;
                 Ok((Value::Null, None))
             }
-            (PROCESS_TYPE, "wait", []) if object != current_process => {
-                Ok((self.wait_for_process(current_process, object)?, None))
-            }
             (PROCESS_TYPE, "wait", []) => Ok((
                 Value::Text(process_status_name(current_state.status).to_owned()),
                 None,

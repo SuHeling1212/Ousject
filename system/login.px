@@ -3,17 +3,28 @@ console = object.find("console")
 authentication = object.find("authentication")
 programs = object.find("programs")
 
-console.print("user: ")
-name = console.read_line()
-console.print("password: ")
-password = console.read_secret()
-session = authentication.login(name, password)
-console.println("logged in")
-console.println(session["subject"])
+logged_in = false
+while !logged_in {
+    try {
+        console.print("user: ")
+        name = console.read_line()
+        console.print("password: ")
+        password = console.read_secret()
+        session = authentication.login(name, password)
+        console.println("logged in")
+        console.println(session["subject"])
+        logged_in = true
+    } catch (error) {
+        console.println(error)
+    }
+}
 
 shell_id = programs.resolve("shell")
 shell = object.find(shell_id)
 shell_process_id = shell.execute()
 shell_process = object.find(shell_process_id)
-shell_process.wait()
+shell_status = shell_process.wait()
+if shell_status == "failed" {
+    console.println(shell_process.error)
+}
 }

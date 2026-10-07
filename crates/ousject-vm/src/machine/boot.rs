@@ -349,12 +349,69 @@ impl VirtualMachine {
     }
 
     pub(super) fn notify_process_ended(&self, process: ObjectId) -> Result<(), VmError> {
+        self.wake_process_waiters(process)?;
         self.providers
             .process_ended(process)
             .map_err(VmError::from)?;
         if let Ok(notifier) = self.process_reaper.lock() {
             if let Some(notifier) = notifier.as_ref() {
                 let _ = notifier.send(ProcessReaperMessage::Wake(process));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn wake_process_waiters(&self, process: ObjectId) -> Result<(), VmError> {
+        let system = AccessContext::new(SYSTEM_SUBJECT);
+        for attempt in 0..3 {
+            let child = self.manager.read(system, process)?;
+            let waiters = child
+                .links()
+                .iter()
+                .filter(|(name, _)| name.starts_with("$wait:"))
+                .map(|(name, waiter)| (name.clone(), *waiter))
+                .collect::<Vec<_>>();
+            if waiters.is_empty() {
+                return Ok(());
+            }
+
+            let mut transaction = self.manager.begin(system);
+            transaction.expect(process, child.header().version);
+            for (link, waiter) in waiters {
+                let waiter_view = match self.manager.read(system, waiter) {
+                    Ok(view) => view,
+                    Err(OmsError::InvalidLifecycle { .. }) => {
+                        transaction.remove_link(process, link);
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let mut state = decode_process_state(waiter_view.state())?;
+                if state.status == ProcessStatus::Waiting
+                    && state.wait_reason == WaitReason::Process(process)
+                    && waiter_view.links().get("$waiting_on") == Some(&process)
+                {
+                    state.status = ProcessStatus::Ready;
+                    state.wait_reason = WaitReason::None;
+                    if state.lease_owner.is_some() {
+                        state.lease_generation = state
+                            .lease_generation
+                            .checked_add(1)
+                            .ok_or_else(|| invalid_state("Worker lease generation overflow"))?;
+                    }
+                    state.lease_owner = None;
+                    state.lease_deadline_unix_ms = None;
+                    transaction
+                        .expect(waiter, waiter_view.header().version)
+                        .remove_link(waiter, "$waiting_on")
+                        .update_state(waiter, encode_process_state(&state)?);
+                }
+                transaction.remove_link(process, link);
+            }
+            match self.manager.commit(transaction) {
+                Ok(_) => return Ok(()),
+                Err(OmsError::Conflict { .. }) if attempt < 2 => continue,
+                Err(error) => return Err(error.into()),
             }
         }
         Ok(())

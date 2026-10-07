@@ -517,6 +517,7 @@ impl VirtualMachine {
             .update_state(session, Value::Record(fields).encode()?)
             .update_state(process, encode_process_state(&process_state)?);
         self.manager.commit(transaction)?;
+        self.notify_process_ended(process)?;
         Ok(())
     }
 

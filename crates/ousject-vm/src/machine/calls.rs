@@ -26,6 +26,45 @@ impl VirtualMachine {
             let receiver_id = object_id(&receiver)?;
             let receiver_type = self.manager.inspect(self.context, receiver_id)?.type_id;
             self.enforce_package_capability(process, state.subject, receiver_type, method)?;
+            if receiver_type == PROCESS_TYPE && method == "wait" && receiver_id != process {
+                if !args.is_empty() {
+                    return Err(VmError::TypeError("process.wait expects no arguments"));
+                }
+                self.manager
+                    .require_capability(self.context, receiver_id, Capability::Invoke)?;
+                let system = AccessContext::new(SYSTEM_SUBJECT);
+                let child = self.manager.read(system, receiver_id)?;
+                let child_state = decode_process_state(child.state())?;
+                if matches!(
+                    child_state.status,
+                    ProcessStatus::Halted | ProcessStatus::Terminated | ProcessStatus::Failed
+                ) {
+                    state.stack.push(Value::Text(
+                        process_status_name(child_state.status).to_owned(),
+                    ));
+                    state.token_position = next;
+                    transaction.update_state(process, encode_process_state(state)?);
+                    self.manager.commit(transaction)?;
+                    return Ok(None);
+                }
+
+                // Keep the call operands and instruction position intact. The
+                // scheduler will retry this call after the child ends.
+                state.stack.push(receiver);
+                state.stack.extend(args);
+                state.status = ProcessStatus::Waiting;
+                state.wait_reason = WaitReason::Process(receiver_id);
+                state.ended_at_unix_ms = None;
+                let mut waiting = self.manager.begin(system);
+                waiting
+                    .expect(process, version)
+                    .expect(receiver_id, child.header().version)
+                    .set_link(process, "$waiting_on", receiver_id)
+                    .set_link(receiver_id, format!("$wait:{process}"), process)
+                    .update_state(process, encode_process_state(state)?);
+                self.manager.commit(waiting)?;
+                return Ok(None);
+            }
             if receiver_type == CORE_TIME_TYPE && method == "sleep" {
                 self.manager
                     .require_capability(self.context, receiver_id, Capability::Invoke)?;
@@ -125,6 +164,15 @@ impl VirtualMachine {
             } else {
                 if receiver_type == PROCESS_TYPE && method == "terminate" {
                     ended_processes.push(receiver_id);
+                }
+                if receiver_type == CORE_TERMINAL_SESSION_TYPE
+                    && matches!(method, "cancel" | "close")
+                {
+                    if let Ok(process_id) =
+                        self.terminal_session_process(receiver_id, state.subject)
+                    {
+                        ended_processes.push(process_id);
+                    }
                 }
                 let object = object_id(&receiver)?;
                 let type_id = self.manager.inspect(self.context, object)?.type_id;

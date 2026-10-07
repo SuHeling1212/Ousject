@@ -1,3 +1,5 @@
+const EFFECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 pub struct CooperativeScheduler<'a> {
     vm: &'a VirtualMachine,
     queue: VecDeque<ObjectId>,
@@ -32,6 +34,148 @@ impl<'a> CooperativeScheduler<'a> {
         }
     }
 
+    /// Drives the dependency tree of a Process wait until its waiter becomes
+    /// runnable or the dependency is itself blocked on an external condition.
+    /// Every Process is run in its own lease-bounded slice.
+    fn run_process_wait(&mut self, waiter: ObjectId, child: ObjectId) -> Result<(), VmError> {
+        let mut tracked = BTreeSet::from([child]);
+        let mut notified = BTreeSet::new();
+        let mut interrupt_watches = BTreeMap::<ObjectId, ObjectId>::new();
+        self.enqueue(child);
+
+        let outcome = (|| loop {
+            let waiter_state = self.vm.process_state(waiter)?;
+            if waiter_state.status != ProcessStatus::Waiting
+                || waiter_state.wait_reason != WaitReason::Process(child)
+            {
+                return Ok(());
+            }
+
+            let current = tracked.iter().copied().collect::<Vec<_>>();
+            for process in current {
+                let state = self.vm.process_state(process)?;
+                if matches!(
+                    state.status,
+                    ProcessStatus::Halted | ProcessStatus::Terminated | ProcessStatus::Failed
+                ) {
+                    if notified.insert(process) {
+                        self.vm.wake_process_waiters(process)?;
+                    }
+                    continue;
+                }
+
+                if state.status == ProcessStatus::Ready {
+                    self.enqueue(process);
+                } else if state.status == ProcessStatus::Waiting {
+                    match state.wait_reason {
+                        WaitReason::Process(dependency) => {
+                            tracked.insert(dependency);
+                            self.enqueue(dependency);
+                        }
+                        WaitReason::Timer { .. } => {
+                            if self.vm.wake_due_timer(process)? {
+                                self.enqueue(process);
+                            }
+                        }
+                        WaitReason::Input(_) | WaitReason::Effect(_) => {
+                            if self.vm.poll_pending_effect(process)? {
+                                std::thread::sleep(EFFECT_POLL_INTERVAL);
+                                self.enqueue(process);
+                            }
+                        }
+                        WaitReason::None | WaitReason::Ipc(_) => {}
+                    }
+                }
+
+                if !interrupt_watches.contains_key(&process) {
+                    let parent = self.vm.manager.inspect(
+                        AccessContext::new(SYSTEM_SUBJECT),
+                        process,
+                    )?.parent_id;
+                    let session = parent.filter(|parent| {
+                        self.vm
+                            .manager
+                            .inspect(AccessContext::new(SYSTEM_SUBJECT), *parent)
+                            .is_ok_and(|header| header.type_id == CORE_TERMINAL_SESSION_TYPE)
+                    });
+                    if let (Some(session), Some(driver)) = (session, &self.vm.console_driver) {
+                        if driver.is_interactive() {
+                            driver
+                                .begin_interrupt_watch(process)
+                                .map_err(VmError::Provider)?;
+                            interrupt_watches.insert(process, session);
+                        }
+                    }
+                }
+            }
+
+            if let Some(driver) = &self.vm.console_driver {
+                for (process, session) in &interrupt_watches {
+                    if driver.take_interrupt(*process).map_err(VmError::Provider)? {
+                        let state = self.vm.process_state(*process)?;
+                        self.vm.interrupt_terminal_session(*session, state.subject)?;
+                        notified.insert(*process);
+                    }
+                }
+            }
+
+            if let Some(process) = self.queue.pop_front() {
+                let state = self.vm.process_state(process)?;
+                if matches!(state.status, ProcessStatus::Ready | ProcessStatus::Running) {
+                    let report = match self.vm.run_slice(process, 4_096) {
+                        Ok(report) => report,
+                        Err(_error)
+                            if self.vm.process_state(process)?.status == ProcessStatus::Failed =>
+                        {
+                            // A failed dependency is a completed wait target.
+                            // Its waiter must resume so Process.wait() can
+                            // return "failed" and the caller can inspect the
+                            // child's persisted error.
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    tracked.insert(process);
+                    if report.steps == 0
+                        && matches!(report.status, ProcessStatus::Ready | ProcessStatus::Running)
+                    {
+                        // Another Worker owns this Process. Leave the durable
+                        // waiter in place for that Worker to wake.
+                        return Ok(());
+                    }
+                }
+                continue;
+            }
+
+            // Timers are durable scheduler waits; sleep only until the
+            // earliest tracked Process becomes runnable.
+            let mut next_wake = None;
+            for process in &tracked {
+                if let Some(delay) = self.vm.time_until_wake(*process)? {
+                    next_wake = Some(next_wake.map_or(delay, |value: Duration| value.min(delay)));
+                }
+            }
+            if let Some(delay) = next_wake {
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+                continue;
+            }
+
+            // No runnable or time-based work remains. The parent stays
+            // durably Waiting until an external event or another scheduler
+            // advances the dependency.
+            return Ok(());
+        })();
+
+        if let Some(driver) = &self.vm.console_driver {
+            for process in interrupt_watches.keys() {
+                driver.end_interrupt_watch(*process);
+            }
+        }
+        outcome
+    }
+
     /// Runs durable ready Processes in round-robin execution slices.
     ///
     /// A Worker owns a Process through a persisted lease for one slice. Waiting
@@ -47,8 +191,90 @@ impl<'a> CooperativeScheduler<'a> {
         let mut total_steps = 0;
         let mut reports = BTreeMap::<ObjectId, RunReport>::new();
         let mut sleepers = BTreeSet::new();
+        let mut waiting_on_process = BTreeMap::<ObjectId, ObjectId>::new();
+        let mut dependencies = BTreeSet::new();
+        let mut notified = BTreeSet::new();
+        let system = AccessContext::new(SYSTEM_SUBJECT);
+        for child in self.queue.iter().copied().collect::<Vec<_>>() {
+            if let Ok(view) = self.vm.manager.read(system, child) {
+                for waiter in view
+                    .links()
+                    .iter()
+                    .filter(|(name, _)| name.starts_with("$wait:"))
+                    .map(|(_, waiter)| waiter)
+                {
+                    waiting_on_process.insert(*waiter, child);
+                    dependencies.insert(child);
+                }
+            }
+        }
 
         loop {
+            let waiters = waiting_on_process
+                .iter()
+                .map(|(waiter, child)| (*waiter, *child))
+                .collect::<Vec<_>>();
+            for (waiter, child) in waiters {
+                let state = self.vm.process_state(waiter)?;
+                if state.status == ProcessStatus::Waiting
+                    && state.wait_reason == WaitReason::Process(child)
+                {
+                    dependencies.insert(child);
+                    self.enqueue(child);
+                } else {
+                    waiting_on_process.remove(&waiter);
+                    if state.status == ProcessStatus::Ready {
+                        self.enqueue(waiter);
+                    }
+                }
+            }
+
+            let tracked = dependencies.iter().copied().collect::<Vec<_>>();
+            for process in tracked {
+                if let Ok(view) = self.vm.manager.read(system, process) {
+                    for waiter in view
+                        .links()
+                        .iter()
+                        .filter(|(name, _)| name.starts_with("$wait:"))
+                        .map(|(_, waiter)| waiter)
+                    {
+                        waiting_on_process.insert(*waiter, process);
+                    }
+                }
+                let state = self.vm.process_state(process)?;
+                match state.status {
+                    ProcessStatus::Ready => self.enqueue(process),
+                    ProcessStatus::Waiting => match state.wait_reason {
+                        WaitReason::Process(child) => {
+                            dependencies.insert(child);
+                            self.enqueue(child);
+                        }
+                        WaitReason::Timer { .. } => {
+                            if self.vm.wake_due_timer(process)? {
+                                sleepers.remove(&process);
+                                self.enqueue(process);
+                            } else {
+                                sleepers.insert(process);
+                            }
+                        }
+                        WaitReason::Input(_) | WaitReason::Effect(_) => {
+                            if self.vm.poll_pending_effect(process)? {
+                                std::thread::sleep(EFFECT_POLL_INTERVAL);
+                                self.enqueue(process);
+                            }
+                        }
+                        WaitReason::None | WaitReason::Ipc(_) => {}
+                    },
+                    ProcessStatus::Halted | ProcessStatus::Terminated | ProcessStatus::Failed => {
+                        sleepers.remove(&process);
+                        if notified.insert(process) {
+                            self.vm.wake_process_waiters(process)?;
+                        }
+                    }
+                    ProcessStatus::Running | ProcessStatus::Suspended => {}
+                }
+            }
+
             if self.queue.is_empty() && !sleepers.is_empty() {
                 let due = sleepers.iter().copied().collect::<Vec<_>>();
                 let mut next_wake = None;
@@ -84,10 +310,14 @@ impl<'a> CooperativeScheduler<'a> {
             });
             if !matches!(state.status, ProcessStatus::Ready | ProcessStatus::Running) {
                 report.status = state.status;
-                if state.status == ProcessStatus::Waiting
-                    && timer_deadline(&state.wait_reason).is_some()
-                {
-                    sleepers.insert(process);
+                if state.status == ProcessStatus::Waiting {
+                    if let WaitReason::Process(child) = state.wait_reason {
+                        waiting_on_process.insert(process, child);
+                        dependencies.insert(child);
+                        self.enqueue(child);
+                    } else if timer_deadline(&state.wait_reason).is_some() {
+                        sleepers.insert(process);
+                    }
                 }
                 continue;
             }
@@ -97,15 +327,36 @@ impl<'a> CooperativeScheduler<'a> {
             }
 
             let slice_limit = SLICE_TOKENS.min(step_limit - total_steps);
-            let slice = self.vm.run(process, slice_limit)?;
+            let slice = match self.vm.run_slice(process, slice_limit) {
+                Ok(slice) => slice,
+                Err(error) => {
+                    if dependencies.contains(&process)
+                        && self.vm.process_state(process)?.status == ProcessStatus::Failed
+                    {
+                        report.status = ProcessStatus::Failed;
+                        if notified.insert(process) {
+                            self.vm.wake_process_waiters(process)?;
+                        }
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
             report.steps += slice.steps;
             report.status = slice.status;
             report.output.extend(slice.output);
             total_steps += slice.steps;
             match slice.status {
                 ProcessStatus::Ready => self.enqueue(process),
-                ProcessStatus::Waiting if timer_deadline(&self.vm.process_state(process)?.wait_reason).is_some() => {
-                    sleepers.insert(process);
+                ProcessStatus::Waiting => {
+                    let state = self.vm.process_state(process)?;
+                    if let WaitReason::Process(child) = state.wait_reason {
+                        waiting_on_process.insert(process, child);
+                        dependencies.insert(child);
+                        self.enqueue(child);
+                    } else if timer_deadline(&state.wait_reason).is_some() {
+                        sleepers.insert(process);
+                    }
                 }
                 _ => {}
             }
