@@ -159,7 +159,8 @@ impl VirtualMachine {
         for (name, type_id) in services {
             let object = if let Some(header) = manager
                 .query(context, &ObjectQuery::new().with_type(type_id))?
-                .first()
+                .into_iter()
+                .find(|header| name != "terminal" || header.parent_id.is_none())
             {
                 header.id
             } else {
@@ -410,7 +411,7 @@ impl VirtualMachine {
             }
             match self.manager.commit(transaction) {
                 Ok(_) => return Ok(()),
-                Err(OmsError::Conflict { .. }) if attempt < 2 => continue,
+                Err(OmsError::Conflict { .. }) if attempt < 2 => {}
                 Err(error) => return Err(error.into()),
             }
         }

@@ -125,6 +125,154 @@ fn transient_console_render_batches_process_state_without_creating_effects() {
 }
 
 #[derive(Debug, Default)]
+struct ByteTerminal(Mutex<Vec<Vec<u8>>>);
+
+impl ObjectProvider for ByteTerminal {
+    fn type_id(&self) -> TypeId {
+        CORE_TERMINAL_TYPE
+    }
+
+    fn create(&self, initial: &Value) -> Result<Value, ProviderError> {
+        Ok(initial.clone())
+    }
+
+    fn invoke(
+        &self,
+        _object: ObjectId,
+        _state: &Value,
+        capability: &str,
+        _arguments: &[Value],
+        _effect: ObjectId,
+    ) -> Result<ProviderOutcome, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(capability.to_owned()))
+    }
+
+    fn ephemeral_capabilities(&self) -> std::collections::BTreeSet<String> {
+        ["output".to_owned()].into_iter().collect()
+    }
+
+    fn invoke_ephemeral_for_process(
+        &self,
+        _process: ObjectId,
+        _object: ObjectId,
+        _state: &Value,
+        capability: &str,
+        arguments: &[Value],
+    ) -> Result<ProviderOutcome, ProviderError> {
+        if capability != "output" {
+            return Err(ProviderError::UnsupportedCapability(capability.to_owned()));
+        }
+        let [Value::Bytes(bytes)] = arguments else {
+            return Err(ProviderError::InvalidArguments(
+                "Terminal output expects Bytes",
+            ));
+        };
+        self.0.lock().unwrap().push(bytes.clone());
+        Ok(ProviderOutcome::result(Value::Integer(
+            i64::try_from(bytes.len()).unwrap(),
+        )))
+    }
+
+    fn capabilities(&self) -> std::collections::BTreeSet<String> {
+        std::collections::BTreeSet::new()
+    }
+}
+
+#[test]
+fn arbitrary_binary_output_capabilities_use_the_ephemeral_provider_path() {
+    let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+    let vm = vm_with_console(manager.clone());
+    let provider = Arc::new(ByteTerminal::default());
+    vm.register_provider(provider.clone()).unwrap();
+    let mut program = compile(
+        "terminal = object.find(\"terminal\")\nterminal.output(\"binary-payload\")\ntext = object.create(\"core.text\", \"ascii\")\nbytes = text.utf8_bytes()\nterminal.output(bytes)",
+    )
+    .unwrap();
+    for token in &mut program.tokens {
+        if matches!(token, tf_format::Token::Push(Value::Text(value)) if value == "binary-payload")
+        {
+            *token = tf_format::Token::Push(Value::Bytes(vec![0, 255, 27, 91, 65]));
+            break;
+        }
+    }
+    let process = vm.create_process(&program).unwrap();
+    assert_eq!(vm.run(process, 100).unwrap().status, ProcessStatus::Halted);
+    assert_eq!(
+        *provider.0.lock().unwrap(),
+        [vec![0, 255, 27, 91, 65], b"ascii".to_vec()]
+    );
+    assert_eq!(
+        manager
+            .query(
+                AccessContext::new(SYSTEM_SUBJECT),
+                &ObjectQuery::new().with_type(CORE_EFFECT_TYPE),
+            )
+            .unwrap(),
+        Vec::<oms_types::ObjectHeader>::new()
+    );
+}
+
+#[test]
+fn terminal_provider_keeps_the_legacy_open_service_compatible() {
+    let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+    let vm = vm_with_console(manager.clone());
+    vm.register_provider(Arc::new(ByteTerminal::default()))
+        .unwrap();
+    let process = vm
+        .create_process(
+            &compile("terminal = object.find(\"terminal\")\nsession_id = terminal.open()").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(vm.run(process, 100).unwrap().status, ProcessStatus::Halted);
+    let Value::Text(session) = vm.variable(process, "session_id").unwrap() else {
+        panic!("legacy terminal.open returns a Session Object ID");
+    };
+    let session: ObjectId = session.parse().unwrap();
+    assert_eq!(
+        vm.manager()
+            .inspect(AccessContext::new(SYSTEM_SUBJECT), session)
+            .unwrap()
+            .type_id,
+        CORE_TERMINAL_SESSION_TYPE
+    );
+}
+
+#[test]
+fn kernel_terminal_service_remains_the_root_when_child_terminals_exist() {
+    let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+    let _first_vm = vm_with_console(manager.clone());
+    let system = AccessContext::new(SYSTEM_SUBJECT);
+    let root = manager
+        .query(system, &ObjectQuery::new().with_type(CORE_TERMINAL_TYPE))
+        .unwrap()
+        .into_iter()
+        .find(|header| header.parent_id.is_none())
+        .unwrap();
+    let child = CreateObject::new(
+        CORE_TERMINAL_TYPE,
+        Value::Record(BTreeMap::from([(
+            "input_mode".to_owned(),
+            Value::Text("raw".to_owned()),
+        )]))
+        .encode()
+        .unwrap(),
+    )
+    .with_parent(root.id);
+    let mut transaction = manager.begin(system);
+    transaction.expect(root.id, root.version).create(child);
+    manager.commit(transaction).unwrap();
+
+    let vm = vm_with_console(manager);
+    let process = vm
+        .create_process(&compile("terminal = object.find(\"terminal\")").unwrap())
+        .unwrap();
+    assert_eq!(
+        vm.manager().read(system, process).unwrap().links()["terminal"],
+        root.id
+    );
+}
+
+#[derive(Debug, Default)]
 pub(super) struct FaultBackend {
     bytes: Mutex<Option<Vec<u8>>>,
     pub(super) fail_next: AtomicBool,

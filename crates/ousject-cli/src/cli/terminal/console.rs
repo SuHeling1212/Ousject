@@ -22,6 +22,8 @@ pub(crate) enum InputMode {
     Line,
     Secret,
     Keyboard,
+    TerminalRaw,
+    TerminalCanonical { echo: bool },
 }
 
 #[derive(Debug)]
@@ -31,6 +33,8 @@ pub(crate) struct LinuxInputState {
     pub(crate) completed_lines: BTreeMap<ObjectId, Result<String, String>>,
     pub(crate) events: BTreeMap<ObjectId, VecDeque<Value>>,
     pub(crate) overflowed: BTreeSet<ObjectId>,
+    pub(crate) raw_bytes: BTreeMap<ObjectId, VecDeque<u8>>,
+    pub(crate) raw_overflowed: BTreeSet<ObjectId>,
     pub(crate) interrupt_watchers: BTreeSet<ObjectId>,
     pub(crate) interrupted: BTreeSet<ObjectId>,
     pub(crate) unclaimed: VecDeque<KeyEvent>,
@@ -72,6 +76,8 @@ impl LinuxConsole {
             completed_lines: BTreeMap::new(),
             events: BTreeMap::new(),
             overflowed: BTreeSet::new(),
+            raw_bytes: BTreeMap::new(),
+            raw_overflowed: BTreeSet::new(),
             interrupt_watchers: BTreeSet::new(),
             interrupted: BTreeSet::new(),
             unclaimed: VecDeque::new(),
@@ -127,6 +133,13 @@ impl LinuxConsole {
                 (true, std::mem::take(&mut input.unclaimed))
             }
             Some((owner, owner_mode)) if owner == process && owner_mode == mode => {
+                (false, VecDeque::new())
+            }
+            Some((owner, _)) if owner == process => {
+                input.owner = Some((process, mode));
+                input.line.clear();
+                input.completed_lines.remove(&process);
+                input.events.remove(&process);
                 (false, VecDeque::new())
             }
             Some(_) => return Ok(None),
@@ -197,6 +210,59 @@ impl LinuxConsole {
         Ok(())
     }
 
+    pub(crate) fn poll_terminal_bytes(
+        &self,
+        process: ObjectId,
+        maximum: usize,
+    ) -> Result<Vec<u8>, ProviderError> {
+        let mut input = self.input.lock().map_err(|_| ProviderError::Unavailable)?;
+        let start_reader = match input.owner {
+            None => {
+                input.owner = Some((process, InputMode::TerminalRaw));
+                input.raw_bytes.entry(process).or_default();
+                input.raw_overflowed.remove(&process);
+                true
+            }
+            Some((owner, InputMode::TerminalRaw)) if owner == process => false,
+            Some((owner, _)) if owner == process => {
+                input.owner = Some((process, InputMode::TerminalRaw));
+                input.line.clear();
+                input.completed_lines.remove(&process);
+                input.events.remove(&process);
+                input.raw_bytes.entry(process).or_default();
+                input.raw_overflowed.remove(&process);
+                false
+            }
+            // This is a non-blocking byte-stream poll. Another owner's lease
+            // means there are no bytes available to this Process right now.
+            Some(_) => return Ok(Vec::new()),
+        };
+        if input.raw_overflowed.remove(&process) {
+            return Err(ProviderError::Adapter(
+                "terminal input queue overflowed; release and capture again".to_owned(),
+            ));
+        }
+        let queue = input.raw_bytes.entry(process).or_default();
+        let count = maximum.min(queue.len());
+        let bytes = queue.drain(..count).collect();
+        drop(input);
+        if start_reader {
+            self.start_reader
+                .send(())
+                .map_err(|_| ProviderError::Unavailable)?;
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn poll_terminal_line(
+        &self,
+        process: ObjectId,
+        echo: bool,
+    ) -> Result<Option<String>, ProviderError> {
+        self.poll_line(process, InputMode::TerminalCanonical { echo })
+            .map_err(ProviderError::Adapter)
+    }
+
     pub(crate) fn release_keyboard(&self, process: ObjectId) -> Result<(), ProviderError> {
         let mut input = self.input.lock().map_err(|_| ProviderError::Unavailable)?;
         match input.owner {
@@ -261,6 +327,8 @@ impl LinuxConsole {
             input.completed_lines.remove(&process);
             input.events.remove(&process);
             input.overflowed.remove(&process);
+            input.raw_bytes.remove(&process);
+            input.raw_overflowed.remove(&process);
             input.interrupt_watchers.remove(&process);
             input.interrupted.remove(&process);
         }

@@ -2,6 +2,8 @@ use super::super::{AtomicBool, Duration, Mutex, Ordering, Read, Write, mpsc};
 use super::console::{InputMode, LinuxInputState};
 use super::key_parser::{InputParser, KeyEvent, MAX_KEYBOARD_EVENTS};
 
+const MAX_RAW_INPUT_BYTES: usize = 65_536;
+
 pub(super) fn input_reader(
     input: &Mutex<LinuxInputState>,
     running: &AtomicBool,
@@ -46,8 +48,24 @@ pub(super) fn input_reader(
                     break;
                 }
                 Ok(1) => {
-                    for event in parser.push(byte[0]) {
-                        dispatch_event(input, event, terminal);
+                    let raw_input = input.lock().is_ok_and(|mut state| {
+                        let Some((process, InputMode::TerminalRaw)) = state.owner else {
+                            return false;
+                        };
+                        let queue = state.raw_bytes.entry(process).or_default();
+                        if queue.len() == MAX_RAW_INPUT_BYTES {
+                            state.raw_overflowed.insert(process);
+                        } else {
+                            queue.push_back(byte[0]);
+                        }
+                        true
+                    });
+                    if raw_input {
+                        parser.clear_pending();
+                    } else {
+                        for event in parser.push(byte[0]) {
+                            dispatch_event(input, event, terminal);
+                        }
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -90,6 +108,14 @@ pub(crate) fn dispatch_event(input: &Mutex<LinuxInputState>, event: KeyEvent, te
         }
         return;
     }
+    if mode == InputMode::TerminalRaw {
+        return;
+    }
+    let echo = match mode {
+        InputMode::Line => true,
+        InputMode::TerminalCanonical { echo } => echo,
+        InputMode::Secret | InputMode::Keyboard | InputMode::TerminalRaw => false,
+    };
     match event.key.as_str() {
         "enter" => {
             let line = std::mem::take(&mut state.line);
@@ -100,7 +126,7 @@ pub(crate) fn dispatch_event(input: &Mutex<LinuxInputState>, event: KeyEvent, te
             }
         }
         "backspace" => {
-            if state.line.pop().is_some() && mode == InputMode::Line && terminal {
+            if state.line.pop().is_some() && echo && terminal {
                 let mut stdout = std::io::stdout().lock();
                 let _ = stdout.write_all(b"\x08 \x08");
                 let _ = stdout.flush();
@@ -115,14 +141,14 @@ pub(crate) fn dispatch_event(input: &Mutex<LinuxInputState>, event: KeyEvent, te
             state.completed_lines.insert(process, result);
             state.line.clear();
             state.owner = None;
-            if mode == InputMode::Line && terminal {
+            if echo && terminal {
                 let _ = writeln!(std::io::stdout().lock());
             }
         }
         _ => {
             if let Some(text) = event.text {
                 state.line.push_str(&text);
-                if mode == InputMode::Line && terminal {
+                if echo && terminal {
                     let mut stdout = std::io::stdout().lock();
                     let _ = stdout.write_all(text.as_bytes());
                     let _ = stdout.flush();

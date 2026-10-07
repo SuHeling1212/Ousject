@@ -97,6 +97,7 @@ impl TypeRegistry {
                     "trim",
                     "lower",
                     "upper",
+                    "utf8_bytes",
                 ],
             ),
             type_descriptor(
@@ -113,6 +114,7 @@ impl TypeRegistry {
                     "trim",
                     "lower",
                     "upper",
+                    "utf8_bytes",
                 ],
             ),
             type_descriptor(
@@ -362,7 +364,15 @@ impl TypeRegistry {
                 "core.terminal",
                 ValueSchema::Record,
                 CreationPolicy::ProviderOnly,
-                &["open"],
+                &[
+                    "open",
+                    "create",
+                    "configure",
+                    "resize",
+                    "input",
+                    "output",
+                    "snapshot",
+                ],
             ),
             type_descriptor(
                 CORE_MODULE_TYPE,

@@ -61,7 +61,7 @@ Process 另外公开 `.result`、`.error`、`.variables`、`.program`、`.user`/
 | `math` | 数学 API，另有只读字段 `.pi`、`.e` |
 | `crypto` | `sha256(value)` |
 | `time` | `now()`、`monotonic()`、`sleep(milliseconds)` |
-| `terminal` | `open()` |
+| `terminal` | Terminal 字节流 API：`create()`、`configure(options)`、`resize(columns, rows)`、`input(maximum)`、`output(bytes)`、`snapshot()`；另保留兼容 API `open()` |
 | `modules` | Module API |
 | `packages` | Package Registry API |
 | `market` | Package Market API |
@@ -103,12 +103,46 @@ ANSI 控制字符。
 | `log(x)`、`log2(x)`、`log10(x)`、`exp(x)` | 对数与指数 |
 
 `core.text` Object 支持 `slice(start,length)`、`find(text)`、`contains(text)`、`split(delimiter)`、
-`replace_all(from,to)`、`trim()`、`lower()`、`upper()`。
+`replace_all(from,to)`、`trim()`、`lower()`、`upper()` 和 `utf8_bytes()`。最后一个方法明确将
+Text 编码为 UTF-8 `Bytes`，可作为 Terminal 的二进制输出参数。
 
 `time.now()` 返回 Unix 毫秒，`time.monotonic()` 返回单调时钟纳秒，`time.sleep(ms)` 暂停当前
 Process，并释放 Worker Lease。
 
-## Terminal Session
+## Terminal
+
+`terminal = object.find("terminal")` 返回根 Terminal Object。Terminal 与 Display 是不同概念：
+Terminal 传输任意 Bytes 并维护字符屏幕状态；物理 Display Provider（例如 framebuffer）负责
+像素输出。当前 CLI 只将根 Terminal 的输出接到宿主 tty，不会把 stdout 发布成 `device.display`。
+
+| API | 返回/作用 |
+| --- | --- |
+| `create()` / `create(options)` | 创建子 Terminal Object，返回其 ID；子屏幕与宿主输入隔离 |
+| `configure({input_mode: "raw"|"canonical", echo: boolean})` | 配置输入方式；配置写入 Terminal Object |
+| `resize(columns, rows)` | 调整屏幕尺寸；宽度 1–512，高度 1–256 |
+| `input(maximum)` | 读取最多 `maximum` 个 `Bytes`；暂时无数据返回空 Bytes，不阻塞；范围 1–65536 |
+| `output(bytes)` | 向 Terminal 写入原始 Bytes，返回写入长度；ephemeral，不逐帧创建 Effect |
+| `snapshot()` | 返回完整行、光标、尺寸、alternate-screen 状态和增量 `dirty_rows` |
+| `open()` | 兼容旧 Shell Session API，见下文 |
+
+输入由一个独占 Process 租约保护，和旧 Console/Keyboard 输入共享宿主输入。Raw 模式保留原始
+字节；Canonical 模式按行返回 UTF-8 字节并追加 LF，可配置软件回显。子 Terminal 有独立屏幕，
+当前没有将子屏幕 attach 到物理 tty 的接口。
+
+屏幕解析是内置的 VT 子集：UTF-8 文本（含常见 CJK 宽字符）、CSI 光标移动/定位、擦除、插入/
+删除字符、滚动区域、基本/256 色/truecolor SGR、OSC 标题，以及 `?7`、`?25`、`?1049`、
+`?2004` 常见模式。它还不是完整 xterm/VT100 实现；不支持的控制序列会被忽略。
+
+可运行示例：
+
+```bash
+cargo run -p ousject-cli -- run examples/terminal-object.px --memory --local
+```
+
+Terminal 屏幕缓冲区仅在本次运行期保存在内存中；尺寸和输入配置是持久 Object 状态。重启后
+不会重放过去的输出字节来重建屏幕。
+
+## Terminal Session（兼容）
 
 `terminal.open()` 返回 `core.terminal_session`：
 
@@ -122,6 +156,9 @@ Process，并释放 Worker Lease。
 | `update_size(columns, rows)` | 更新终端尺寸 |
 | `cancel()` | 中断当前提交 |
 | `close()` | 关闭 Session 并结束持久上下文 |
+
+这是旧 Shell 的持久交互上下文，不是 Terminal 字节流或屏幕对象；新程序应使用上面的
+Terminal API。现有 Shell 继续通过它维持兼容。
 
 ## Process 与 Program
 
@@ -234,7 +271,7 @@ Package Instance Object 支持 `process()` 和 `status()`。
 
 | 设备 | API |
 | --- | --- |
-| Display | `present(text_or_bytes)`、`configure(configuration)` |
+| Display | 保留 `present(bytes)`、`configure(configuration)` 描述；当前 CLI 没有物理 Display Provider，不会把 tty 当作像素设备 |
 | Keyboard | `capture()`、`release()`、`next_event()`、`poll_event()`、`poll_events(maximum)` |
 | Block Storage | `load_block(index)`、`store_block(index, bytes)`；块大小 4096 bytes |
 | Network Endpoint | `connect(host,port)`、`listen(host,port)`、`accept()`、`send(data)`、`receive([maximum])`、`close()` |
@@ -242,6 +279,11 @@ Package Instance Object 支持 `process()` 和 `status()`。
 
 Keyboard 返回的事件是 Record，使用索引读取字段，例如 `event["key"]` 和 `event["text"]`；不要用
 `event.key` 访问 Record 字段。
+
+历史 Provider 的 `render`、`poll_events` 仍然可用；新的 ephemeral 操作不再由 VM 写死方法名，
+而是由 Provider 自己声明。宿主 Terminal 以 `input(Bytes)`/`output(Bytes)` 作为字节流边界。
+Keyboard、Network Endpoint 和 Block Storage 尚保留各自原有领域方法；统一这些 Device API 是后续
+工作，本次没有将它们伪称为已迁移。
 
 ## 如何查看当前运行时实际能力
 

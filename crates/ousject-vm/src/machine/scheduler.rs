@@ -37,6 +37,7 @@ impl<'a> CooperativeScheduler<'a> {
     /// Drives the dependency tree of a Process wait until its waiter becomes
     /// runnable or the dependency is itself blocked on an external condition.
     /// Every Process is run in its own lease-bounded slice.
+    #[allow(clippy::too_many_lines)]
     fn run_process_wait(&mut self, waiter: ObjectId, child: ObjectId) -> Result<(), VmError> {
         let mut tracked = BTreeSet::from([child]);
         let mut notified = BTreeSet::new();
@@ -87,7 +88,9 @@ impl<'a> CooperativeScheduler<'a> {
                     }
                 }
 
-                if !interrupt_watches.contains_key(&process) {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    interrupt_watches.entry(process)
+                {
                     let parent = self.vm.manager.inspect(
                         AccessContext::new(SYSTEM_SUBJECT),
                         process,
@@ -103,7 +106,7 @@ impl<'a> CooperativeScheduler<'a> {
                             driver
                                 .begin_interrupt_watch(process)
                                 .map_err(VmError::Provider)?;
-                            interrupt_watches.insert(process, session);
+                            entry.insert(session);
                         }
                     }
                 }
@@ -186,6 +189,7 @@ impl<'a> CooperativeScheduler<'a> {
     ///
     /// Returns a VM error or [`VmError::StepLimitExceeded`] if the total token
     /// budget is exhausted before queued work completes.
+    #[allow(clippy::too_many_lines)]
     pub fn run(&mut self, step_limit: u64) -> Result<ScheduleReport, VmError> {
         const SLICE_TOKENS: u64 = 4_096;
         let mut total_steps = 0;

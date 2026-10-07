@@ -28,7 +28,9 @@ flowchart TB
 
     subgraph Host[宿主边界]
         CLI[ousject-cli]
-        Console[Console / Display / Keyboard]
+        Terminal[Terminal stream]
+        Devices[Keyboard / Network / Storage]
+        Display[Physical Display driver]
         Network[Resolver / TCP]
         Storage[FileSnapshotBackend]
     end
@@ -41,7 +43,9 @@ flowchart TB
     VM --> Provider
     Runtime --> Shard
     Runtime --> Types
-    Provider --> Console
+    Provider --> Terminal
+    Provider --> Devices
+    Provider -. optional driver .-> Display
     Provider --> Network
     Runtime --> Storage
     CLI --> Compiler
@@ -119,7 +123,11 @@ math, crypto, time, terminal, modules, packages, market, audit, resolver
 网络和设备等真实能力仍需要每次启动时由宿主 Provider 重新连接。
 
 Provider 用于实现 Object 的领域能力。普通程序不能通过伪造 Type 或能力字符串创建物理
-设备 Object；`CreationPolicy::ProviderOnly` 的对象只能由可信路径发布。
+设备 Object；`CreationPolicy::ProviderOnly` 的对象只能由可信路径发布。Terminal 是字节流
+接口并维护自己的虚拟屏幕；Display 是可选的物理显示设备，不能用 stdout 适配器伪装。
+Terminal 的 `input`/`output`/`snapshot` 由 Provider 声明为 ephemeral 操作，不为每个输入
+字节或输出帧生成持久 Effect。Terminal 的尺寸与输入模式仍存入 OMS；当前屏幕缓冲区是本次
+启动期内存状态，重启后由后续输出重新建立。
 
 ## 用户空间边界
 
@@ -141,4 +149,5 @@ Ousject 当前没有自己的 Bootloader、页表、硬件中断、抢占式内�
 网络协议栈。Linux/macOS 等宿主仍提供进程、内存、线程、文件和硬件 API。
 
 Provider 与 `SnapshotBackend` 是未来替换宿主实现的边界，但存在这些抽象并不代表裸机支持
-已经完成。准确边界见[当前状态](../project/status.md)。
+已经完成。当前终端屏幕解析仅覆盖已列出的 VT 子集，不代表完整 xterm 兼容。准确边界见
+[当前状态](../project/status.md)。

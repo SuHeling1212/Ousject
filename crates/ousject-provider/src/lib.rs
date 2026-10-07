@@ -1,5 +1,9 @@
 //! Generic domain-capability Providers and durable external Effect records.
 
+mod terminal_screen;
+
+pub use terminal_screen::{TerminalCell, TerminalColor, TerminalScreen, TerminalStyle};
+
 use oms_runtime::CreateObject;
 use oms_types::{CORE_EFFECT_TYPE, ObjectId, TypeId, Value, ValueError};
 use std::collections::{BTreeMap, BTreeSet};

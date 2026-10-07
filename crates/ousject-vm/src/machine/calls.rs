@@ -176,7 +176,9 @@ impl VirtualMachine {
                 }
                 let object = object_id(&receiver)?;
                 let type_id = self.manager.inspect(self.context, object)?.type_id;
-                if self.providers.get(type_id).is_ok() {
+                if self.providers.get(type_id).is_ok()
+                    && !(receiver_type == CORE_TERMINAL_TYPE && method == "open")
+                {
                     return self
                         .step_provider_call(process, version, state, next, object, method, &args);
                 }

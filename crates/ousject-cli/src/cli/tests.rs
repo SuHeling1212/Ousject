@@ -10,6 +10,8 @@ fn detached_terminal_input() -> (LinuxConsole, mpsc::Receiver<()>) {
                 completed_lines: BTreeMap::new(),
                 events: BTreeMap::new(),
                 overflowed: BTreeSet::new(),
+                raw_bytes: BTreeMap::new(),
+                raw_overflowed: BTreeSet::new(),
                 interrupt_watchers: BTreeSet::new(),
                 interrupted: BTreeSet::new(),
                 unclaimed: VecDeque::new(),
@@ -111,6 +113,138 @@ fn standalone_escape_is_reported_after_the_sequence_timeout() {
             .unwrap()
             .key,
         "escape"
+    );
+}
+
+#[test]
+fn terminal_input_uses_a_binary_exclusive_lease_and_canonical_lines() {
+    let (terminal, _reader) = detached_terminal_input();
+    let raw_process = ObjectId::new();
+    assert_eq!(
+        terminal.poll_terminal_bytes(raw_process, 8).unwrap(),
+        Vec::<u8>::new()
+    );
+    assert_eq!(
+        terminal.input.lock().unwrap().owner,
+        Some((raw_process, InputMode::TerminalRaw))
+    );
+    assert_eq!(
+        terminal.poll_terminal_bytes(ObjectId::new(), 8).unwrap(),
+        Vec::<u8>::new()
+    );
+    terminal
+        .input
+        .lock()
+        .unwrap()
+        .raw_bytes
+        .entry(raw_process)
+        .or_default()
+        .extend([0x1b, b'[', b'A']);
+    assert_eq!(
+        terminal.poll_terminal_bytes(raw_process, 2).unwrap(),
+        [0x1b, b'[']
+    );
+    assert_eq!(
+        terminal.poll_terminal_bytes(raw_process, 8).unwrap(),
+        [b'A']
+    );
+    assert_eq!(
+        terminal.capture_keyboard(ObjectId::new()),
+        Err(ProviderError::Pending)
+    );
+    terminal.release_process_input(raw_process);
+
+    let line_process = ObjectId::new();
+    assert_eq!(terminal.poll_terminal_line(line_process, false), Ok(None));
+    for character in ['o', 'k'] {
+        dispatch_event(
+            &terminal.input,
+            KeyEvent {
+                key: character.to_string(),
+                text: Some(character.to_string()),
+                control: false,
+                alt: false,
+                shift: false,
+            },
+            false,
+        );
+    }
+    dispatch_event(
+        &terminal.input,
+        KeyEvent {
+            key: "enter".to_owned(),
+            text: None,
+            control: false,
+            alt: false,
+            shift: false,
+        },
+        false,
+    );
+    assert_eq!(
+        terminal.poll_terminal_line(line_process, false),
+        Ok(Some("ok".to_owned()))
+    );
+}
+
+#[test]
+fn terminal_provider_keeps_child_screens_separate_and_supports_resize() {
+    let (terminal, _reader) = detached_terminal_input();
+    let root = ObjectId::new();
+    let provider = HostTerminalProvider::new(root, Arc::new(terminal));
+    let root_state = provider.create(&Value::Null).unwrap();
+    let created = provider
+        .invoke(root, &root_state, "create", &[], ObjectId::new())
+        .unwrap();
+    let Value::Text(child_text) = created.result else {
+        panic!("create returns the child Object ID");
+    };
+    let child: ObjectId = child_text.parse().unwrap();
+    assert_eq!(created.created[0].parent, Some(root));
+
+    let resized = provider
+        .invoke(
+            child,
+            &provider.create(&Value::Null).unwrap(),
+            "resize",
+            &[Value::Integer(12), Value::Integer(4)],
+            ObjectId::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        resized.object_state.as_ref().unwrap(),
+        &Value::Record(BTreeMap::from([
+            ("columns".to_owned(), Value::Integer(12)),
+            ("echo".to_owned(), Value::Bool(false)),
+            ("input_mode".to_owned(), Value::Text("raw".to_owned())),
+            ("rows".to_owned(), Value::Integer(4)),
+        ]))
+    );
+    let state = resized.object_state.unwrap();
+    provider
+        .invoke_ephemeral_for_process(
+            ObjectId::new(),
+            child,
+            &state,
+            "output",
+            &[Value::Bytes(b"\x1b[2;3Hhi".to_vec())],
+        )
+        .unwrap();
+    let snapshot = provider
+        .invoke_ephemeral_for_process(ObjectId::new(), child, &state, "snapshot", &[])
+        .unwrap();
+    let Value::Record(fields) = snapshot.result else {
+        panic!("Terminal snapshot returns a Record");
+    };
+    assert_eq!(fields.get("columns"), Some(&Value::Integer(12)));
+    assert_eq!(fields.get("rows"), Some(&Value::Integer(4)));
+    assert_eq!(
+        fields.get("lines"),
+        Some(&Value::Array(vec![
+            Value::Text(String::new()),
+            Value::Text("  hi".to_owned()),
+            Value::Text(String::new()),
+            Value::Text(String::new()),
+        ]))
     );
 }
 

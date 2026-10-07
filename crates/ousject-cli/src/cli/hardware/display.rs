@@ -1,8 +1,6 @@
 use super::super::{
-    BTreeMap, BTreeSet, DEVICE_DISPLAY_TYPE, Mutex, ObjectId, ObjectProvider, ProviderError,
-    ProviderOutcome, Value, Write,
+    BTreeMap, BTreeSet, Mutex, ObjectId, ObjectProvider, ProviderError, ProviderOutcome, Value,
 };
-use super::adapter_error;
 
 #[derive(Debug)]
 pub(crate) struct CachedProvider<P> {
@@ -109,67 +107,5 @@ impl<P: ObjectProvider> ObjectProvider for CachedProvider<P> {
 
     fn capabilities(&self) -> BTreeSet<String> {
         self.inner.capabilities()
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct HostDisplayProvider;
-
-impl ObjectProvider for HostDisplayProvider {
-    fn type_id(&self) -> oms_types::TypeId {
-        DEVICE_DISPLAY_TYPE
-    }
-
-    fn create(&self, _initial: &Value) -> Result<Value, ProviderError> {
-        Err(ProviderError::InvalidArguments(
-            "Display Objects are published by hardware discovery",
-        ))
-    }
-
-    fn invoke(
-        &self,
-        _object: ObjectId,
-        state: &Value,
-        capability: &str,
-        arguments: &[Value],
-        _effect: ObjectId,
-    ) -> Result<ProviderOutcome, ProviderError> {
-        let outcome = match (capability, arguments) {
-            ("present", [Value::Text(frame)]) => {
-                write!(std::io::stdout().lock(), "{frame}").map_err(adapter_error)?;
-                std::io::stdout().lock().flush().map_err(adapter_error)?;
-                ProviderOutcome::result(Value::Null)
-            }
-            ("present", [Value::Bytes(frame)]) => {
-                std::io::stdout()
-                    .lock()
-                    .write_all(frame)
-                    .and_then(|()| std::io::stdout().lock().flush())
-                    .map_err(adapter_error)?;
-                ProviderOutcome::result(Value::Null)
-            }
-            ("configure", [configuration]) => {
-                return Ok(
-                    ProviderOutcome::result(Value::Null).with_state(Value::Record(BTreeMap::from(
-                        [
-                            (
-                                "provider".to_owned(),
-                                Value::Text("linux.terminal.display".to_owned()),
-                            ),
-                            ("configuration".to_owned(), configuration.clone()),
-                        ],
-                    ))),
-                );
-            }
-            _ => return Err(ProviderError::UnsupportedCapability(capability.to_owned())),
-        };
-        Ok(outcome.with_state(state.clone()))
-    }
-
-    fn capabilities(&self) -> BTreeSet<String> {
-        ["present", "configure"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
     }
 }

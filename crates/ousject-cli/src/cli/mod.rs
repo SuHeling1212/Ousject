@@ -7,12 +7,12 @@ use oms_runtime::{
     TombstoneReaper, ValueSchema,
 };
 use oms_types::{
-    CORE_CONSOLE_TYPE, CORE_NAMESPACE_TYPE, CORE_PROGRAM_TYPE, CORE_SYSTEM_TYPE, Capability,
-    DEVICE_BLOCK_STORAGE_TYPE, DEVICE_DISPLAY_TYPE, DEVICE_KEYBOARD_TYPE, NET_RESOLVER_TYPE,
-    ObjectId, SubjectId, Value,
+    CORE_CONSOLE_TYPE, CORE_NAMESPACE_TYPE, CORE_PROGRAM_TYPE, CORE_SYSTEM_TYPE,
+    CORE_TERMINAL_TYPE, Capability, DEVICE_BLOCK_STORAGE_TYPE, DEVICE_KEYBOARD_TYPE,
+    NET_RESOLVER_TYPE, ObjectId, SubjectId, Value,
 };
 use ousject_auth::AuthService;
-use ousject_provider::{ObjectProvider, ProviderError, ProviderOutcome};
+use ousject_provider::{ObjectProvider, ProviderError, ProviderOutcome, TerminalScreen};
 use ousject_vm::{
     ConsoleProvider, CooperativeScheduler, ProcessReaper, ProcessStatus, RunReport, SYSTEM_SUBJECT,
     VirtualMachine,
@@ -41,8 +41,8 @@ mod tests;
 
 pub(crate) use commands::run_cli;
 pub(super) use hardware::{
-    CachedProvider, HostBlockStorageProvider, HostDisplayProvider, HostKeyboardProvider,
-    HostNetworkProvider, HostResolverProvider,
+    CachedProvider, HostBlockStorageProvider, HostKeyboardProvider, HostNetworkProvider,
+    HostResolverProvider, HostTerminalProvider,
 };
 pub(super) use options::{RuntimeOptions, open_manager, option_subject, parse_options};
 pub(super) use runtime::{

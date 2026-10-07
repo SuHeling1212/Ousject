@@ -242,7 +242,7 @@ fn praxis_object_api_runs_and_recovers() {
                 "2",
                 "core.text",
                 "Active",
-                "17",
+                "18",
                 "0"
             ]
         );

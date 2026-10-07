@@ -5,6 +5,7 @@ use super::super::{
     error_text, host_block_path, open_manager, parse_options, print_report, run_hosted_process,
 };
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn command_system_install(arguments: &[String]) -> Result<(), String> {
     let (positional, options) = parse_options(arguments)?;
     if positional.len() != 1 || !options.local || options.session.is_some() {

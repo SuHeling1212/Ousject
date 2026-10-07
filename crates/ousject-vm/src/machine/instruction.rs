@@ -312,9 +312,6 @@ impl VirtualMachine {
         method: &str,
         argument_count: u32,
     ) -> Result<bool, VmError> {
-        if !matches!(method, "render" | "poll_events") {
-            return Ok(false);
-        }
         let argument_count =
             usize::try_from(argument_count).map_err(|_| VmError::StackUnderflow)?;
         let receiver_index = state
@@ -325,15 +322,6 @@ impl VirtualMachine {
         let receiver = &state.stack[receiver_index];
         let object = object_id(receiver)?;
         let type_id = self.manager.inspect(self.context, object)?.type_id;
-        let expected_type = match method {
-            "render" => CONSOLE_TYPE,
-            "poll_events" => DEVICE_KEYBOARD_TYPE,
-            _ => return Ok(false),
-        };
-        if type_id != expected_type {
-            return Ok(false);
-        }
-
         let Ok(provider) = self.providers.get(type_id) else {
             return Ok(false);
         };

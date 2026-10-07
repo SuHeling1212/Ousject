@@ -32,7 +32,11 @@
 | 用户、密码、Session | 已实现 | auth 与 shell 测试 |
 | Module Registry | 已实现 | services 测试 |
 | 本地 Package 生命周期 | 已实现核心流程 | package lifecycle 测试 |
-| 宿主 Console/网络/设备 | 开发适配可用 | CLI hardware 与 system check |
+| Console 兼容 API | 已实现 | CLI Console Provider 与 durable effect/输入测试 |
+| Terminal 字节流与 VT 屏幕子集 | 已实现第一阶段 | `HostTerminalProvider`、`TerminalScreen` 单测与 binary ephemeral VM e2e |
+| Physical Display Provider | 未实现 | tty 不再作为 `device.display` 发布；无 framebuffer driver |
+| Keyboard/Network/Block Storage Provider | 各自旧 API 可用 | CLI hardware Provider 与相关测试 |
+| 跨设备统一 `input/output(Bytes)` API | 未完成 | 目前仅 Terminal 使用通用字节流方法 |
 | 裸机启动与真实驱动 | 未实现 | 不在当前宿主系统边界内 |
 
 ## Praxis 当前可验证能力
@@ -47,6 +51,7 @@
 - Object 创建、查找、查询、替换、Link 和授权；
 - `transaction` 原子块；
 - 子 Process、Channel、Timer、Console 输入和系统服务。
+- Terminal 字节输入/输出、VT 子集屏幕状态与 alternate-screen 快照。
 
 这不代表此前设计稿中的每种语法都已实现。完整语言参考将在后续文档批次中从 parser 和
 端到端测试重新生成。
@@ -69,7 +74,7 @@
 - Rust 标准库、线程、锁和内存分配；
 - 文件系统与 `FileSnapshotBackend`；
 - TCP、DNS 和终端接口；
-- 显示、键盘和块存储的临时适配入口；
+- 键盘与块存储宿主适配；当前没有物理 Display driver；
 - Ousject CLI 进程本身。
 
 Ousject Process 不是 Linux Process。它是由 VM 执行并通过 OMS 持久化的 Object。
@@ -81,6 +86,9 @@ Ousject Process 不是 Linux Process。它是由 VM 执行并通过 OMS 持久�
 - 中断、抢占式调度和多核内核启动；
 - PCI、USB、ACPI 等总线枚举；
 - 独立网络协议栈与真实硬件驱动；
+- 完整 VT100/xterm 兼容（本阶段只实现常见 TUI 序列子集）；
+- Keyboard、Network Endpoint、Block Storage 的统一 `input/output(Bytes)` 接口和驱动迁移；
+- 子 Terminal attach/PTY 与 screen 持久化；
 - 稳定的持久格式、语言 ABI、Package 格式和 public API；
 - 发行版级安装、升级、签名、公证和兼容策略。
 

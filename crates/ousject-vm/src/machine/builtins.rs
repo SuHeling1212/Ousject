@@ -412,6 +412,7 @@ fn text_capability(name: &str, arguments: &[Value], receiver: &Value) -> Result<
         ("trim", []) => Ok(Value::Text(text.trim().to_owned())),
         ("lower", []) => Ok(Value::Text(text.to_lowercase())),
         ("upper", []) => Ok(Value::Text(text.to_uppercase())),
+        ("utf8_bytes", []) => Ok(Value::Bytes(text.as_bytes().to_vec())),
         _ => Err(VmError::TypeError("invalid arguments to text capability")),
     }
 }

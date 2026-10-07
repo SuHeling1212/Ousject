@@ -1,8 +1,8 @@
 use super::{
-    AccessContext, Arc, BTreeMap, CORE_CONSOLE_TYPE, CachedProvider, Capability,
-    DEVICE_BLOCK_STORAGE_TYPE, DEVICE_DISPLAY_TYPE, DEVICE_KEYBOARD_TYPE, Duration,
-    HostBlockStorageProvider, HostDisplayProvider, HostKeyboardProvider, HostNetworkProvider,
-    HostResolverProvider, InMemoryObjectManager, IsTerminal, LinuxConsole, NET_RESOLVER_TYPE,
+    AccessContext, Arc, BTreeMap, CORE_CONSOLE_TYPE, CORE_TERMINAL_TYPE, CachedProvider,
+    Capability, DEVICE_BLOCK_STORAGE_TYPE, DEVICE_KEYBOARD_TYPE, Duration,
+    HostBlockStorageProvider, HostKeyboardProvider, HostNetworkProvider, HostResolverProvider,
+    HostTerminalProvider, InMemoryObjectManager, IsTerminal, LinuxConsole, NET_RESOLVER_TYPE,
     ObjectId, ObjectQuery, Path, PathBuf, ProcessStatus, Program, RunReport, RuntimeOptions,
     SYSTEM_SUBJECT, SubjectId, Value, VirtualMachine, compile_program_with_loader,
 };
@@ -36,14 +36,6 @@ pub(crate) fn discover_host_hardware(
         ),
     ]));
     let console = VirtualMachine::publish_console(&manager, &state).map_err(error_text)?;
-    if std::io::stdout().is_terminal() {
-        VirtualMachine::publish_provider_object(
-            &manager,
-            DEVICE_DISPLAY_TYPE,
-            &provider_state("linux.terminal.display"),
-        )
-        .map_err(error_text)?;
-    }
     if std::io::stdin().is_terminal() {
         VirtualMachine::publish_provider_object(
             &manager,
@@ -73,10 +65,24 @@ pub(crate) fn discover_host_hardware(
     let terminal = LinuxConsole::new()?;
     let vm =
         VirtualMachine::with_console(manager, console, terminal.clone()).map_err(error_text)?;
+    let terminal_object = vm
+        .manager()
+        .query(
+            AccessContext::new(SYSTEM_SUBJECT),
+            &ObjectQuery::new().with_type(CORE_TERMINAL_TYPE),
+        )
+        .map_err(error_text)?
+        .into_iter()
+        .find(|object| object.parent_id.is_none())
+        .map(|object| object.id)
+        .ok_or_else(|| "kernel did not publish a Terminal Object".to_owned())?;
     vm.register_provider(Arc::new(HostNetworkProvider::default()))
         .map_err(error_text)?;
-    vm.register_provider(Arc::new(CachedProvider::new(HostDisplayProvider)))
-        .map_err(error_text)?;
+    vm.register_provider(Arc::new(HostTerminalProvider::new(
+        terminal_object,
+        terminal.clone(),
+    )))
+    .map_err(error_text)?;
     vm.register_provider(Arc::new(CachedProvider::new(HostKeyboardProvider {
         terminal,
     })))
@@ -106,7 +112,7 @@ pub(crate) fn grant_console_access(
     }
     let context = AccessContext::new(SYSTEM_SUBJECT);
     let mut transaction = manager.begin(context);
-    for type_id in [CORE_CONSOLE_TYPE, DEVICE_DISPLAY_TYPE, DEVICE_KEYBOARD_TYPE] {
+    for type_id in [CORE_CONSOLE_TYPE, CORE_TERMINAL_TYPE, DEVICE_KEYBOARD_TYPE] {
         for object in manager
             .query(context, &ObjectQuery::new().with_type(type_id))
             .map_err(error_text)?

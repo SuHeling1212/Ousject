@@ -1,8 +1,10 @@
-use oms_runtime::{AccessContext, CreateSpec, InMemoryObjectManager, ObjectQuery, SnapshotBackend};
+use oms_runtime::{
+    AccessContext, CreateObject, CreateSpec, InMemoryObjectManager, ObjectQuery, SnapshotBackend,
+};
 use oms_types::{
     CORE_CONSOLE_TYPE, CORE_EFFECT_TYPE, CORE_MODULE_INSTANCE_TYPE, CORE_MODULE_TYPE,
-    CORE_SESSION_TYPE, CORE_TERMINAL_SESSION_TYPE, CORE_VALUE_TYPE, Capability, LifecycleState,
-    NET_ENDPOINT_TYPE, ObjectId, OmsError, SubjectId, TypeId,
+    CORE_SESSION_TYPE, CORE_TERMINAL_SESSION_TYPE, CORE_TERMINAL_TYPE, CORE_VALUE_TYPE, Capability,
+    LifecycleState, NET_ENDPOINT_TYPE, ObjectId, OmsError, SubjectId, TypeId,
 };
 use ousject_provider::{
     EffectRecord, EffectRecoveryPolicy, EffectStatus, ObjectProvider, ProviderError,

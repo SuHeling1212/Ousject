@@ -1,0 +1,14 @@
+func main() {
+    root = object.find("terminal")
+    child_id = root.create()
+    terminal = object.find(child_id)
+    terminal.resize(24, 4)
+
+    label = object.create("core.text", "Terminal bytes stay binary.")
+    terminal.output(label.utf8_bytes())
+
+    frame = terminal.snapshot()
+    console = object.find("console")
+    console.println(frame["lines"][0])
+    console.println(frame["dirty_rows"])
+}
