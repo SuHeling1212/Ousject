@@ -27,9 +27,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "oms-runtime"
+version = "0.0.0"
+dependencies = [
+ "oms-shard",
+ "oms-types",
+]
+
+[[package]]
+name = "oms-shard"
+version = "0.0.0"
+dependencies = [
+ "oms-types",
+]
+
+[[package]]
+name = "oms-types"
+version = "0.0.0"
+
+[[package]]
 name = "ousject-native-image"
 version = "0.0.0"
 dependencies = [
+ "oms-runtime",
+ "oms-types",
  "ousject-platform",
  "uefi",
 ]

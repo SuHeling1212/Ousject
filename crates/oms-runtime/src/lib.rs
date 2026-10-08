@@ -4,11 +4,17 @@
 //! complete candidate, make it durable, and only then publish it. Readers can
 //! therefore never observe a partially published cross-shard transaction.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
 mod runtime;
 
 pub use runtime::{
-    AccessContext, CommitResult, CreateObject, CreateSpec, CreationPolicy, FileSnapshotBackend,
-    GcAnalysis, GcReport, InMemoryObjectManager, ObjectManager, ObjectQuery, ObjectView,
-    OmsPerformanceStats, OmsStats, SnapshotBackend, SnapshotRecovery, StorageUsage,
-    TombstoneReaper, Transaction, TypeDescriptor, ValueSchema,
+    AccessContext, CommitResult, CreateObject, CreateSpec, CreationPolicy, GcAnalysis, GcReport,
+    InMemoryObjectManager, ObjectManager, ObjectQuery, ObjectView, OmsPerformanceStats, OmsStats,
+    SnapshotBackend, SnapshotRecovery, StorageUsage, Transaction, TypeDescriptor, ValueSchema,
 };
+
+#[cfg(feature = "std")]
+pub use runtime::{FileSnapshotBackend, TombstoneReaper};

@@ -1,5 +1,8 @@
 #![no_main]
 #![no_std]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
 
 #[cfg(not(target_os = "uefi"))]
 compile_error!("ousject-native-image must be built for x86_64-unknown-uefi");
@@ -10,9 +13,21 @@ compile_error!("ousject-native-image must be built for x86_64-unknown-uefi");
 ))]
 compile_error!("Native smoke modes are mutually exclusive");
 
+use core::alloc::Layout;
 use core::fmt::{self, Write};
 use core::hint::spin_loop;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::ptr::read_volatile;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use oms_runtime::{AccessContext, CreateObject, CreateSpec, InMemoryObjectManager};
+use oms_types::{
+    CORE_VALUE_TYPE, ObjectId, ObjectVersion, SubjectId, SYSTEM_SUBJECT, Value,
+    seed_id_generator,
+};
 use ousject_platform::{
     BootInfo, MemoryRegion, MemoryRegionKind, MonotonicClock, PhysicalFrameAllocator,
     TerminalTransport,
@@ -20,12 +35,19 @@ use ousject_platform::{
 use uefi::mem::memory_map::MemoryMap;
 use uefi::prelude::*;
 use uefi::proto::console::serial::Serial;
+use uefi::proto::rng::Rng;
 
 mod clock;
 mod com1;
 mod cpu;
+mod heap;
 mod paging;
 mod timer;
+
+#[global_allocator]
+static GLOBAL_HEAP: heap::BootstrapHeap = heap::BootstrapHeap::new();
+static HEAP_RANGE_START: AtomicUsize = AtomicUsize::new(0);
+static HEAP_RANGE_LENGTH: AtomicUsize = AtomicUsize::new(0);
 
 const MAX_MEMORY_REGIONS: usize = 512;
 const MEMORY_REGION_PLACEHOLDER: MemoryRegion = MemoryRegion {
@@ -43,9 +65,10 @@ fn main() -> Status {
     write_serial(b"Ousject native: UEFI entry\r\n");
     write_serial(b"Ousject native: exiting boot services\r\n");
 
-    // SAFETY: No boot-services resources are retained across this call. The
-    // serial protocol handle has been dropped, and after the handoff this
-    // image only reads the returned memory map and uses core-only code.
+    let boot_id_prefix = acquire_boot_id_prefix();
+
+    // SAFETY: No boot-services protocol handle is retained across this call.
+    // The memory map is returned in loader-owned memory and remains reserved.
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
 
     let mut regions = [MEMORY_REGION_PLACEHOLDER; MAX_MEMORY_REGIONS];
@@ -87,8 +110,22 @@ fn main() -> Status {
     let boot_info = BootInfo {
         memory_map: &regions[..region_count],
         physical_address_bits,
+        boot_id_prefix,
     };
     native_kernel_entry(boot_info)
+}
+
+fn acquire_boot_id_prefix() -> Option<u64> {
+    let firmware_prefix = uefi::boot::get_handle_for_protocol::<Rng>()
+        .ok()
+        .and_then(|handle| uefi::boot::open_protocol_exclusive::<Rng>(handle).ok())
+        .and_then(|mut rng| {
+            let mut bytes = [0_u8; 8];
+            rng.get_rng(None, &mut bytes)
+                .ok()
+                .map(|()| u64::from_le_bytes(bytes))
+        });
+    firmware_prefix.or_else(cpu::hardware_random_u64)
 }
 
 fn write_serial(bytes: &[u8]) {
@@ -111,16 +148,18 @@ fn native_kernel_entry(boot_info: BootInfo<'_>) -> ! {
         .count();
 
     let mut frame_allocator = PhysicalFrameAllocator::new();
-    let Some(first_frame) = frame_allocator.allocate_frame(boot_info.memory_map) else {
+    let Some(heap_range) = frame_allocator.allocate_contiguous(
+        boot_info.memory_map,
+        heap::HEAP_SIZE,
+        4096,
+        paging::MAX_MAPPED_ADDRESS,
+    ) else {
         enter_halt_loop();
     };
-    if first_frame >= paging::MAX_MAPPED_ADDRESS {
-        enter_halt_loop();
-    }
 
     let mut serial = com1::Com1::initialize();
     if serial
-        .output(b"Ousject native: Boot Services exited; COM1 and frame allocator online\r\n")
+        .output(b"Ousject native: Boot Services exited; COM1 and physical memory online\r\n")
         .is_err()
     {
         enter_halt_loop();
@@ -147,6 +186,16 @@ fn native_kernel_entry(boot_info: BootInfo<'_>) -> ! {
     {
         enter_halt_loop();
     }
+    let Some(id_prefix) = boot_info.boot_id_prefix else {
+        let _ = serial.output(b"Ousject native: UEFI RNG unavailable; OMS not started\r\n");
+        enter_halt_loop();
+    };
+    if seed_id_generator(id_prefix).is_err() {
+        let _ = serial.output(b"Ousject native: ObjectId generator initialization failed\r\n");
+        enter_halt_loop();
+    }
+    HEAP_RANGE_START.store(heap_range.start as usize, Ordering::Relaxed);
+    HEAP_RANGE_LENGTH.store(heap_range.length as usize, Ordering::Release);
     cpu::enter_kernel_stack(native_execution_entry)
 }
 
@@ -158,6 +207,41 @@ extern "efiapi" fn native_execution_entry() -> ! {
     {
         enter_halt_loop();
     }
+    let heap_range = ousject_platform::MemoryRange {
+        start: HEAP_RANGE_START.load(Ordering::Relaxed) as u64,
+        length: HEAP_RANGE_LENGTH.load(Ordering::Acquire) as u64,
+    };
+    if GLOBAL_HEAP.initialize(heap_range).is_err() {
+        let _ = serial.output(b"Ousject native: heap initialization failed\r\n");
+        enter_halt_loop();
+    }
+    if serial
+        .output(b"Ousject native: heap initialized\r\n")
+        .is_err()
+    {
+        enter_halt_loop();
+    }
+    {
+        let mut heap_diagnostic = PanicSerial(&mut serial);
+        if writeln!(
+            heap_diagnostic,
+            "Ousject native heap: start={:#018x} length={:#x}",
+            heap_range.start,
+            heap_range.length
+        )
+        .is_err()
+        {
+            enter_halt_loop();
+        }
+    }
+    run_alloc_smoke();
+    if serial
+        .output(b"Ousject native: alloc smoke passed\r\n")
+        .is_err()
+    {
+        enter_halt_loop();
+    }
+    run_oms_smoke(&mut serial);
     timer::initialize();
     let pit_clock = timer::PitClock::new();
     assert!(
@@ -208,6 +292,100 @@ extern "efiapi" fn native_execution_entry() -> ! {
     enter_halt_loop()
 }
 
+fn run_oms_smoke(serial: &mut com1::Com1) {
+    let manager = InMemoryObjectManager::new(4).unwrap_or_else(|_| enter_halt_loop());
+    serial_marker(serial, b"Ousject native: OMS initialized\r\n");
+
+    let system = AccessContext::new(SYSTEM_SUBJECT);
+    let object = manager
+        .create_object(system, CreateSpec::new("core.value", Value::Integer(40)))
+        .unwrap_or_else(|_| enter_halt_loop());
+    serial_marker(serial, b"Ousject native: object created\r\n");
+
+    let initial = manager.value(system, object).unwrap_or_else(|_| enter_halt_loop());
+    assert_eq!(initial, Value::Integer(40));
+    manager
+        .replace_value(system, object, &Value::Integer(42))
+        .unwrap_or_else(|_| enter_halt_loop());
+    serial_marker(serial, b"Ousject native: transaction committed\r\n");
+    assert_eq!(
+        manager.value(system, object).unwrap_or_else(|_| enter_halt_loop()),
+        Value::Integer(42)
+    );
+
+    let child_id = manager
+        .create_object(
+            system,
+            CreateSpec::new("core.value", Value::Text(String::from("child")))
+                .with_parent(object)
+                .with_link("root", object),
+        )
+        .unwrap_or_else(|_| enter_halt_loop());
+    let parent = manager.read(system, object).unwrap_or_else(|_| enter_halt_loop());
+    let child = manager.read(system, child_id).unwrap_or_else(|_| enter_halt_loop());
+    assert!(parent.children().contains(&child_id));
+    assert_eq!(child.header().parent_id, Some(object));
+    assert_eq!(child.links().get("root"), Some(&object));
+
+    let unauthorized = AccessContext::new(SubjectId::from_u128(0xfeed));
+    assert!(manager.read(unauthorized, object).is_err());
+
+    let failed_id = ObjectId::new();
+    let mut failed = manager.begin(system);
+    failed
+        .expect(object, ObjectVersion::new(0))
+        .update_state(object, Value::Integer(99).encode().unwrap_or_else(|_| enter_halt_loop()))
+        .create(
+            CreateObject::new(
+                CORE_VALUE_TYPE,
+                Value::Text(String::from("must not publish"))
+                    .encode()
+                    .unwrap_or_else(|_| enter_halt_loop()),
+            )
+            .with_id(failed_id),
+        );
+    assert!(manager.commit(failed).is_err());
+    assert_eq!(
+        manager.value(system, object).unwrap_or_else(|_| enter_halt_loop()),
+        Value::Integer(42)
+    );
+    assert!(manager.read(system, failed_id).is_err());
+    serial_marker(serial, b"Ousject native: object value verified\r\n");
+    serial_marker(serial, b"Ousject native: OMS smoke passed\r\n");
+}
+
+fn serial_marker(serial: &mut com1::Com1, marker: &[u8]) {
+    if serial.output(marker).is_err() {
+        enter_halt_loop();
+    }
+}
+
+fn run_alloc_smoke() {
+    let boxed = Box::new(0x0bad_f00d_u64);
+    assert_eq!(*boxed, 0x0bad_f00d);
+
+    let mut values = Vec::new();
+    for value in 0..4096_u64 {
+        values.push(value);
+    }
+    assert_eq!(values.len(), 4096);
+    assert_eq!(values[4095], 4095);
+
+    let mut text = String::from("Ousject");
+    text.push_str(" Native");
+    assert_eq!(text.as_str(), "Ousject Native");
+
+    let mut map = BTreeMap::new();
+    for key in 0..256_u64 {
+        map.insert(key, key * 3);
+    }
+    assert_eq!(map.get(&255), Some(&765));
+
+    let shared = Arc::new(String::from("shared"));
+    let cloned = Arc::clone(&shared);
+    assert!(Arc::ptr_eq(&shared, &cloned));
+}
+
 fn enter_halt_loop() -> ! {
     loop {
         // SAFETY: The UEFI application executes at ring 0. Halt avoids burning
@@ -234,6 +412,15 @@ fn panic_handler(info: &core::panic::PanicInfo<'_>) -> ! {
         let _ = write!(output, "Ousject native panic: {info}\r\n");
     }
     let _ = serial.output(b"Ousject native: panic handler halt\r\n");
+    enter_halt_loop()
+}
+
+#[alloc_error_handler]
+fn allocation_error(layout: Layout) -> ! {
+    let mut serial = com1::Com1::initialize();
+    let _ = serial.output(b"Ousject native: heap out of memory; requested layout ");
+    let mut output = PanicSerial(&mut serial);
+    let _ = write!(output, "size={} align={}\r\n", layout.size(), layout.align());
     enter_halt_loop()
 }
 

@@ -1,5 +1,3 @@
-use im::{OrdMap, OrdSet};
-
 #[derive(Debug, Default, Clone)]
 struct ShardState {
     objects: OrdMap<ObjectId, ObjectRecord>,
@@ -30,7 +28,7 @@ impl Default for PerformanceCounters {
             full_snapshot_encodes: AtomicU64::new(0),
             full_snapshot_bytes: AtomicU64::new(0),
             total_commit_nanos: AtomicU64::new(0),
-            latency_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            latency_buckets: core::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 }
@@ -71,6 +69,7 @@ impl PerformanceCounters {
 struct CommitMetricsGuard<'a> {
     counters: &'a PerformanceCounters,
     transaction_count: u64,
+    #[cfg(feature = "std")]
     started: Instant,
 }
 
@@ -79,6 +78,7 @@ impl<'a> CommitMetricsGuard<'a> {
         Self {
             counters,
             transaction_count: u64::try_from(transaction_count).unwrap_or(u64::MAX),
+            #[cfg(feature = "std")]
             started: Instant::now(),
         }
     }
@@ -87,7 +87,19 @@ impl<'a> CommitMetricsGuard<'a> {
 impl Drop for CommitMetricsGuard<'_> {
     fn drop(&mut self) {
         self.counters
-            .record_batch(self.transaction_count, self.started.elapsed());
+            .record_batch(
+                self.transaction_count,
+                {
+                    #[cfg(feature = "std")]
+                    {
+                        self.started.elapsed()
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        Duration::ZERO
+                    }
+                },
+            );
     }
 }
 
@@ -112,6 +124,7 @@ pub struct InMemoryObjectManager {
     persistence: Option<Arc<dyn SnapshotBackend>>,
     types: TypeRegistry,
     next_tombstone_reap_unix_ms: AtomicU64,
+    #[cfg(feature = "std")]
     reaper_wakeup: Mutex<Option<Sender<()>>>,
     performance: PerformanceCounters,
 }

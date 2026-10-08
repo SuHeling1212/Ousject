@@ -13,6 +13,8 @@ test = false
 bench = false
 
 [dependencies]
+oms-runtime = { path = "../oms-runtime", default-features = false }
+oms-types = { path = "../oms-types", default-features = false }
 ousject-platform = { path = "../ousject-platform" }
 
 [features]

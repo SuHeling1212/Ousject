@@ -1,4 +1,5 @@
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg(feature = "std")]
 struct GcCounts {
     objects_scanned: u64,
     active_objects: u64,
@@ -32,6 +33,7 @@ fn tombstone_reap_deadline(record: &ObjectRecord) -> Option<u64> {
         .map(|retired_at| retired_at.saturating_add(TOMBSTONE_RETENTION_MILLIS))
 }
 
+#[cfg(feature = "std")]
 fn next_tombstone_reap_deadline(state: &ShardState) -> u64 {
     state
         .objects
@@ -41,6 +43,7 @@ fn next_tombstone_reap_deadline(state: &ShardState) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+#[cfg(feature = "std")]
 fn compact_tombstone_payloads(state: &mut ShardState, cutoff_unix_ms: u64) -> GcCounts {
     let mut counts = GcCounts::default();
     let objects = state.objects.keys().copied().collect::<Vec<_>>();
@@ -92,6 +95,7 @@ fn compact_tombstone_payloads(state: &mut ShardState, cutoff_unix_ms: u64) -> Gc
     counts
 }
 
+#[cfg(feature = "std")]
 fn validate_gc_candidate(state: &ShardState, types: &TypeRegistry) -> Result<(), OmsError> {
     validate_parent_graph(state)?;
     validate_type_index(state)?;
@@ -112,10 +116,21 @@ fn unresolved_effect_state(type_id: TypeId, state: &[u8]) -> bool {
     )
 }
 
+#[cfg(feature = "std")]
 fn unix_time_millis() -> Result<u64, OmsError> {
     system_time_to_unix_millis(SystemTime::now())
 }
 
+// Native has no trusted wall-clock source yet. The in-memory OMS can still
+// execute ordinary Object transactions; retirement retention is not elapsed
+// until a real platform wall clock is integrated.
+#[cfg(not(feature = "std"))]
+#[allow(clippy::unnecessary_wraps)]
+fn unix_time_millis() -> Result<u64, OmsError> {
+    Ok(0)
+}
+
+#[cfg(feature = "std")]
 fn system_time_to_unix_millis(time: SystemTime) -> Result<u64, OmsError> {
     let duration = time
         .duration_since(UNIX_EPOCH)
@@ -124,6 +139,7 @@ fn system_time_to_unix_millis(time: SystemTime) -> Result<u64, OmsError> {
         .map_err(|_| OmsError::Storage("Unix time is out of supported range".to_owned()))
 }
 
+#[cfg(feature = "std")]
 const fn retention_cutoff_unix_ms(now_unix_ms: u64) -> u64 {
     now_unix_ms.saturating_sub(TOMBSTONE_RETENTION_MILLIS)
 }

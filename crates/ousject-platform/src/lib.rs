@@ -13,6 +13,21 @@ pub struct MemoryRegion {
     pub kind: MemoryRegionKind,
 }
 
+/// A contiguous physical-memory range reserved by a bootstrap allocator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MemoryRange {
+    pub start: u64,
+    pub length: u64,
+}
+
+impl MemoryRange {
+    /// Returns the exclusive end address, or `None` if the range overflows.
+    #[must_use]
+    pub const fn end(self) -> Option<u64> {
+        self.start.checked_add(self.length)
+    }
+}
+
 impl MemoryRegion {
     /// Returns the exclusive end address, or `None` if the range overflows.
     #[must_use]
@@ -84,6 +99,80 @@ impl PhysicalFrameAllocator {
         self.next_address = frame.checked_add(4096)?;
         Some(frame)
     }
+
+    /// Reserves one contiguous range from usable memory below `address_limit`.
+    ///
+    /// The search excludes any overlapping non-usable descriptor, even if a
+    /// malformed map also labels that address as usable. On success, the
+    /// allocator advances beyond the entire range so later frame allocations
+    /// cannot return any of its pages. This remains a monotonic bootstrap
+    /// allocator: it does not reclaim ranges or track independent free lists.
+    pub fn allocate_contiguous(
+        &mut self,
+        regions: &[MemoryRegion],
+        length: u64,
+        alignment: u64,
+        address_limit: u64,
+    ) -> Option<MemoryRange> {
+        if length == 0 || alignment == 0 || !alignment.is_power_of_two() {
+            return None;
+        }
+
+        let mut selected: Option<MemoryRange> = None;
+        for region in regions {
+            if region.kind != MemoryRegionKind::Usable {
+                continue;
+            }
+            let Some(region_end) = region.end() else {
+                continue;
+            };
+            let Some(mut candidate) = align_up(region.start.max(self.next_address), alignment)
+            else {
+                continue;
+            };
+            let usable_end = region_end.min(address_limit);
+            while let Some(end) = candidate.checked_add(length) {
+                if end > usable_end {
+                    break;
+                }
+
+                let conflict_end = regions
+                    .iter()
+                    .filter(|reserved| reserved.kind != MemoryRegionKind::Usable)
+                    .filter_map(|reserved| {
+                        let reserved_end = reserved.end()?;
+                        (reserved.start < end && candidate < reserved_end).then_some(reserved_end)
+                    })
+                    .max();
+                if let Some(conflict_end) = conflict_end {
+                    let Some(next_candidate) = align_up(conflict_end, alignment) else {
+                        break;
+                    };
+                    candidate = next_candidate;
+                    continue;
+                }
+
+                let range = MemoryRange {
+                    start: candidate,
+                    length,
+                };
+                if selected.is_none_or(|current| range.start < current.start) {
+                    selected = Some(range);
+                }
+                break;
+            }
+        }
+
+        let range = selected?;
+        self.next_address = range.end()?;
+        Some(range)
+    }
+}
+
+fn align_up(address: u64, alignment: u64) -> Option<u64> {
+    address
+        .checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
 }
 
 /// Immutable information collected before the kernel takes ownership.
@@ -91,6 +180,8 @@ impl PhysicalFrameAllocator {
 pub struct BootInfo<'a> {
     pub memory_map: &'a [MemoryRegion],
     pub physical_address_bits: Option<u8>,
+    /// Boot-unique entropy obtained before firmware services are relinquished.
+    pub boot_id_prefix: Option<u64>,
 }
 
 /// A source of monotonic time. Values must not move backwards during a boot.
@@ -218,7 +309,7 @@ pub enum PlatformError {
 #[cfg(test)]
 mod tests {
     use super::{
-        MemoryRegion, MemoryRegionKind, PhysicalFrameAllocator, ticks_to_nanos,
+        MemoryRange, MemoryRegion, MemoryRegionKind, PhysicalFrameAllocator, ticks_to_nanos,
         ticks_to_nanos_ratio,
     };
 
@@ -278,6 +369,78 @@ mod tests {
 
         assert_eq!(allocator.allocate_frame(&regions), Some(0x4000));
         assert_eq!(allocator.allocate_frame(&regions), None);
+    }
+
+    #[test]
+    fn contiguous_allocator_reserves_aligned_memory_and_advances_past_it() {
+        let regions = [MemoryRegion {
+            start: 0x1000,
+            length: 0x20_0000,
+            kind: MemoryRegionKind::Usable,
+        }];
+        let mut allocator = PhysicalFrameAllocator::new();
+        let range = allocator
+            .allocate_contiguous(&regions, 0x8000, 0x1000, 0x10_0000)
+            .unwrap();
+        assert_eq!(
+            range,
+            MemoryRange {
+                start: 0x1000,
+                length: 0x8000
+            }
+        );
+        assert_eq!(allocator.allocate_frame(&regions), Some(0x9000));
+    }
+
+    #[test]
+    fn contiguous_allocator_skips_firmware_conflicts_and_obeys_address_limit() {
+        let regions = [
+            MemoryRegion {
+                start: 0x1000,
+                length: 0x40_000,
+                kind: MemoryRegionKind::Usable,
+            },
+            MemoryRegion {
+                start: 0x8000,
+                length: 0x4000,
+                kind: MemoryRegionKind::Firmware,
+            },
+            MemoryRegion {
+                start: 0x20_000,
+                length: 0x1000,
+                kind: MemoryRegionKind::Mmio,
+            },
+        ];
+        let mut allocator = PhysicalFrameAllocator::new();
+        assert_eq!(
+            allocator.allocate_contiguous(&regions, 0x8000, 0x1000, 0x1_4000),
+            Some(MemoryRange {
+                start: 0xC000,
+                length: 0x8000,
+            })
+        );
+        assert_eq!(
+            allocator.allocate_contiguous(&regions, 0x8000, 0x1000, 0x1_4000),
+            None
+        );
+    }
+
+    #[test]
+    fn contiguous_allocator_rejects_invalid_alignment_and_size() {
+        let regions = [MemoryRegion {
+            start: 0x1000,
+            length: 0x10_000,
+            kind: MemoryRegionKind::Usable,
+        }];
+        let mut allocator = PhysicalFrameAllocator::new();
+        assert_eq!(
+            allocator.allocate_contiguous(&regions, 0, 0x1000, 0x1_0000),
+            None
+        );
+        assert_eq!(
+            allocator.allocate_contiguous(&regions, 0x1000, 3, 0x1_0000),
+            None
+        );
     }
 
     #[test]

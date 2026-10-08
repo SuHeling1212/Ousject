@@ -1,5 +1,7 @@
 //! Fixed object-to-shard routing for the first OMS milestone.
 
+#![no_std]
+
 use oms_types::{ObjectId, OmsError, ShardId};
 
 #[derive(Debug, Clone)]

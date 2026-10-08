@@ -531,6 +531,7 @@ fn combine_shards<'a>(
     Ok(combined)
 }
 
+#[cfg(feature = "std")]
 fn partition_shards(state: ShardState, directory: &FixedDirectory) -> Vec<ShardState> {
     let mut shards = (0..directory.shard_count())
         .map(|_| ShardState::default())

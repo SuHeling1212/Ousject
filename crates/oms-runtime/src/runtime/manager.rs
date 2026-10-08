@@ -15,6 +15,7 @@ impl InMemoryObjectManager {
             persistence: None,
             types: TypeRegistry::builtins(),
             next_tombstone_reap_unix_ms: AtomicU64::new(u64::MAX),
+            #[cfg(feature = "std")]
             reaper_wakeup: Mutex::new(None),
             performance: PerformanceCounters::default(),
         })
@@ -26,6 +27,7 @@ impl InMemoryObjectManager {
     /// # Errors
     ///
     /// Returns an error when the snapshot cannot be read or is corrupt.
+    #[cfg(feature = "std")]
     pub fn open_persistent(path: impl AsRef<Path>) -> Result<Self, OmsError> {
         Self::open_with_backend(Arc::new(FileSnapshotBackend::new(path)))
     }
@@ -39,6 +41,7 @@ impl InMemoryObjectManager {
     ///
     /// Returns an error for an invalid shard count, an in-use Store, storage
     /// failure, or corrupt durable state.
+    #[cfg(feature = "std")]
     pub fn open_persistent_with_shards(
         path: impl AsRef<Path>,
         shard_count: u32,
@@ -51,6 +54,7 @@ impl InMemoryObjectManager {
     /// # Errors
     ///
     /// Returns an error when the backend cannot load a valid snapshot.
+    #[cfg(feature = "std")]
     pub fn open_with_backend(backend: Arc<dyn SnapshotBackend>) -> Result<Self, OmsError> {
         Self::open_with_backend_and_shards(backend, 1)
     }
@@ -61,6 +65,7 @@ impl InMemoryObjectManager {
     ///
     /// Returns an error when the backend cannot load a valid snapshot or the
     /// shard count is zero.
+    #[cfg(feature = "std")]
     pub fn open_with_backend_and_shards(
         backend: Arc<dyn SnapshotBackend>,
         shard_count: u32,
@@ -701,6 +706,7 @@ impl InMemoryObjectManager {
     ///
     /// Returns an error if shard state is unavailable, inconsistent or cannot
     /// be encoded, or if backend size metadata cannot be read.
+    #[cfg(feature = "std")]
     pub fn analyze_gc(&self) -> Result<GcAnalysis, OmsError> {
         self.analyze_gc_at(SystemTime::now())
     }
@@ -712,6 +718,7 @@ impl InMemoryObjectManager {
     ///
     /// Returns an error if state, time conversion, or storage metadata is
     /// unavailable.
+    #[cfg(feature = "std")]
     pub fn analyze_gc_at(&self, now: SystemTime) -> Result<GcAnalysis, OmsError> {
         let cutoff_unix_ms = retention_cutoff_unix_ms(system_time_to_unix_millis(now)?);
         let shards = self
@@ -758,6 +765,7 @@ impl InMemoryObjectManager {
     ///
     /// Returns an error if locking, validation, encoding or durable generation
     /// switching fails. Before the durable switch, the old state remains live.
+    #[cfg(feature = "std")]
     pub fn compact(&self) -> Result<GcReport, OmsError> {
         self.compact_expired_tombstones_at(SystemTime::now())
     }
@@ -769,6 +777,7 @@ impl InMemoryObjectManager {
     ///
     /// Returns an error if locking, validation, encoding or durable generation
     /// switching fails. Before the durable switch, the old state remains live.
+    #[cfg(feature = "std")]
     pub fn compact_expired_tombstones_at(&self, now: SystemTime) -> Result<GcReport, OmsError> {
         let cutoff_unix_ms = retention_cutoff_unix_ms(system_time_to_unix_millis(now)?);
         let started = Instant::now();
@@ -840,6 +849,7 @@ impl InMemoryObjectManager {
     /// # Errors
     ///
     /// Returns an error if the system clock, store, or durable backend fails.
+    #[cfg(feature = "std")]
     pub fn reap_expired_tombstones(&self) -> Result<GcReport, OmsError> {
         let now_unix_ms = unix_time_millis()?;
         if self.next_tombstone_reap_unix_ms.load(Ordering::Acquire) > now_unix_ms {
@@ -874,16 +884,23 @@ impl InMemoryObjectManager {
     /// Returns an error when shard state cannot be read/encoded or the
     /// persistence backend cannot durably replace its checkpoint.
     pub fn checkpoint(&self) -> Result<(), OmsError> {
-        let Some(backend) = &self.persistence else {
-            return Ok(());
-        };
-        let shards = self
-            .shards
-            .iter()
-            .map(|shard| shard.read().map_err(|_| OmsError::TemporarilyUnavailable))
-            .collect::<Result<Vec<_>, _>>()?;
-        let combined = combine_shards(shards.iter().map(|shard| &**shard))?;
-        backend.checkpoint(&encode_snapshot(&combined)?)
+        #[cfg(not(feature = "std"))]
+        {
+            Ok(())
+        }
+        #[cfg(feature = "std")]
+        {
+            let Some(backend) = &self.persistence else {
+                return Ok(());
+            };
+            let shards = self
+                .shards
+                .iter()
+                .map(|shard| shard.read().map_err(|_| OmsError::TemporarilyUnavailable))
+                .collect::<Result<Vec<_>, _>>()?;
+            let combined = combine_shards(shards.iter().map(|shard| &**shard))?;
+            backend.checkpoint(&encode_snapshot(&combined)?)
+        }
     }
 
     #[must_use]
@@ -912,6 +929,7 @@ impl InMemoryObjectManager {
     ///
     /// Returns an error for an empty batch/transaction, conflicts, invalid
     /// operations, denied access, persistence failure, or poisoned locks.
+    #[allow(clippy::too_many_lines)]
     pub fn commit_batch(
         &self,
         transactions: Vec<Transaction>,
@@ -983,6 +1001,9 @@ impl InMemoryObjectManager {
             tombstone_deadlines: new_tombstone_deadlines,
         } = apply_transactions(&mut candidate, transactions, &self.types)?;
 
+        #[cfg(not(feature = "std"))]
+        let _ = batch_changed;
+        #[cfg(feature = "std")]
         self.persist_candidate(&candidate, &batch_changed)?;
 
         if locked.len() == 1 {
@@ -1021,6 +1042,7 @@ impl InMemoryObjectManager {
             self.next_tombstone_reap_unix_ms
                 .fetch_min(*deadline, Ordering::AcqRel);
         }
+        #[cfg(feature = "std")]
         if !new_tombstone_deadlines.is_empty() {
             self.wake_tombstone_reaper();
         }
@@ -1030,6 +1052,7 @@ impl InMemoryObjectManager {
         Ok(results)
     }
 
+    #[cfg(feature = "std")]
     fn persist_candidate(
         &self,
         candidate: &ShardState,
@@ -1069,6 +1092,7 @@ impl InMemoryObjectManager {
         &self.shards[self.directory.locate(object).get() as usize]
     }
 
+    #[cfg(feature = "std")]
     fn tombstone_reaper_wait(&self) -> Option<Duration> {
         let deadline = self.next_tombstone_reap_unix_ms.load(Ordering::Acquire);
         if deadline == u64::MAX {
@@ -1080,6 +1104,7 @@ impl InMemoryObjectManager {
         Some(Duration::from_millis(deadline.saturating_sub(now)))
     }
 
+    #[cfg(feature = "std")]
     fn wake_tombstone_reaper(&self) {
         if let Ok(active) = self.reaper_wakeup.lock() {
             if let Some(wakeup) = active.as_ref() {
@@ -1087,4 +1112,5 @@ impl InMemoryObjectManager {
             }
         }
     }
+
 }

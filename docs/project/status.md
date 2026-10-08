@@ -9,8 +9,8 @@
 - 可以编译和运行 Praxis 程序；
 - 可以把 Object、Program、Process 和系统状态写入持久 Store；
 - 可以测试崩溃恢复、权限、事务和宿主 Provider；
-- Native UEFI 引导脚手架可在 QEMU 中退出 Boot Services 并进入自有早期 CPU 状态；
-- 还不能脱离 Linux/macOS 等宿主运行完整 OMS/VM/Scheduler/Praxis 系统或恢复持久世界。
+- Native UEFI 镜像已在 QEMU 退出 Boot Services、接管早期 CPU 状态、启用自有 heap，并运行共享 OMS 的真实 Object/Transaction smoke；
+- 仍不能运行完整 VM/Scheduler/Praxis 用户空间，也没有恢复持久世界的 Native 后端。
 
 ## 功能矩阵
 
@@ -43,10 +43,12 @@
 | Device 能力清单 | 已实现动态交集 | 运行时 `.capabilities` 取 Object 授权、Type 描述符和实际 Provider 能力的交集 |
 | User-space Driver 基础路径 | 可用现有机制表达，非独立框架 | Process、Capability、Package、普通 Object 与设备 Provider；尚无通用 Driver Manager/自动重启策略 |
 | Native Provider Registry | 已实现启动期封闭 | `VirtualMachine::register_provider` 只在第一次执行用户 Process 前可用；之后 Registry seal |
-| Native platform contracts | 仅有最小 `no_std` 接口 | `ousject-platform` 定义 BootInfo、内存区域、单调时钟、熵、Terminal/Block transport 和 machine control；没有 Native kernel 或 Hosted adapter |
-| 共享 Object/OTF/Praxis 编译层 | `no_std + alloc` 可构建 | `oms-types`、`tf-format`、`praxis-compiler` 可关闭 `std`；ID 生成要求 Native 启动先由平台熵播种；OMS runtime/VM 尚未接入这些 feature |
-| Native UEFI 早期引导 | 脚手架已实现 | `ousject-native-image`：UEFI handoff、COM1、bootstrap frame selector、自有 4 GiB identity page tables、GDT/TSS/IDT 与栈、fatal exception/panic diagnostics、100 Hz PIT/8259 单调时钟；QEMU 验证；尚无 OMS/VM |
-| 裸机完整系统与真实驱动 | 未实现 | 缺少动态页表/heap、4 GiB 以上映射、APIC timer 与 Scheduler 等待接线、Native Terminal Provider、OMS/VM/Praxis 启动、持久 block backend 与 VirtIO 驱动 |
+| Native platform contracts | 有限的 `no_std` 接口 | `ousject-platform` 定义 BootInfo、内存区域、单调时钟、熵、Terminal/Block transport 和 machine control；Native Image 已使用内存区域、熵与时钟路径 |
+| 共享 Object/OTF/Praxis 编译层 | `no_std + alloc` 可构建 | `oms-types`、`tf-format`、`praxis-compiler` 可关闭 `std`；ID 生成要求 Native 启动先由平台熵播种；OMS Runtime 也支持 `no_std + alloc`。VM 仍是 Host-bound |
+| Native 物理内存与 heap | Bootstrap 阶段已实现并经 QEMU 验证 | 从 UEFI Conventional 区域中预留 8 MiB 连续 heap（低于现有 4 GiB identity map）；单调分配、OOM 诊断，无释放/回收或通用 frame manager |
+| Native OMS | 共享核心已在 QEMU 实际运行 | `oms-runtime --no-default-features` 使用同一事务验证与发布逻辑；smoke 验证初始化、Object 创建/读取/更新、Parent/Link、Capability 拒绝和冲突事务原子失败。Native 暂无文件持久化、后台线程或真实墙钟 |
+| Native UEFI 启动 | 早期 kernel 与 OMS bootstrap 已实现 | `ousject-native-image`：UEFI handoff、COM1、bootstrap frame selector、自有 4 GiB identity page tables、GDT/TSS/IDT 与栈、fatal exception/panic diagnostics、100 Hz PIT/8259 单调时钟、heap 与 OMS smoke；QEMU 验证；VM/Praxis execution 尚未接入 |
+| 裸机完整系统与真实驱动 | 未实现 | 缺少动态页表、4 GiB 以上映射、frame 回收、APIC timer 与 Scheduler 等待接线、Native VM/Praxis execution、Native Terminal Provider、持久 block backend 与 VirtIO 驱动 |
 
 ## Praxis 当前可验证能力
 
@@ -73,16 +75,16 @@
 - `ProviderOnly` Type 不能由普通 Praxis 程序伪造。
 - Session secret 只用于认证；密码通过摘要验证，系统验收会检查明文没有写入 Store。
 - Audit 事件追加记录权限相关操作，并避免记录 Object Value 与 secret 内容。
-- Store 同时只允许一个活动持有者。
+- Hosted Store 同时只允许一个活动持有者。Native 当前使用纯内存 OMS，不打开 Host Store。
 
-当前实现禁止 Rust `unsafe`，但这不等于完成安全审计，也不构成对恶意宿主的隔离。
+Hosted/Core 代码仍受 workspace `unsafe_code = "forbid"` 约束。Native Image 在 UEFI、页表、CPU 和 MMIO 边界允许局部 `unsafe`，并须逐处维护硬件不变量；这不等于完成安全审计，也不构成对恶意宿主的隔离。
 
 ## 当前宿主依赖
 
 宿主仍提供：
 
 - Rust 标准库、线程、锁和内存分配；
-- 文件系统与 `FileSnapshotBackend`；
+- Hosted OMS 的文件系统、`FileSnapshotBackend` 与后台工作线程；
 - TCP、DNS 和终端接口；
 - 键盘与块存储宿主适配；当前没有物理 Display driver；
 - Ousject CLI 进程本身。
@@ -91,8 +93,8 @@ Ousject Process 不是 Linux Process。它是由 VM 执行并通过 OMS 持久�
 
 ## 明确未完成或有意保留的边界
 
-- 完整 Bootloader/Native kernel handoff 与 CPU 初始化（UEFI entry、GDT/TSS/IDT 和早期栈已有）；
-- 动态页表、4 GiB 以上映射、细粒度内存权限、完整物理/虚拟内存管理、frame 回收和 heap（早期 4 GiB identity map 已有）；
+- 一般物理内存管理仍未完成：当前 PhysicalFrameAllocator 仅从 UEFI memory map 选区并预留连续范围；Native heap 是固定 8 MiB monotonic bootstrap heap，没有 free/reclaim；
+- 动态页表、4 GiB 以上映射、细粒度内存权限、完整物理/虚拟内存管理和 frame 回收（早期 4 GiB identity map 已有）；
 - APIC timer、Scheduler 等待/唤醒接线和多核时钟同步（早期 100 Hz PIT/8259 单调时钟已可在 QEMU 使用）；
 - 中断、抢占式调度和多核内核启动；
 - PCI、USB、ACPI 等总线枚举；
@@ -102,6 +104,7 @@ Ousject Process 不是 Linux Process。它是由 VM 执行并通过 OMS 持久�
 - 物理 Display Provider、像素渲染后端与真实硬件驱动；
 - 通用 User-space Driver Manager、健康监控和自动重启策略；驱动可用普通 Process 与 Package
   表达，但目前没有专门生命周期框架；
+- Native VM、Scheduler、Praxis execution、Terminal Provider 和 system init/login/shell；
 - 稳定的持久格式、语言 ABI、Package 格式和 public API；
 - 发行版级安装、升级、签名、公证和兼容策略。
 

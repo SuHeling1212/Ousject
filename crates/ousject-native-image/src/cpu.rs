@@ -258,6 +258,55 @@ pub fn physical_address_bits() -> Option<u8> {
     (32..=52).contains(&width).then_some(width)
 }
 
+/// Returns one boot-unique prefix from a feature-detected hardware RNG.
+///
+/// RDSEED is preferred because it supplies seed material; RDRAND is a
+/// hardware DRBG fallback. Both instructions are attempted only after CPUID
+/// reports support, and carry failure is retried a bounded number of times.
+pub fn hardware_random_u64() -> Option<u64> {
+    let basic = core::arch::x86_64::__cpuid(0);
+    if basic.eax < 1 {
+        return None;
+    }
+    let features = core::arch::x86_64::__cpuid(1).ecx;
+    let has_rdrand = features & (1 << 30) != 0;
+    let has_rdseed = basic.eax >= 7 && core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 18) != 0;
+    if !has_rdseed && !has_rdrand {
+        return None;
+    }
+
+    for _ in 0..10 {
+        let mut value = 0_u64;
+        let success: u8;
+        // SAFETY: CPUID above gates each instruction on the advertised CPU
+        // feature. Carry reports whether the instruction produced a value.
+        unsafe {
+            if has_rdseed {
+                core::arch::asm!(
+                    "rdseed {value}",
+                    "setc {success}",
+                    value = out(reg) value,
+                    success = out(reg_byte) success,
+                    options(nomem, nostack)
+                );
+            } else {
+                core::arch::asm!(
+                    "rdrand {value}",
+                    "setc {success}",
+                    value = out(reg) value,
+                    success = out(reg_byte) success,
+                    options(nomem, nostack)
+                );
+            }
+        }
+        if success != 0 {
+            return Some(value);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
 fn initialize_gdt_and_tss() {
     // SAFETY: The GDT, TSS, and stacks are static LoaderData memory, so the
     // firmware memory map will not give these pages to the frame allocator.

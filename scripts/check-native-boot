@@ -63,10 +63,17 @@ firmware_vars_template = pathlib.Path(os.environ.get(
 ))
 qemu = os.environ.get("QEMU", "qemu-system-x86_64")
 markers = [
-    b"Ousject native: Boot Services exited; COM1 and frame allocator online",
+    b"Ousject native: Boot Services exited; COM1 and physical memory online",
     b"Ousject native: GDT, TSS, and IDT installed",
     b"Ousject native: owned identity page tables active",
     b"Ousject native: owned kernel stack active",
+    b"Ousject native: heap initialized",
+    b"Ousject native: alloc smoke passed",
+    b"Ousject native: OMS initialized",
+    b"Ousject native: object created",
+    b"Ousject native: transaction committed",
+    b"Ousject native: object value verified",
+    b"Ousject native: OMS smoke passed",
     b"Ousject native: PIT timer interrupt online",
 ]
 clock_markers = [
@@ -111,8 +118,7 @@ with tempfile.TemporaryDirectory(prefix="ousject-native-boot-") as temp_dir:
         "-no-reboot",
         "-no-shutdown",
     ]
-    if os.environ.get("QEMU_CPU"):
-        command.extend(["-cpu", os.environ["QEMU_CPU"]])
+    command.extend(["-cpu", os.environ.get("QEMU_CPU", "max")])
     process = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0
     )
@@ -132,6 +138,21 @@ with tempfile.TemporaryDirectory(prefix="ousject-native-boot-") as temp_dir:
                     if all(marker in captured for marker in markers) and any(
                         marker in captured for marker in clock_markers
                     ):
+                        heap = re.search(
+                            rb"Ousject native heap: start=0x([0-9a-f]{16}) length=0x([0-9a-f]+)",
+                            captured,
+                        )
+                        if heap is None:
+                            raise SystemExit("QEMU did not report the selected Native heap range")
+                        heap_start = int(heap.group(1), 16)
+                        heap_length = int(heap.group(2), 16)
+                        if (
+                            heap_start < 4096
+                            or heap_start % 4096 != 0
+                            or heap_length != 8 * 1024 * 1024
+                            or heap_start + heap_length > 4 * 1024 * 1024 * 1024
+                        ):
+                            raise SystemExit("QEMU reported an invalid Native heap range")
                         if fault_smoke or double_fault_smoke:
                             vector = "0000000000000006" if fault_smoke else "0000000000000008"
                             fault = re.search(

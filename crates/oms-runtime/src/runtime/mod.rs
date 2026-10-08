@@ -4,6 +4,21 @@
 //! complete candidate, make it durable, and only then publish it. Readers can
 //! therefore never observe a partially published cross-shard transaction.
 
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use self::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+use core::time::Duration;
+#[cfg(feature = "std")]
+use im::{OrdMap, OrdSet};
 use oms_shard::FixedDirectory;
 use oms_types::{
     CORE_AUTHENTICATION_TYPE, CORE_BYTES_TYPE, CORE_CHANNEL_TYPE, CORE_COLLECTION_TYPE,
@@ -17,33 +32,61 @@ use oms_types::{
     OmsError, SYSTEM_SUBJECT, ShardId, SubjectId, TYPE_DESCRIPTOR_TYPE, TransactionId, TypeId,
     Value,
 };
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "std")]
 use std::fs::{self, File, OpenOptions};
+#[cfg(feature = "std")]
 use std::io::Write;
+#[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "std")]
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "std")]
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+#[cfg(feature = "std")]
+use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+#[cfg(feature = "std")]
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(feature = "std")]
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+#[cfg(not(feature = "std"))]
+type OrdMap<K, V> = BTreeMap<K, V>;
+#[cfg(not(feature = "std"))]
+type OrdSet<T> = BTreeSet<T>;
 
+#[cfg(feature = "std")]
 const SNAPSHOT_MAGIC: &[u8; 4] = b"OMS0";
+#[cfg(feature = "std")]
 const WAL_MAGIC: &[u8; 4] = b"OMW0";
+#[cfg(feature = "std")]
 const MANIFEST_MAGIC: &[u8; 4] = b"OMG0";
+#[cfg(feature = "std")]
 const RETIREMENT_TIME_EXTENSION: &[u8; 4] = b"RTM0";
+#[cfg(feature = "std")]
 const MAX_SNAPSHOT_ITEMS: usize = 16 * 1024 * 1024;
+#[cfg(feature = "std")]
 const CHECKPOINT_WAL_BYTES: u64 = 64 * 1024 * 1024;
 const TOMBSTONE_RETENTION_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
+#[cfg(feature = "std")]
 const TOMBSTONE_REAPER_RETRY: Duration = Duration::from_secs(60);
 
 include!("types.rs");
 include!("objects.rs");
 include!("transaction.rs");
+#[cfg(feature = "std")]
 include!("retention.rs");
+#[cfg(feature = "std")]
 include!("backend.rs");
+#[cfg(not(feature = "std"))]
+include!("backend_native.rs");
 include!("manager_state.rs");
 include!("manager.rs");
 include!("retention_ops.rs");
 include!("transaction_apply.rs");
+#[cfg(feature = "std")]
+#[cfg(feature = "std")]
 include!("persistence.rs");
+#[cfg(feature = "std")]
 include!("tests.rs");
+
+#[cfg(not(feature = "std"))]
+mod sync;

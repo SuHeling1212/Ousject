@@ -155,12 +155,34 @@ toolchain's `build-std=core,compiler_builtins` path and `lld-link`; the default
 developer script still uses the ordinary installed-target Cargo path. QEMU
 11.1 and x86_64 EDK2 firmware booted the image, and `scripts/check-native-boot`
 waits for the post-ExitBootServices COM1 marker before passing. The image then
-uses the shared bootstrap frame allocator to select a usable 4 KiB frame,
+uses the shared bootstrap physical allocator to reserve a contiguous 8 MiB heap
+from a UEFI Conventional region below the current 4 GiB identity-map limit,
 passes the CPUID-reported physical-address width when available, installs its
 GDT/TSS/IDT, replaces the firmware CR3 with Ousject's 4 GiB identity map, moves
-execution to its own kernel stack, initializes PIT/8259, and halts. The
-allocator does not dereference or reclaim frames. There is still no dynamic
-page-table manager, heap, OMS/VM, Native Terminal Provider, or shell.
+execution to its own kernel stack, and initializes PIT/8259. The heap is a
+monotonic bootstrap allocator with no reclamation. QEMU validates Box/Vec/String/
+BTreeMap/Arc allocations and real transactions through the shared Native OMS
+runtime. The VM, Native Terminal Provider, persistent block backend, and shell
+are still absent.
+
+In the recorded 2 GiB QEMU run, the selected heap was physical
+`0x01780000..0x01f80000` (8 MiB). This is observed output, not a configured
+address; the boot script checks alignment, size, and containment below 4 GiB.
+
+The current frame selector treats only UEFI Conventional descriptors as
+allocatable, even though UEFI makes additional loader and Boot Services ranges
+available after a successful `ExitBootServices`. This conservative choice
+avoids reclaiming memory still occupied by the EFI image, memory map, stack,
+page tables, or other loader data. A selected region must meet page alignment,
+fit under 4 GiB for the current identity mapping, avoid overlaps with any
+non-usable descriptor, and is advanced past so it cannot be handed out twice.
+This is ownership for one bootstrap heap, not a general free-list allocator.
+
+The bootstrap map keeps the current 2 MiB identity-page scheme. Intel's paging
+rules require the large-page PDE physical base to be 2 MiB aligned; changing
+this mapping or introducing finer-grained protections requires a dedicated
+page-table manager and TLB invalidation. Current mappings remain permissive and
+must not be treated as final kernel/user permissions.
 
 Run the exception and panic smoke paths with:
 
@@ -173,6 +195,7 @@ NATIVE_PANIC_SMOKE=1 ./scripts/check-native-boot
 References:
 
 - [UEFI Specification 2.10: Boot Services](https://uefi.org/specs/UEFI/2.10/07_Services_Boot_Services.html)
+- [UEFI Specification 2.10: memory type usage before and after ExitBootServices](https://uefi.org/specs/UEFI/2.10/07_Services_Boot_Services.html#memory-type-usage-before-exitbootservices)
 - [UEFI Specification 2.10: Serial I/O Protocol](https://uefi.org/specs/UEFI/2.10/12_Protocols_Console_Support.html#serial-i-o-protocol)
 - [Rust UEFI crate documentation](https://docs.rs/uefi/latest/uefi/)
 - [Linux EFI stub documentation](https://docs.kernel.org/admin-guide/efi-stub.html)
@@ -195,5 +218,6 @@ References:
 - [Linux x86 i8259 setup](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/i8259.c)
 - [Linux i8253 clock event](https://github.com/torvalds/linux/blob/master/drivers/clocksource/i8253.c)
 - [Intel SDM Volume 3: Paging and 2 MiB pages](https://cdrdv2-public.intel.com/782157/325384-sdm-vol-3abcd.pdf)
+- [Intel SDM Volume 3A: Paging translation and large pages](https://cdrdv2-public.intel.com/812386/253668-sdm-vol-3a.pdf)
 - [QEMU x86 page-table walk](https://github.com/qemu/qemu/blob/master/target/i386/tcg/sysemu/excp_helper.c)
 - [Linux x86 early paging](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/head64.c)
