@@ -15,6 +15,9 @@ bench = false
 [dependencies]
 oms-runtime = { path = "../oms-runtime", default-features = false }
 oms-types = { path = "../oms-types", default-features = false }
+ousject-vm = { path = "../ousject-vm", default-features = false, features = ["native"] }
+praxis-compiler = { path = "../praxis-compiler", default-features = false }
+tf-format = { path = "../tf-format", default-features = false }
 ousject-platform = { path = "../ousject-platform" }
 
 [features]

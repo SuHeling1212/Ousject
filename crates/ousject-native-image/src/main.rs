@@ -13,12 +13,13 @@ compile_error!("ousject-native-image must be built for x86_64-unknown-uefi");
 ))]
 compile_error!("Native smoke modes are mutually exclusive");
 
-use core::alloc::Layout;
+use core::alloc::{GlobalAlloc, Layout};
 use core::fmt::{self, Write};
 use core::hint::spin_loop;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ptr::read_volatile;
@@ -28,6 +29,9 @@ use oms_types::{
     CORE_VALUE_TYPE, ObjectId, ObjectVersion, SubjectId, SYSTEM_SUBJECT, Value,
     seed_id_generator,
 };
+use ousject_vm::{NativeVirtualMachine, ProcessStatus};
+use praxis_compiler::compile_program;
+use tf_format::Token;
 use ousject_platform::{
     BootInfo, MemoryRegion, MemoryRegionKind, MonotonicClock, PhysicalFrameAllocator,
     TerminalTransport,
@@ -194,8 +198,14 @@ fn native_kernel_entry(boot_info: BootInfo<'_>) -> ! {
         let _ = serial.output(b"Ousject native: ObjectId generator initialization failed\r\n");
         enter_halt_loop();
     }
-    HEAP_RANGE_START.store(heap_range.start as usize, Ordering::Relaxed);
-    HEAP_RANGE_LENGTH.store(heap_range.length as usize, Ordering::Release);
+    HEAP_RANGE_START.store(
+        usize::try_from(heap_range.start).unwrap_or_else(|_| enter_halt_loop()),
+        Ordering::Relaxed,
+    );
+    HEAP_RANGE_LENGTH.store(
+        usize::try_from(heap_range.length).unwrap_or_else(|_| enter_halt_loop()),
+        Ordering::Release,
+    );
     cpu::enter_kernel_stack(native_execution_entry)
 }
 
@@ -208,8 +218,10 @@ extern "efiapi" fn native_execution_entry() -> ! {
         enter_halt_loop();
     }
     let heap_range = ousject_platform::MemoryRange {
-        start: HEAP_RANGE_START.load(Ordering::Relaxed) as u64,
-        length: HEAP_RANGE_LENGTH.load(Ordering::Acquire) as u64,
+        start: u64::try_from(HEAP_RANGE_START.load(Ordering::Relaxed))
+            .unwrap_or_else(|_| enter_halt_loop()),
+        length: u64::try_from(HEAP_RANGE_LENGTH.load(Ordering::Acquire))
+            .unwrap_or_else(|_| enter_halt_loop()),
     };
     if GLOBAL_HEAP.initialize(heap_range).is_err() {
         let _ = serial.output(b"Ousject native: heap initialization failed\r\n");
@@ -241,6 +253,8 @@ extern "efiapi" fn native_execution_entry() -> ! {
     {
         enter_halt_loop();
     }
+    run_alloc_reclamation_smoke();
+    serial_marker(&mut serial, b"Ousject native: heap reclamation smoke passed\r\n");
     run_oms_smoke(&mut serial);
     timer::initialize();
     let pit_clock = timer::PitClock::new();
@@ -293,7 +307,7 @@ extern "efiapi" fn native_execution_entry() -> ! {
 }
 
 fn run_oms_smoke(serial: &mut com1::Com1) {
-    let manager = InMemoryObjectManager::new(4).unwrap_or_else(|_| enter_halt_loop());
+    let manager = Rc::new(InMemoryObjectManager::new(4).unwrap_or_else(|_| enter_halt_loop()));
     serial_marker(serial, b"Ousject native: OMS initialized\r\n");
 
     let system = AccessContext::new(SYSTEM_SUBJECT);
@@ -352,6 +366,96 @@ fn run_oms_smoke(serial: &mut com1::Com1) {
     assert!(manager.read(system, failed_id).is_err());
     serial_marker(serial, b"Ousject native: object value verified\r\n");
     serial_marker(serial, b"Ousject native: OMS smoke passed\r\n");
+
+    run_vm_smoke(serial, manager);
+}
+
+fn run_vm_smoke(serial: &mut com1::Com1, manager: Rc<InMemoryObjectManager>) {
+    let vm = NativeVirtualMachine::new(manager);
+    serial_marker(serial, b"Ousject native: VM initialized\r\n");
+    let program = compile_program("func main() {\n value = 0\n while value < 10 {\n  value = value + 1\n }\n return value\n}\n")
+        .unwrap_or_else(|_| enter_halt_loop());
+    let return_position = program
+        .tokens
+        .iter()
+        .position(|token| matches!(token, Token::Return))
+        .and_then(|position| u32::try_from(position).ok())
+        .unwrap_or_else(|| enter_halt_loop());
+    let process = vm
+        .create_process(&program)
+        .unwrap_or_else(|_| enter_halt_loop());
+    let process_view = vm.manager().read(AccessContext::new(SYSTEM_SUBJECT), process)
+        .unwrap_or_else(|_| enter_halt_loop());
+    let program_id = *process_view.links().get("program").unwrap_or_else(|| enter_halt_loop());
+    assert_eq!(process_view.header().type_id, ousject_vm::PROCESS_TYPE);
+    assert_eq!(vm.manager().read(AccessContext::new(SYSTEM_SUBJECT), program_id)
+        .unwrap_or_else(|_| enter_halt_loop()).header().type_id, ousject_vm::PROGRAM_TYPE);
+    serial_marker(serial, b"Ousject native: Program Object created\r\n");
+    serial_marker(serial, b"Ousject native: Process Object created\r\n");
+
+    let mut report = vm.run_slice(process, 7).unwrap_or_else(|_| enter_halt_loop());
+    assert!(report.steps > 0);
+    assert_eq!(report.status, ProcessStatus::Ready);
+    let slice_state = vm.process_state(process).unwrap_or_else(|_| enter_halt_loop());
+    let locals = &slice_state.frames.last().unwrap_or_else(|| enter_halt_loop()).locals;
+    let value_id = *locals.get("value").unwrap_or_else(|| enter_halt_loop());
+    assert_eq!(vm.manager().value(AccessContext::new(SYSTEM_SUBJECT), value_id)
+        .unwrap_or_else(|_| enter_halt_loop()), Value::Integer(0));
+    serial_marker(serial, b"Ousject native: Process state committed\r\n");
+    let mut slices = 1;
+    let mut current = slice_state;
+    while current.token_position != return_position && slices < 256 {
+        let _ = vm.run_slice(process, 1).unwrap_or_else(|_| enter_halt_loop());
+        current = vm.process_state(process).unwrap_or_else(|_| enter_halt_loop());
+        slices += 1;
+    }
+    assert_eq!(current.token_position, return_position);
+    let final_local = *current
+        .frames
+        .last()
+        .and_then(|frame| frame.locals.get("value"))
+        .unwrap_or_else(|| enter_halt_loop());
+    assert_eq!(
+        vm.manager()
+            .value(AccessContext::new(SYSTEM_SUBJECT), final_local)
+            .unwrap_or_else(|_| enter_halt_loop()),
+        Value::Integer(10)
+    );
+    report = vm.run_slice(process, 1).unwrap_or_else(|_| enter_halt_loop());
+    assert_eq!(report.status, ProcessStatus::Ready);
+    report = vm.run_slice(process, 1).unwrap_or_else(|_| enter_halt_loop());
+    assert_eq!(report.status, ProcessStatus::Halted);
+    let state = vm.process_state(process).unwrap_or_else(|_| enter_halt_loop());
+    assert_eq!(state.result, Some(Value::Integer(10)));
+    assert_eq!(state.stack.last(), Some(&Value::Integer(10)));
+    assert_eq!(state.status, ProcessStatus::Halted);
+    assert!(state.token_position > 0);
+    assert_eq!(state.frames, Vec::<ousject_vm::CallFrame>::new());
+    assert_eq!(state.variables, BTreeMap::new());
+    let unavailable = tf_format::Program {
+        tokens: alloc::vec![
+            Token::ObjectCall {
+                method: String::from("println"),
+                arguments: 0,
+            },
+            Token::Halt,
+        ],
+    };
+    let unavailable_process = vm
+        .create_process(&unavailable)
+        .unwrap_or_else(|_| enter_halt_loop());
+    assert!(matches!(
+        vm.run_slice(unavailable_process, 1),
+        Err(ousject_vm::VmError::MissingProvider("Native token service"))
+    ));
+    let unavailable_state = vm
+        .process_state(unavailable_process)
+        .unwrap_or_else(|_| enter_halt_loop());
+    assert_eq!(unavailable_state.status, ProcessStatus::Failed);
+    assert!(unavailable_state.error.is_some());
+    serial_marker(serial, b"Ousject native: OTF executed\r\n");
+    serial_marker(serial, b"Ousject native: execution result verified\r\n");
+    serial_marker(serial, b"Ousject native: VM smoke passed\r\n");
 }
 
 fn serial_marker(serial: &mut com1::Com1, marker: &[u8]) {
@@ -384,6 +488,27 @@ fn run_alloc_smoke() {
     let shared = Arc::new(String::from("shared"));
     let cloned = Arc::clone(&shared);
     assert!(Arc::ptr_eq(&shared, &cloned));
+}
+
+fn run_alloc_reclamation_smoke() {
+    let available_before = GLOBAL_HEAP.free_bytes();
+    for _ in 0..2048 {
+        let mut allocation = Vec::with_capacity(4096);
+        for byte in 0_usize..4096 {
+            allocation.push(byte.to_le_bytes()[0]);
+        }
+        assert_eq!(allocation[4095], 0xff);
+        drop(allocation);
+    }
+    let layout = Layout::from_size_align(4096, 4096).unwrap_or_else(|_| enter_halt_loop());
+    // SAFETY: this directly exercises one allocation/deallocation pair using
+    // the exact Layout passed to the global allocator.
+    let aligned = unsafe { GLOBAL_HEAP.alloc(layout) };
+    assert!(!aligned.is_null());
+    assert_eq!(aligned as usize % 4096, 0);
+    // SAFETY: `aligned` was returned by this allocator for `layout` above.
+    unsafe { GLOBAL_HEAP.dealloc(aligned, layout) };
+    assert!(GLOBAL_HEAP.free_bytes() >= available_before.saturating_sub(64));
 }
 
 fn enter_halt_loop() -> ! {

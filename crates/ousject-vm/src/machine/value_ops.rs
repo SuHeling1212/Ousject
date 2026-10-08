@@ -1,3 +1,4 @@
+#[cfg(feature = "std")]
 fn finite_math_number(value: &Value) -> Result<f64, VmError> {
     let number = numeric_float(value)?;
     if !number.is_finite() {
@@ -6,6 +7,7 @@ fn finite_math_number(value: &Value) -> Result<f64, VmError> {
     Ok(number)
 }
 
+#[cfg(feature = "std")]
 fn finite_math_result(value: f64) -> Result<Value, VmError> {
     if !value.is_finite() {
         return Err(VmError::TypeError(
@@ -15,6 +17,7 @@ fn finite_math_result(value: f64) -> Result<Value, VmError> {
     Ok(Value::Float(oms_types::FloatValue::new(value)))
 }
 
+#[cfg(feature = "std")]
 fn rounded_math_value(value: &Value, round: fn(f64) -> f64) -> Result<Value, VmError> {
     match value {
         Value::Integer(_) => Ok(value.clone()),
@@ -23,7 +26,8 @@ fn rounded_math_value(value: &Value, round: fn(f64) -> f64) -> Result<Value, VmE
     }
 }
 
-fn numeric_order(left: &Value, right: &Value) -> Result<std::cmp::Ordering, VmError> {
+#[cfg(feature = "std")]
+fn numeric_order(left: &Value, right: &Value) -> Result<core::cmp::Ordering, VmError> {
     match (left, right) {
         (Value::Integer(left), Value::Integer(right)) => Ok(left.cmp(right)),
         (Value::Integer(integer), Value::Float(_)) => {
@@ -41,18 +45,20 @@ fn numeric_order(left: &Value, right: &Value) -> Result<std::cmp::Ordering, VmEr
     }
 }
 
+#[cfg(feature = "std")]
 #[allow(clippy::cast_possible_truncation)]
-fn compare_integer_float(integer: i64, float: f64) -> std::cmp::Ordering {
+#[allow(clippy::cast_precision_loss)]
+fn compare_integer_float(integer: i64, float: f64) -> core::cmp::Ordering {
     if float >= 9_223_372_036_854_775_808.0 {
-        return std::cmp::Ordering::Less;
+        return core::cmp::Ordering::Less;
     }
     if float < -9_223_372_036_854_775_808.0 {
-        return std::cmp::Ordering::Greater;
+        return core::cmp::Ordering::Greater;
     }
-    let truncated = float.trunc() as i64;
+    let truncated = float as i64;
     match integer.cmp(&truncated) {
-        std::cmp::Ordering::Equal if float.fract() > 0.0 => std::cmp::Ordering::Less,
-        std::cmp::Ordering::Equal if float.fract() < 0.0 => std::cmp::Ordering::Greater,
+        core::cmp::Ordering::Equal if float > truncated as f64 => core::cmp::Ordering::Less,
+        core::cmp::Ordering::Equal if float < truncated as f64 => core::cmp::Ordering::Greater,
         ordering => ordering,
     }
 }
@@ -68,7 +74,7 @@ fn value_length(value: &Value) -> Result<i64, VmError> {
     i64::try_from(length).map_err(|_| VmError::TypeError("length exceeds integer range"))
 }
 
-fn compare(token: &Token, left: &Value, right: &Value) -> Result<bool, VmError> {
+pub(crate) fn compare(token: &Token, left: &Value, right: &Value) -> Result<bool, VmError> {
     match token {
         Token::Equal => Ok(left == right),
         Token::NotEqual => Ok(left != right),

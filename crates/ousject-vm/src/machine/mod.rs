@@ -1,5 +1,12 @@
 //! Ousject TF virtual machine backed by Process and Variable Objects.
 
+use crate::execution_core::{
+    CallFrame, ExceptionHandler, ProcessState, ProcessStatus, TokenHost, VmError, WaitReason,
+    WorkerLease, apply_halt, execute_token,
+};
+use crate::execution_core::{
+    arithmetic, compare, execute_collection_token, math_capability, text_capability,
+};
 use oms_runtime::{
     AccessContext, CreateObject, CreateSpec, CreationPolicy, InMemoryObjectManager, ObjectQuery,
     ObjectView, Transaction, TypeDescriptor, ValueSchema,
@@ -16,7 +23,7 @@ use oms_types::{
     CORE_TEXT_TYPE, CORE_TIME_TYPE, CORE_TYPE_REGISTRY_TYPE, CORE_USER_REGISTRY_TYPE,
     CORE_USER_TYPE, CORE_VALUE_TYPE, Capability, DEVICE_BLOCK_STORAGE_TYPE, DEVICE_DISPLAY_TYPE,
     DEVICE_KEYBOARD_TYPE, DEVICE_SENSOR_TYPE, LOCAL_USER_NAME, LifecycleState, NET_ENDPOINT_TYPE,
-    NET_RESOLVER_TYPE, ObjectId, ObjectVersion, OmsError, SubjectId, TypeId, ValueError,
+    NET_RESOLVER_TYPE, ObjectId, ObjectVersion, OmsError, SubjectId, TypeId,
 };
 use ousject_auth::{AuthService, UserIdentity};
 use ousject_provider::{
@@ -28,11 +35,10 @@ use praxis_compiler::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::io::Read;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tf_format::{Program, TfError, Token, Value};
+use tf_format::{Program, Token, Value};
 
 pub use oms_types::SYSTEM_SUBJECT;
 pub const PROGRAM_TYPE: TypeId = CORE_PROGRAM_TYPE;
@@ -74,8 +80,6 @@ mod transaction;
 include!("bindings.rs");
 include!("scheduler.rs");
 include!("errors.rs");
-include!("builtins.rs");
-include!("value_ops.rs");
 include!("process_codec.rs");
 include!("process_reaper.rs");
 include!("object_inspection.rs");

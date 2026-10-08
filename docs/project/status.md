@@ -9,8 +9,8 @@
 - 可以编译和运行 Praxis 程序；
 - 可以把 Object、Program、Process 和系统状态写入持久 Store；
 - 可以测试崩溃恢复、权限、事务和宿主 Provider；
-- Native UEFI 镜像已在 QEMU 退出 Boot Services、接管早期 CPU 状态、启用自有 heap，并运行共享 OMS 的真实 Object/Transaction smoke；
-- 仍不能运行完整 VM/Scheduler/Praxis 用户空间，也没有恢复持久世界的 Native 后端。
+- Native UEFI 镜像已在 QEMU 退出 Boot Services、接管早期 CPU 状态、启用可回收 heap，并通过共享 OMS 执行 Praxis 编译器生成的 OTF Process；
+- Native VM 目前只覆盖共享纯 Token 核心与变量 Object 提交；完整 Scheduler、Provider、交互式 Terminal 和持久世界恢复仍未完成。
 
 ## 功能矩阵
 
@@ -44,11 +44,12 @@
 | User-space Driver 基础路径 | 可用现有机制表达，非独立框架 | Process、Capability、Package、普通 Object 与设备 Provider；尚无通用 Driver Manager/自动重启策略 |
 | Native Provider Registry | 已实现启动期封闭 | `VirtualMachine::register_provider` 只在第一次执行用户 Process 前可用；之后 Registry seal |
 | Native platform contracts | 有限的 `no_std` 接口 | `ousject-platform` 定义 BootInfo、内存区域、单调时钟、熵、Terminal/Block transport 和 machine control；Native Image 已使用内存区域、熵与时钟路径 |
-| 共享 Object/OTF/Praxis 编译层 | `no_std + alloc` 可构建 | `oms-types`、`tf-format`、`praxis-compiler` 可关闭 `std`；ID 生成要求 Native 启动先由平台熵播种；OMS Runtime 也支持 `no_std + alloc`。VM 仍是 Host-bound |
-| Native 物理内存与 heap | Bootstrap 阶段已实现并经 QEMU 验证 | 从 UEFI Conventional 区域中预留 8 MiB 连续 heap（低于现有 4 GiB identity map）；单调分配、OOM 诊断，无释放/回收或通用 frame manager |
+| 共享 Object/OTF/Praxis 编译层 | `no_std + alloc` 可构建并在 Native 联用 | `oms-types`、`tf-format`、`praxis-compiler`、`ousject-vm` 核心可关闭 `std`；ID 生成要求 Native 启动先由平台熵播种；OMS Runtime 也支持 `no_std + alloc` |
+| Native 物理内存与 heap | 8 MiB 有序空闲块 heap，经 QEMU 验证回收和对齐 | 从 UEFI Conventional 区域预留；支持 alloc/dealloc、对齐、相邻块合并与 OOM；仍非通用 frame manager。仅单核合作执行，禁止在中断处理程序中分配 |
 | Native OMS | 共享核心已在 QEMU 实际运行 | `oms-runtime --no-default-features` 使用同一事务验证与发布逻辑；smoke 验证初始化、Object 创建/读取/更新、Parent/Link、Capability 拒绝和冲突事务原子失败。Native 暂无文件持久化、后台线程或真实墙钟 |
-| Native UEFI 启动 | 早期 kernel 与 OMS bootstrap 已实现 | `ousject-native-image`：UEFI handoff、COM1、bootstrap frame selector、自有 4 GiB identity page tables、GDT/TSS/IDT 与栈、fatal exception/panic diagnostics、100 Hz PIT/8259 单调时钟、heap 与 OMS smoke；QEMU 验证；VM/Praxis execution 尚未接入 |
-| 裸机完整系统与真实驱动 | 未实现 | 缺少动态页表、4 GiB 以上映射、frame 回收、APIC timer 与 Scheduler 等待接线、Native VM/Praxis execution、Native Terminal Provider、持久 block backend 与 VirtIO 驱动 |
+| Native VM / Process | 首个真实 OTF Process 已在 QEMU 执行 | `ousject-vm` 的共享 Token 核心与 ProcessState codec 以 `no_std + alloc` 编译；同一 Praxis Compiler 生成 OTF，Program/Process 一起创建进 OMS；逐 Token 将 Process 与变量 Object 一起提交；验证切片状态、变量值、Token Position、Frame、Stack、result 与 Halted 状态。Host Provider Token 暂返回 MissingProvider |
+| Native UEFI 启动 | Native OMS 与共享 VM smoke 已实现 | `ousject-native-image`：UEFI handoff、COM1、bootstrap frame selector、自有 4 GiB identity page tables、GDT/TSS/IDT 与栈、fatal exception/panic diagnostics、100 Hz PIT/8259 单调时钟、heap 回收、OMS 与 VM smoke；QEMU 验证 |
+| 裸机完整系统与真实驱动 | 未实现 | 缺少动态页表、4 GiB 以上映射、通用 frame 回收、APIC timer 与 Scheduler 等待接线、Native Terminal Provider、持久 block backend 与 VirtIO 驱动 |
 
 ## Praxis 当前可验证能力
 
@@ -93,7 +94,7 @@ Ousject Process 不是 Linux Process。它是由 VM 执行并通过 OMS 持久�
 
 ## 明确未完成或有意保留的边界
 
-- 一般物理内存管理仍未完成：当前 PhysicalFrameAllocator 仅从 UEFI memory map 选区并预留连续范围；Native heap 是固定 8 MiB monotonic bootstrap heap，没有 free/reclaim；
+- 一般物理内存管理仍未完成：当前 PhysicalFrameAllocator 仅从 UEFI memory map 选区并预留连续范围；Native heap 是固定 8 MiB 单核空闲块 allocator，不提供通用 frame reclaim；
 - 动态页表、4 GiB 以上映射、细粒度内存权限、完整物理/虚拟内存管理和 frame 回收（早期 4 GiB identity map 已有）；
 - APIC timer、Scheduler 等待/唤醒接线和多核时钟同步（早期 100 Hz PIT/8259 单调时钟已可在 QEMU 使用）；
 - 中断、抢占式调度和多核内核启动；
@@ -104,7 +105,7 @@ Ousject Process 不是 Linux Process。它是由 VM 执行并通过 OMS 持久�
 - 物理 Display Provider、像素渲染后端与真实硬件驱动；
 - 通用 User-space Driver Manager、健康监控和自动重启策略；驱动可用普通 Process 与 Package
   表达，但目前没有专门生命周期框架；
-- Native VM、Scheduler、Praxis execution、Terminal Provider 和 system init/login/shell；
+- Native Cooperative Scheduler、Provider/Effect、Terminal Provider 和 system init/login/shell；当前 Native Praxis 源码在内核 smoke 中编译后由共享 VM 执行，尚无用户空间编译服务；
 - 稳定的持久格式、语言 ABI、Package 格式和 public API；
 - 发行版级安装、升级、签名、公证和兼容策略。
 

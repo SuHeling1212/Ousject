@@ -157,7 +157,7 @@ ousject-macos-arm64
 固件 Serial I/O 报告入口和退出 Boot Services，然后由原生 COM1 输出交接标记。镜像安装
 自有 GDT/TSS/IDT，切换到自有 ring-0 栈，并通过 100 Hz PIT/8259 IRQ0 提供早期单调时钟。
 可选 invariant-TSC 时钟只有在 CPUID 提供频率时才启用；当前 QEMU 配置不提供该信息。
-镜像还会替换 CR3 为自有 4 GiB identity page tables（2 MiB pages；仅为单地址空间早期映射），从 UEFI Conventional 内存保留 8 MiB bootstrap heap，并运行实际的 `alloc` 和共享 `oms-runtime` Object/Transaction smoke。Heap 目前不回收内存；Native OMS 是易失内存态。异常仍为 fatal，系统随后停机。`check-native-boot` 会校验启动、CR3/栈切换、PIT IRQ、heap、alloc、OMS 和时钟状态。可用 `QEMU_MEMORY` 调整 QEMU RAM（早期页表目前仅覆盖 4 GiB）。默认启用 `fault-smoke`
+镜像还会替换 CR3 为自有 4 GiB identity page tables（2 MiB pages；仅为单地址空间早期映射），从 UEFI Conventional 内存保留 8 MiB 可回收 heap，并运行实际的 `alloc`、共享 `oms-runtime` Object/Transaction 与 `ousject-vm` Native smoke。Native smoke 使用同一 Praxis Compiler 编译循环程序，由共享 VM 执行 OTF，并把 Process/变量状态提交到 OMS。Heap 是单核合作执行下的空闲块 allocator；中断处理程序不得分配。Native OMS 仍是易失内存态，异常仍为 fatal，系统随后停机。`check-native-boot` 会校验启动、CR3/栈切换、PIT IRQ、heap 回收/对齐、alloc、OMS、VM 和时钟状态。可用 `QEMU_MEMORY` 调整 QEMU RAM（早期页表目前仅覆盖 4 GiB）。默认启用 `fault-smoke`
 时还会注入 `#UD` 并校验异常向量、错误码槽和 RIP。设置 `NATIVE_FAULT_SMOKE=0` 可检查正常
 路径；设置 `NATIVE_DOUBLE_FAULT_SMOKE=1` 可验证 #DF IST 栈；使用
 `NATIVE_FAULT_SMOKE=0 NATIVE_PANIC_SMOKE=1 ./scripts/check-native-boot` 可单独检查 Rust

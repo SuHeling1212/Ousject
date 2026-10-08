@@ -4,16 +4,31 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["std"]
+std = [
+    "oms-runtime/std",
+    "oms-types/std",
+    "praxis-compiler/std",
+    "tf-format/std",
+    "dep:ousject-provider",
+    "dep:ousject-auth",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:ureq",
+]
+native = []
+
 [dependencies]
-oms-runtime = { path = "../oms-runtime" }
-oms-types = { path = "../oms-types" }
-ousject-provider = { path = "../ousject-provider" }
-ousject-auth = { path = "../ousject-auth" }
-praxis-compiler = { path = "../praxis-compiler" }
-tf-format = { path = "../tf-format" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-ureq = "2.12"
+oms-runtime = { path = "../oms-runtime", default-features = false }
+oms-types = { path = "../oms-types", default-features = false }
+ousject-provider = { path = "../ousject-provider", optional = true }
+ousject-auth = { path = "../ousject-auth", optional = true }
+praxis-compiler = { path = "../praxis-compiler", default-features = false }
+tf-format = { path = "../tf-format", default-features = false }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+ureq = { version = "2.12", optional = true }
 
 [lints]
 workspace = true

@@ -52,12 +52,32 @@ dependencies = [
  "oms-runtime",
  "oms-types",
  "ousject-platform",
+ "ousject-vm",
+ "praxis-compiler",
+ "tf-format",
  "uefi",
 ]
 
 [[package]]
 name = "ousject-platform"
 version = "0.0.0"
+
+[[package]]
+name = "ousject-vm"
+version = "0.0.0"
+dependencies = [
+ "oms-runtime",
+ "oms-types",
+ "praxis-compiler",
+ "tf-format",
+]
+
+[[package]]
+name = "praxis-compiler"
+version = "0.0.0"
+dependencies = [
+ "tf-format",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -117,6 +137,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tf-format"
+version = "0.0.0"
+dependencies = [
+ "oms-types",
 ]
 
 [[package]]

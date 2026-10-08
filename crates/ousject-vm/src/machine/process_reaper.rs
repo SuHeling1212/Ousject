@@ -292,11 +292,3 @@ fn retire_process_objects(
     manager.commit(transaction)?;
     Ok(())
 }
-
-fn decode_optional_u64(reader: &mut StateReader<'_>) -> Result<Option<u64>, VmError> {
-    match reader.u8()? {
-        0 => Ok(None),
-        1 => Ok(Some(reader.u64()?)),
-        _ => Err(invalid_state("invalid Process optional-time marker")),
-    }
-}

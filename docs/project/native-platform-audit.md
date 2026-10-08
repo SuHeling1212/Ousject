@@ -1,8 +1,8 @@
 # Native Platform Repository Audit
 
-Audit of the `main` working tree at HEAD `3e81b86` on 2026-10-08. The Native
-heap/OMS work described below is present in the working tree and remains
-uncommitted.
+Audit of the `main` working tree at HEAD `45dcbe3` on 2026-10-08. Native VM
+execution and heap reclamation described below are working-tree changes and
+remain uncommitted.
 
 ## Findings
 
@@ -14,11 +14,11 @@ uncommitted.
 | `oms-runtime` | Shared `no_std + alloc` in-memory core plus Hosted adapters | Native uses the same transaction validation/application/publication path over `BTreeMap` state and single-core borrow-checked access. Hosted retains `im`, locks, `FileSnapshotBackend`, process-id lease, Unix liveness, worker threads and wall-clock retention. |
 | `ousject-provider` | Shared provider contracts and Terminal screen model | Uses standard collections and synchronization; it does not itself access physical devices. |
 | `ousject-auth` | Domain logic is reusable, implementation is host-bound through dependencies | `rand_core/getrandom` provides entropy; uses `std` time and collections and depends on host-backed `oms-runtime`. |
-| `ousject-vm` | Existing execution semantics remain Host-bound | `std` collections/locks/channels; an OS thread for ProcessReaper; `Instant` and `SystemTime`; `/dev/urandom`; `ureq`/network for Package Market; Host auth/provider dependencies. It has not yet been connected to Native OMS. |
+| `ousject-vm` | Shared `no_std + alloc` Token/ProcessState core plus Hosted adapters | Native reuses the same token execution and Process wire codec, while Host scheduler/reaper, wall clock, entropy, auth/provider, network Package Market, and terminal adapters remain Hosted-only. Native Host-service tokens fail explicitly with `MissingProvider`. |
 | `ousject-cli` | Host adapter and developer tool | Host files, process environment, stdin/stdout, terminal ioctl and `stty`, TCP/DNS, file-backed block emulation, and filesystem package/source loading. |
 | `oms-tools` | Host-only developer utility | Process arguments, stdin/stdout, and CLI entry point. |
 | `ousject-platform` | Minimal `no_std` mechanism contract | No host calls or allocation. It defines boot memory metadata, monotonic clock, entropy, Terminal byte transport, block transport with flush, and machine shutdown/reboot. Hosted runtime does not yet use these interfaces. |
-| `ousject-native-image` | UEFI x86_64 early kernel with tested in-memory OMS bootstrap | Standalone EFI image target; firmware Serial I/O before handoff, polling COM1 afterward, owned GDT/TSS/IDT/stack, 100 Hz PIT/8259 timer, 8 MiB bootstrap heap and actual shared OMS Object/Transaction smoke. It is not yet a VM kernel. |
+| `ousject-native-image` | UEFI x86_64 early kernel running the shared VM smoke | Standalone EFI image target; firmware Serial I/O before handoff, polling COM1 afterward, owned GDT/TSS/IDT/stack, 100 Hz PIT/8259 timer, reclaiming 8 MiB heap, shared OMS, Native VM and compiler OTF smoke. |
 
 `std::collections`, `String`, `Vec`, `fmt`, UTF-8 helpers, and error traits are
 primarily allocation or language conveniences. Locks, atomics, channels,
@@ -42,7 +42,9 @@ The VM persists token position, stack, variables, call frames, handlers, status,
 wait reason, timer deadline, and worker lease in Process state. Scheduler queues,
 Timer heap, provider caches, Effect outcome caches, thread handles, and elapsed
 `Instant` are rebuilt or local to one boot. A background ProcessReaper uses an
-OS thread; Scheduler waiting currently sleeps the calling host thread. Timer and
+OS thread; Scheduler waiting currently sleeps the calling host thread. Native
+currently runs bounded VM slices directly and has not integrated that
+Scheduler. Timer and
 process-retention policy currently use Unix wall-clock milliseconds, while
 elapsed time uses `Instant`.
 Random APIs read `/dev/urandom`; authentication uses `getrandom` through
@@ -72,9 +74,11 @@ not a general frame allocator or reclaiming free list.
 BootInfo includes the CPU-reported physical-address width when available.
 The Native image owns bootstrap identity page tables for the first 4 GiB using
 2 MiB pages, with MMIO-described ranges uncached. It has no dynamic page-table
-manager or mapping above 4 GiB. Its 8 MiB monotonic bootstrap heap is reserved
-from a selected Conventional region below 4 GiB, so the identity map covers it.
-Heap free is a no-op; there is no reclamation. The image also owns its GDT, TSS,
+manager or mapping above 4 GiB. Its 8 MiB heap is reserved from a selected
+Conventional region below 4 GiB, so the identity map covers it. It uses a
+reclaiming first-fit free-block allocator with alignment support and adjacent
+block merging. Access is serialized for single-core cooperative execution;
+allocation from interrupt handlers is prohibited. The image also owns its GDT, TSS,
 early fatal IDT, ring-0 execution stack, and dedicated NMI and double-fault
 stacks. QEMU smoke modes verify CR3 handoff, task-register loading, `#UD`, panic
 reporting, and `#DF` delivery. The current identity map is permissive and is
@@ -87,12 +91,15 @@ integration remain unimplemented. Invariant TSC is an optional clock source
 only when CPUID supplies its frequency; this QEMU profile does not, so the PIT
 clock is used.
 QEMU verifies real `alloc` use (`Box`, growing `Vec`, `String`, `BTreeMap`,
-`Arc`) and Native execution of the shared `oms-runtime`: it creates and reads an
-Object, commits an update, creates Parent/Link relationships, checks denied
-Capability access, and verifies a conflicted multi-operation transaction does
-not partially publish. Native OMS remains volatile; there is no Native
-Terminal Provider, VirtIO transport, raw-block OMS backend, or Host-to-Native
-Store transfer.
+`Arc`), 2048 cycles of 4 KiB allocation/reclamation, and a 4 KiB-aligned
+allocation. The Native image also compiles a Praxis `main()` loop, creates
+Program and Process Objects in one OMS transaction, executes compiler OTF
+through `ousject-vm`'s shared token core, and commits each token's ProcessState
+with variable Object changes. The smoke verifies an intermediate local value,
+token progress, completed frame/stack state, and result 10 after reading the
+Process back from OMS. This is volatile-memory execution, not crash recovery.
+Native OMS has no Terminal Provider, VirtIO transport, raw-block backend, or
+Host-to-Native Store transfer.
 
 ### Durable identity and machine-local state
 
@@ -119,14 +126,16 @@ platform-specific Provider and rejects binding a child Terminal as root.
 ## Minimum native primitives still missing
 
 1. General physical-memory ownership and frame reclamation beyond the current
-   conservative bootstrap selector and monotonic 8 MiB heap.
+   conservative bootstrap selector and fixed 8 MiB heap.
 2. Dynamic virtual-memory management, fine-grained permissions, mappings above
    4 GiB, a recoverable exception policy, and APIC-capable timer routing
    integrated with Scheduler sleep and wakeup.
 3. Native serial transport exists for COM1 diagnostics; it still needs a
    `core.terminal` Provider and interactive input/session behavior.
-4. A Native-compatible VM core; the current VM still depends on Host locks,
-   time, process reaper, auth/provider APIs, sockets and package services.
+4. Native cooperative Scheduler integration, Native Terminal and other
+   Provider adapters, and explicit clock/entropy boundaries for tokens needing
+   them. Hosted retains OS threads, wall clock, ProcessReaper, auth/provider
+   APIs, sockets, and Package Market client.
 5. Native OMS already starts in-memory without host filesystem workers or
    `nix` process-liveness logic; persistence integration remains future work.
 6. Native authentication entropy policy and removal of `/dev/urandom`/host
