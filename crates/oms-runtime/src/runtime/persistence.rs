@@ -1,3 +1,4 @@
+#[cfg(feature = "std")]
 fn persist_file_snapshot(path: &Path, bytes: &[u8]) -> Result<(), OmsError> {
     if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(storage_error)?;
@@ -11,6 +12,7 @@ fn persist_file_snapshot(path: &Path, bytes: &[u8]) -> Result<(), OmsError> {
     sync_parent_directory(path)
 }
 
+#[cfg(feature = "std")]
 fn persist_generation_manifest(path: &Path, bytes: &[u8]) -> Result<bool, OmsError> {
     if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(storage_error)?;
@@ -26,6 +28,7 @@ fn persist_generation_manifest(path: &Path, bytes: &[u8]) -> Result<bool, OmsErr
     Ok(sync_parent_directory(path).is_ok())
 }
 
+#[cfg(feature = "std")]
 fn append_wal_handle(file: &mut File, payload: &[u8]) -> Result<(), OmsError> {
     let length = u64::try_from(payload.len())
         .map_err(|_| OmsError::Storage("WAL record is too large".to_owned()))?;
@@ -38,6 +41,7 @@ fn append_wal_handle(file: &mut File, payload: &[u8]) -> Result<(), OmsError> {
     file.sync_data().map_err(storage_error)
 }
 
+#[cfg(feature = "std")]
 fn open_wal_append(path: &Path) -> Result<File, OmsError> {
     OpenOptions::new()
         .create(true)
@@ -46,6 +50,7 @@ fn open_wal_append(path: &Path) -> Result<File, OmsError> {
         .map_err(storage_error)
 }
 
+#[cfg(feature = "std")]
 fn append_wal_records(path: &Path, payloads: &[Vec<u8>]) -> Result<u64, OmsError> {
     if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(storage_error)?;
@@ -71,6 +76,7 @@ fn append_wal_records(path: &Path, payloads: &[Vec<u8>]) -> Result<u64, OmsError
     Ok(written)
 }
 
+#[cfg(feature = "std")]
 fn encode_delta_wal_payload(delta: &[u8]) -> Result<Vec<u8>, OmsError> {
     let mut payload = Vec::with_capacity(delta.len().saturating_add(1));
     payload.push(4);
@@ -78,6 +84,7 @@ fn encode_delta_wal_payload(delta: &[u8]) -> Result<Vec<u8>, OmsError> {
     compress_wal_payload(payload)
 }
 
+#[cfg(feature = "std")]
 fn encode_group_wal_payload(deltas: &[&[u8]]) -> Result<Vec<u8>, OmsError> {
     if deltas.is_empty() {
         return Err(OmsError::InvalidOperation("WAL group cannot be empty"));
@@ -99,6 +106,7 @@ fn encode_group_wal_payload(deltas: &[&[u8]]) -> Result<Vec<u8>, OmsError> {
     compress_wal_payload(payload)
 }
 
+#[cfg(feature = "std")]
 fn decode_group_wal_payload(body: &[u8]) -> Result<Vec<Vec<u8>>, OmsError> {
     let mut reader = WalDeltaReader::new(body);
     let count = usize::try_from(reader.u32()?)
@@ -118,6 +126,7 @@ fn decode_group_wal_payload(body: &[u8]) -> Result<Vec<Vec<u8>>, OmsError> {
     Ok(deltas)
 }
 
+#[cfg(feature = "std")]
 fn encode_reset_wal_payload(snapshot: &[u8]) -> Result<Vec<u8>, OmsError> {
     let mut payload = Vec::with_capacity(snapshot.len().saturating_add(1));
     payload.push(3);
@@ -125,12 +134,14 @@ fn encode_reset_wal_payload(snapshot: &[u8]) -> Result<Vec<u8>, OmsError> {
     compress_wal_payload(payload)
 }
 
+#[cfg(feature = "std")]
 struct LoadedWalRecords {
     latest: Option<Vec<u8>>,
     updates: Vec<Vec<u8>>,
     committed_records: Vec<Vec<u8>>,
 }
 
+#[cfg(feature = "std")]
 fn load_wal_records(
     path: &Path,
     mut latest: Option<Vec<u8>>,
@@ -226,6 +237,7 @@ fn load_wal_records(
     })
 }
 
+#[cfg(feature = "std")]
 fn apply_wal_payload(previous: Option<&[u8]>, payload: &[u8]) -> Result<Vec<u8>, OmsError> {
     let Some((&kind, body)) = payload.split_first() else {
         return Err(corruption("empty Object Store WAL payload"));
@@ -276,6 +288,7 @@ fn apply_wal_payload(previous: Option<&[u8]>, payload: &[u8]) -> Result<Vec<u8>,
     Ok(snapshot)
 }
 
+#[cfg(feature = "std")]
 fn decompress_wal_payload(body: &[u8]) -> Result<Vec<u8>, OmsError> {
     let mut reader = WalDeltaReader::new(body);
     let length = usize::try_from(reader.u64()?)
@@ -296,6 +309,7 @@ fn decompress_wal_payload(body: &[u8]) -> Result<Vec<u8>, OmsError> {
     Ok(expanded)
 }
 
+#[cfg(feature = "std")]
 fn compress_wal_payload(payload: Vec<u8>) -> Result<Vec<u8>, OmsError> {
     let mut compressed = Vec::new();
     compressed.push(2);
@@ -328,11 +342,13 @@ fn compress_wal_payload(payload: Vec<u8>) -> Result<Vec<u8>, OmsError> {
     })
 }
 
+#[cfg(feature = "std")]
 struct WalDeltaReader<'a> {
     bytes: &'a [u8],
     position: usize,
 }
 
+#[cfg(feature = "std")]
 impl<'a> WalDeltaReader<'a> {
     const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, position: 0 }
@@ -378,6 +394,7 @@ impl<'a> WalDeltaReader<'a> {
     }
 }
 
+#[cfg(feature = "std")]
 fn wal_checksum(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
@@ -474,8 +491,8 @@ fn decode_snapshot(bytes: &[u8]) -> Result<ShardState, OmsError> {
         reader.take(4)?;
     }
     let count = reader.count()?;
-    let mut objects = im::OrdMap::new();
-    let mut by_type = im::OrdMap::<TypeId, im::OrdSet<ObjectId>>::new();
+    let mut objects = OrdMap::new();
+    let mut by_type = OrdMap::<TypeId, OrdSet<ObjectId>>::new();
     for _ in 0..count {
         let id = ObjectId::from_u128(reader.u128()?);
         let type_id = TypeId::from_u128(reader.u128()?);
@@ -500,7 +517,16 @@ fn decode_snapshot(bytes: &[u8]) -> Result<ShardState, OmsError> {
             // An older unpublished snapshot has no age metadata. Start the
             // seven-day retention window at upgrade time rather than deleting
             // its payload immediately.
-            Some(unix_time_millis()?)
+            #[cfg(feature = "std")]
+            {
+                Some(unix_time_millis()?)
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                return Err(corruption(
+                    "Native cannot recover legacy Tombstones without a trusted wall clock",
+                ));
+            }
         } else {
             None
         };
@@ -647,6 +673,7 @@ fn snapshot_u128(bytes: &mut Vec<u8>, value: u128) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
+#[cfg(feature = "std")]
 // `std::io::Result::map_err` supplies the owned error to this adapter.
 #[allow(clippy::needless_pass_by_value)]
 fn storage_error(error: std::io::Error) -> OmsError {
@@ -733,7 +760,7 @@ impl<'a> SnapshotReader<'a> {
     }
 
     fn string(&mut self) -> Result<String, OmsError> {
-        let value = std::str::from_utf8(self.bytes()?)
+        let value = core::str::from_utf8(self.bytes()?)
             .map_err(|_| corruption("snapshot string is not UTF-8"))?;
         Ok(value.to_owned())
     }

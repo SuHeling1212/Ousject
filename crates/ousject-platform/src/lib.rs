@@ -5,6 +5,12 @@
 //! Hosted adapters and native transports can implement these interfaces while
 //! Ousject keeps one Object model and one persistent world.
 
+extern crate alloc;
+
+mod terminal_input;
+
+pub use terminal_input::{TerminalInputBuffer, TerminalInputError, TerminalInputEvent};
+
 /// One region reported by firmware or a platform memory map.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MemoryRegion {

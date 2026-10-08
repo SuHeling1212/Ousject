@@ -4,7 +4,12 @@
 //! (cursor movement, erase, SGR, scrolling, and the common alternate-screen
 //! modes). It is deliberately a screen model, not a host display driver.
 
-use std::collections::BTreeSet;
+use alloc::borrow::ToOwned;
+use alloc::collections::BTreeSet;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::str;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -286,7 +291,7 @@ impl TerminalScreen {
 
     /// Returns rows changed since the previous call.
     pub fn take_dirty_rows(&mut self) -> Vec<usize> {
-        std::mem::take(&mut self.dirty_rows).into_iter().collect()
+        core::mem::take(&mut self.dirty_rows).into_iter().collect()
     }
 
     /// Marks every row dirty, for example when this Screen becomes the active
@@ -384,7 +389,7 @@ impl TerminalScreen {
     fn utf8_byte(&mut self, byte: u8) {
         self.utf8_pending.push(byte);
         loop {
-            match std::str::from_utf8(&self.utf8_pending) {
+            match str::from_utf8(&self.utf8_pending) {
                 Ok(text) => {
                     let chars = text.chars().collect::<Vec<_>>();
                     self.utf8_pending.clear();
@@ -399,7 +404,8 @@ impl TerminalScreen {
                     let bad_len = error.error_len().unwrap_or(1);
                     if valid > 0 {
                         let text =
-                            String::from_utf8_lossy(&self.utf8_pending[..valid]).into_owned();
+                            alloc::string::String::from_utf8_lossy(&self.utf8_pending[..valid])
+                                .into_owned();
                         for character in text.chars() {
                             self.put_character(character);
                         }
@@ -465,7 +471,7 @@ impl TerminalScreen {
 
     fn csi_byte(&mut self, byte: u8) {
         if (0x40..=0x7e).contains(&byte) {
-            let sequence = std::mem::take(&mut self.sequence);
+            let sequence = core::mem::take(&mut self.sequence);
             self.parser = ParserState::Ground;
             self.execute_csi(&sequence, byte);
         } else if self.sequence.len() < 128 {
@@ -499,7 +505,7 @@ impl TerminalScreen {
 
     fn finish_osc(&mut self) {
         self.parser = ParserState::Ground;
-        if let Ok(sequence) = std::str::from_utf8(&self.sequence) {
+        if let Ok(sequence) = str::from_utf8(&self.sequence) {
             if let Some((command, title)) = sequence.split_once(';') {
                 if matches!(command, "0" | "1" | "2") {
                     self.title = title.to_owned();
@@ -510,7 +516,7 @@ impl TerminalScreen {
     }
 
     fn execute_csi(&mut self, bytes: &[u8], final_byte: u8) {
-        let Ok(sequence) = std::str::from_utf8(bytes) else {
+        let Ok(sequence) = str::from_utf8(bytes) else {
             return;
         };
         let private = sequence.starts_with('?');

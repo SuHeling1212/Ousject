@@ -136,6 +136,13 @@ impl From<OmsError> for VmError {
     }
 }
 
+#[cfg(feature = "native")]
+impl From<ousject_provider::ProviderError> for VmError {
+    fn from(error: ousject_provider::ProviderError) -> Self {
+        Self::Provider(error.to_string())
+    }
+}
+
 impl From<TfError> for VmError {
     fn from(error: TfError) -> Self {
         Self::Tf(error)

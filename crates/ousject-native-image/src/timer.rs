@@ -118,6 +118,17 @@ pub fn wait_for_ticks(minimum_ticks: u64) -> bool {
     false
 }
 
+/// Sleeps until the next PIT tick so idle Process waits do not spin.
+///
+/// The caller must have initialized the PIC/PIT and leave IRQ0 unmasked.
+pub fn wait_for_next_tick() {
+    let observed = ticks();
+    while ticks() == observed {
+        // SAFETY: IRQ0 is enabled and advances the counter before returning.
+        unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
+}
+
 /// A boot-local 10 ms resolution clock driven by PIT interrupts.
 #[derive(Clone, Copy, Debug)]
 pub struct PitClock {

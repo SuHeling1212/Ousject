@@ -1,5 +1,9 @@
 //! Generic domain-capability Providers and durable external Effect records.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
 mod terminal_screen;
 
 pub use terminal_screen::{
@@ -7,11 +11,23 @@ pub use terminal_screen::{
     TerminalRenderView, TerminalScreen, TerminalScreenModes, TerminalStyle,
 };
 
+use alloc::borrow::ToOwned;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use core::cell::RefCell;
+use core::fmt;
 use oms_runtime::CreateObject;
 use oms_types::{CORE_EFFECT_TYPE, ObjectId, TypeId, Value, ValueError};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::sync::{Arc, RwLock};
+#[cfg(feature = "std")]
+use std::sync::RwLock;
+
+#[cfg(feature = "std")]
+type RegistryLock<T> = RwLock<T>;
+#[cfg(not(feature = "std"))]
+type RegistryLock<T> = RefCell<T>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderError {
@@ -33,6 +49,7 @@ impl fmt::Display for ProviderError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for ProviderError {}
 
 impl From<ValueError> for ProviderError {
@@ -121,6 +138,25 @@ pub trait ObjectProvider: fmt::Debug + Send + Sync {
         self.invoke(object, state, capability, arguments, effect)
     }
 
+    /// Polls a previously pending Process-scoped operation once without
+    /// blocking. Schedulers call this only for durable Waiting Processes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Provider error if the pending operation can no longer be
+    /// serviced. `Ok(None)` leaves the Process waiting for a later poll.
+    fn poll_for_process(
+        &self,
+        _process: ObjectId,
+        _object: ObjectId,
+        _state: &Value,
+        _capability: &str,
+        _arguments: &[Value],
+        _effect: ObjectId,
+    ) -> Result<Option<ProviderOutcome>, ProviderError> {
+        Ok(None)
+    }
+
     /// Capabilities in this set are explicitly transient: they do not create
     /// a durable Effect record and must not mutate persistent Object state.
     fn ephemeral_capabilities(&self) -> BTreeSet<String> {
@@ -174,7 +210,7 @@ pub trait ObjectProvider: fmt::Debug + Send + Sync {
 
 #[derive(Debug, Default)]
 pub struct ProviderRegistry {
-    state: RwLock<RegistryContents>,
+    state: RegistryLock<RegistryContents>,
 }
 
 #[derive(Debug, Default)]
@@ -197,7 +233,10 @@ impl ProviderRegistry {
     /// `Sealed` after user-space execution begins.
     pub fn register(&self, provider: Arc<dyn ObjectProvider>) -> Result<(), ProviderError> {
         let type_id = provider.type_id();
+        #[cfg(feature = "std")]
         let mut state = self.state.write().map_err(|_| ProviderError::Unavailable)?;
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.borrow_mut();
         if state.sealed {
             return Err(ProviderError::Sealed);
         }
@@ -215,10 +254,17 @@ impl ProviderRegistry {
     ///
     /// Returns `Unavailable` if the registry lock is poisoned.
     pub fn seal(&self) -> Result<(), ProviderError> {
-        self.state
-            .write()
-            .map_err(|_| ProviderError::Unavailable)?
-            .sealed = true;
+        #[cfg(feature = "std")]
+        {
+            self.state
+                .write()
+                .map_err(|_| ProviderError::Unavailable)?
+                .sealed = true;
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            self.state.borrow_mut().sealed = true;
+        }
         Ok(())
     }
 
@@ -228,11 +274,11 @@ impl ProviderRegistry {
     ///
     /// Returns `Unavailable` if the registry lock is poisoned.
     pub fn is_sealed(&self) -> Result<bool, ProviderError> {
-        Ok(self
-            .state
-            .read()
-            .map_err(|_| ProviderError::Unavailable)?
-            .sealed)
+        #[cfg(feature = "std")]
+        let state = self.state.read().map_err(|_| ProviderError::Unavailable)?;
+        #[cfg(not(feature = "std"))]
+        let state = self.state.borrow();
+        Ok(state.sealed)
     }
 
     /// Returns the active Provider for a Type.
@@ -241,9 +287,11 @@ impl ProviderRegistry {
     ///
     /// Returns `Missing` or `Unavailable` when dispatch is impossible.
     pub fn get(&self, type_id: TypeId) -> Result<Arc<dyn ObjectProvider>, ProviderError> {
-        self.state
-            .read()
-            .map_err(|_| ProviderError::Unavailable)?
+        #[cfg(feature = "std")]
+        let state = self.state.read().map_err(|_| ProviderError::Unavailable)?;
+        #[cfg(not(feature = "std"))]
+        let state = self.state.borrow();
+        state
             .providers
             .get(&type_id)
             .cloned()
@@ -257,14 +305,11 @@ impl ProviderRegistry {
     ///
     /// Returns `Unavailable` if the registry lock is poisoned.
     pub fn types(&self) -> Result<Vec<TypeId>, ProviderError> {
-        Ok(self
-            .state
-            .read()
-            .map_err(|_| ProviderError::Unavailable)?
-            .providers
-            .keys()
-            .copied()
-            .collect())
+        #[cfg(feature = "std")]
+        let state = self.state.read().map_err(|_| ProviderError::Unavailable)?;
+        #[cfg(not(feature = "std"))]
+        let state = self.state.borrow();
+        Ok(state.providers.keys().copied().collect())
     }
 
     /// Notifies Providers that a Process has ended so they can release leases.
@@ -273,7 +318,10 @@ impl ProviderRegistry {
     ///
     /// Returns `Unavailable` if the registry lock is poisoned.
     pub fn process_ended(&self, process: ObjectId) -> Result<(), ProviderError> {
+        #[cfg(feature = "std")]
         let state = self.state.read().map_err(|_| ProviderError::Unavailable)?;
+        #[cfg(not(feature = "std"))]
+        let state = self.state.borrow();
         for provider in state.providers.values() {
             provider.process_ended(process);
         }
@@ -286,7 +334,10 @@ impl ProviderRegistry {
     ///
     /// Returns `Unavailable` if the registry lock is poisoned.
     pub fn object_retired(&self, object: ObjectId) -> Result<(), ProviderError> {
+        #[cfg(feature = "std")]
         let state = self.state.read().map_err(|_| ProviderError::Unavailable)?;
+        #[cfg(not(feature = "std"))]
+        let state = self.state.borrow();
         for provider in state.providers.values() {
             provider.object_retired(object);
         }
@@ -582,6 +633,7 @@ fn integer(fields: &BTreeMap<String, Value>, key: &str) -> Result<i64, ProviderE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[derive(Debug)]
     struct StubProvider;
@@ -614,8 +666,8 @@ mod tests {
     #[test]
     fn effect_round_trips_without_losing_request_or_result() {
         let effect = EffectRecord::pending(
-            ObjectId::new(),
-            ObjectId::new(),
+            ObjectId::from_u128(1),
+            ObjectId::from_u128(2),
             42,
             "send",
             vec![Value::Bytes(vec![1, 2, 3])],
@@ -643,8 +695,8 @@ mod tests {
     fn effect_arguments_and_results_redact_nested_secret_handles() {
         let secret = Value::Text("secret:credential-value".to_owned());
         let effect = EffectRecord::pending(
-            ObjectId::new(),
-            ObjectId::new(),
+            ObjectId::from_u128(3),
+            ObjectId::from_u128(4),
             7,
             "send",
             vec![Value::Record(BTreeMap::from([(

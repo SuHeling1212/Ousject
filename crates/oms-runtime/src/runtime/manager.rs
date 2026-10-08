@@ -886,7 +886,16 @@ impl InMemoryObjectManager {
     pub fn checkpoint(&self) -> Result<(), OmsError> {
         #[cfg(not(feature = "std"))]
         {
-            Ok(())
+            let Some(backend) = &self.persistence else {
+                return Ok(());
+            };
+            let shards = self
+                .shards
+                .iter()
+                .map(|shard| shard.read().map_err(|_| OmsError::TemporarilyUnavailable))
+                .collect::<Result<Vec<_>, _>>()?;
+            let combined = combine_shards(shards.iter().map(|shard| &**shard))?;
+            backend.checkpoint(&encode_snapshot(&combined)?)
         }
         #[cfg(feature = "std")]
         {
@@ -1002,7 +1011,7 @@ impl InMemoryObjectManager {
         } = apply_transactions(&mut candidate, transactions, &self.types)?;
 
         #[cfg(not(feature = "std"))]
-        let _ = batch_changed;
+        self.persist_candidate(&candidate, &batch_changed)?;
         #[cfg(feature = "std")]
         self.persist_candidate(&candidate, &batch_changed)?;
 
@@ -1052,7 +1061,6 @@ impl InMemoryObjectManager {
         Ok(results)
     }
 
-    #[cfg(feature = "std")]
     fn persist_candidate(
         &self,
         candidate: &ShardState,
@@ -1113,4 +1121,63 @@ impl InMemoryObjectManager {
         }
     }
 
+}
+
+#[cfg(not(feature = "std"))]
+impl InMemoryObjectManager {
+    /// Opens a Native OMS using the supplied durable snapshot backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when recovery data is invalid, the world fails OMS
+    /// validation, or the requested shard count is zero.
+    pub fn open_with_backend(backend: Arc<dyn SnapshotBackend>) -> Result<Self, OmsError> {
+        Self::open_with_backend_and_shards(backend, 1)
+    }
+
+    /// Opens and validates a Native OMS from a backend recovery image.
+    ///
+    /// The backend must report a completed durable write only after its own
+    /// device has acknowledged persistence. OMS publishes each candidate only
+    /// after `store`/`store_delta` returns successfully.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the snapshot, deltas, Object relationships, type
+    /// descriptors, or shard count are invalid.
+    pub fn open_with_backend_and_shards(
+        backend: Arc<dyn SnapshotBackend>,
+        shard_count: u32,
+    ) -> Result<Self, OmsError> {
+        let recovery = backend.load_recovery()?;
+        if recovery.checkpoint.is_none() && !recovery.updates.is_empty() {
+            return Err(OmsError::Corruption(
+                "Native OMS recovery has transaction deltas without a checkpoint".to_owned(),
+            ));
+        }
+        let mut state = recovery.checkpoint.map_or_else(
+            || Ok(ShardState::default()),
+            |bytes| decode_snapshot(&bytes),
+        )?;
+        for update in recovery.updates {
+            apply_snapshot_delta(&mut state, &update)?;
+        }
+        validate_parent_graph(&state)?;
+        validate_type_index(&state)?;
+        let types = TypeRegistry::builtins();
+        validate_dynamic_types(&state, &types)?;
+        let directory = FixedDirectory::new(shard_count)?;
+        let shards = partition_shards(state, &directory)
+            .into_iter()
+            .map(RwLock::new)
+            .collect();
+        Ok(Self {
+            directory,
+            shards,
+            persistence: Some(backend),
+            types,
+            next_tombstone_reap_unix_ms: AtomicU64::new(u64::MAX),
+            performance: PerformanceCounters::default(),
+        })
+    }
 }

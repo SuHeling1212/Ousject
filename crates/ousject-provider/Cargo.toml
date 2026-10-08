@@ -4,9 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["std"]
+std = ["oms-runtime/std", "oms-types/std"]
+
 [dependencies]
-oms-runtime = { path = "../oms-runtime" }
-oms-types = { path = "../oms-types" }
+oms-runtime = { path = "../oms-runtime", default-features = false }
+oms-types = { path = "../oms-types", default-features = false }
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 

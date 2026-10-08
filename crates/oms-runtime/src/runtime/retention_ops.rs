@@ -121,13 +121,14 @@ fn unix_time_millis() -> Result<u64, OmsError> {
     system_time_to_unix_millis(SystemTime::now())
 }
 
-// Native has no trusted wall-clock source yet. The in-memory OMS can still
-// execute ordinary Object transactions; retirement retention is not elapsed
-// until a real platform wall clock is integrated.
+// Native has no trusted wall-clock source yet. Never fabricate Unix time for
+// persisted retirement metadata; lifecycle operations that require it fail
+// explicitly until a trusted platform clock is available.
 #[cfg(not(feature = "std"))]
-#[allow(clippy::unnecessary_wraps)]
 fn unix_time_millis() -> Result<u64, OmsError> {
-    Ok(0)
+    Err(OmsError::Storage(
+        "Native trusted wall clock is unavailable".to_owned(),
+    ))
 }
 
 #[cfg(feature = "std")]

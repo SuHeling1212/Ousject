@@ -157,9 +157,14 @@ ousject-macos-arm64
 固件 Serial I/O 报告入口和退出 Boot Services，然后由原生 COM1 输出交接标记。镜像安装
 自有 GDT/TSS/IDT，切换到自有 ring-0 栈，并通过 100 Hz PIT/8259 IRQ0 提供早期单调时钟。
 可选 invariant-TSC 时钟只有在 CPUID 提供频率时才启用；当前 QEMU 配置不提供该信息。
-镜像还会替换 CR3 为自有 4 GiB identity page tables（2 MiB pages；仅为单地址空间早期映射），从 UEFI Conventional 内存保留 8 MiB 可回收 heap，并运行实际的 `alloc`、共享 `oms-runtime` Object/Transaction 与 `ousject-vm` Native smoke。Native smoke 使用同一 Praxis Compiler 编译循环程序，由共享 VM 执行 OTF，并把 Process/变量状态提交到 OMS。Heap 是单核合作执行下的空闲块 allocator；中断处理程序不得分配。Native OMS 仍是易失内存态，异常仍为 fatal，系统随后停机。`check-native-boot` 会校验启动、CR3/栈切换、PIT IRQ、heap 回收/对齐、alloc、OMS、VM 和时钟状态。可用 `QEMU_MEMORY` 调整 QEMU RAM（早期页表目前仅覆盖 4 GiB）。默认启用 `fault-smoke`
-时还会注入 `#UD` 并校验异常向量、错误码槽和 RIP。设置 `NATIVE_FAULT_SMOKE=0` 可检查正常
-路径；设置 `NATIVE_DOUBLE_FAULT_SMOKE=1` 可验证 #DF IST 栈；使用
+镜像还会替换 CR3 为自有 4 GiB identity page tables（2 MiB pages；仅为单地址空间早期映射），从 UEFI Conventional 内存保留 8 MiB 可回收 heap。Native OMS 通过 transitional VirtIO Block 将双槽完整快照写入数据镜像，并在事务发布前等待设备 Flush；Native smoke 使用同一 Praxis Compiler 编译程序，由共享执行核心运行 OTF，并把 Process/变量状态提交到同一 OMS。调度器可从 OMS 重建 Ready Process 队列，并在启动时恢复之前中断的 Process。Heap 是单核合作执行下的空闲块 allocator；中断处理程序不得分配。`run-native` 默认复用 `target/native/ousject-world.img`，`check-native-boot` 使用临时镜像连续启动两次，并检查 Object 与 Praxis Process 的跨启动恢复。可用 `QEMU_MEMORY` 调整 QEMU RAM（早期页表目前仅覆盖 4 GiB）。默认启用 `fault-smoke`
+时还会注入 `#UD` 并校验异常向量、错误码槽和 RIP。Native OTF Process 已通过共享
+`core.terminal` Provider 将 `println` Effect 输出到 COM1；双启动 smoke 会读取重启前的
+Completed Effect。QEMU smoke 还会从串口发送一行，唤醒等待中的 Native Praxis Process 并
+验证它恢复执行，并在同一 Praxis Process 中创建持久 Object、更新字段并读回 `42`。
+Native VM 已接入基础 `object.create/find/query` 及 Object 值、链接操作；当前仍以系统 Subject
+访问 OMS，Native Process 的用户 Subject/Capability 边界尚未接通。交互式登录与 Praxis Shell 尚未接通。设置
+`NATIVE_FAULT_SMOKE=0` 可检查正常路径；设置 `NATIVE_DOUBLE_FAULT_SMOKE=1` 可验证 #DF IST 栈；使用
 `NATIVE_FAULT_SMOKE=0 NATIVE_PANIC_SMOKE=1 ./scripts/check-native-boot` 可单独检查 Rust
-panic 诊断。QEMU smoke 使用 `QEMU_CPU=max`，以便在 UEFI RNG 缺失时提供 RDSEED/RDRAND 熵源；无法获得有效熵时系统会在启动 OMS 前停止。当前仍未接入 VM、Praxis execution 或 Terminal。详见
+panic 诊断。QEMU smoke 使用 `QEMU_CPU=max`，以便在 UEFI RNG 缺失时提供 RDSEED/RDRAND 熵源；无法获得有效熵时系统会在启动 OMS 前停止。Native VM 也尚未实现完整 Hosted 服务与 Token 集。详见
 [UEFI Stage A1 研究记录](../project/native-uefi-notes.md)。

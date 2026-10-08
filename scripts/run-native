@@ -3,13 +3,14 @@ set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 esp=$(
-    "$project_root/scripts/build-native"
+    sh "$project_root/scripts/build-native"
 )
 qemu=${QEMU:-qemu-system-x86_64}
 firmware_dir=${QEMU_FIRMWARE_DIR:-/opt/homebrew/Cellar/qemu/11.1.2/share/qemu}
 firmware_code=${OVMF_CODE:-$firmware_dir/edk2-x86_64-code.fd}
 firmware_vars_template=${OVMF_VARS_TEMPLATE:-$firmware_dir/edk2-i386-vars.fd}
 vars="$project_root/target/native/OVMF_VARS.fd"
+world_disk="$project_root/target/native/ousject-world.img"
 
 if [ ! -f "$firmware_code" ] || [ ! -f "$firmware_vars_template" ]; then
     echo "Set OVMF_CODE and OVMF_VARS_TEMPLATE to the installed x86_64 OVMF files" >&2
@@ -18,6 +19,10 @@ fi
 if [ ! -f "$vars" ]; then
     cp "$firmware_vars_template" "$vars"
 fi
+if [ ! -f "$world_disk" ]; then
+    mkdir -p "$(dirname "$world_disk")"
+    truncate -s 64M "$world_disk"
+fi
 
 exec "$qemu" \
     -machine q35 \
@@ -25,6 +30,8 @@ exec "$qemu" \
     -drive "if=pflash,format=raw,readonly=on,file=$firmware_code" \
     -drive "if=pflash,format=raw,file=$vars" \
     -drive "format=raw,file=fat:rw:$esp" \
+    -drive "if=none,format=raw,id=ousject-world,file=$world_disk,cache=writeback" \
+    -device virtio-blk-pci,drive=ousject-world,disable-modern=on \
     -serial stdio \
     -display none \
     -no-reboot \

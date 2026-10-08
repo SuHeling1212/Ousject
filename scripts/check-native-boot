@@ -71,6 +71,8 @@ markers = [
     b"Ousject native: alloc smoke passed",
     b"Ousject native: heap reclamation smoke passed",
     b"Ousject native: OMS initialized",
+    b"Ousject native: OMS block backend mounted",
+    b"Ousject native: OMS block persistence smoke passed",
     b"Ousject native: object created",
     b"Ousject native: transaction committed",
     b"Ousject native: object value verified",
@@ -84,8 +86,17 @@ markers = [
     b"Ousject native: Scheduler initialized",
     b"Ousject native: Process A executed",
     b"Ousject native: Process B executed",
+    b"Ousject native: Process wait and wakeup passed",
     b"Ousject native: Scheduler smoke passed",
+    b"Ousject native: shared Terminal Provider Effect committed",
+    b"Praxis reached Native core.terminal through a durable Effect.",
+    b"Ousject native: Terminal input Process resumed after serial line",
+    b"Praxis input received: native input works",
+    b"42\r\n",
+    b"Ousject native: Process wait checkpoint committed",
     b"Ousject native: VM smoke passed",
+    b"Ousject native: Praxis OTF object field read and write passed",
+    b"Ousject native: restartable Praxis Process checkpoint committed",
     b"Ousject native: PIT timer interrupt online",
 ]
 clock_markers = [
@@ -118,6 +129,9 @@ if not firmware_code.is_file() or not firmware_vars_template.is_file():
 with tempfile.TemporaryDirectory(prefix="ousject-native-boot-") as temp_dir:
     vars_copy = pathlib.Path(temp_dir) / "OVMF_VARS.fd"
     shutil.copyfile(firmware_vars_template, vars_copy)
+    world_disk = pathlib.Path(temp_dir) / "ousject-world.img"
+    with world_disk.open("wb") as disk:
+        disk.truncate(64 * 1024 * 1024)
     command = [
         qemu,
         "-machine", "q35",
@@ -125,74 +139,99 @@ with tempfile.TemporaryDirectory(prefix="ousject-native-boot-") as temp_dir:
         "-drive", f"if=pflash,format=raw,readonly=on,file={firmware_code}",
         "-drive", f"if=pflash,format=raw,file={vars_copy}",
         "-drive", f"format=raw,file=fat:rw:{esp}",
+        "-drive", f"if=none,format=raw,id=ousject-world,file={world_disk},cache=writeback",
+        "-device", "virtio-blk-pci,drive=ousject-world,disable-modern=on",
         "-serial", "stdio",
         "-display", "none",
         "-no-reboot",
         "-no-shutdown",
     ]
     command.extend(["-cpu", os.environ.get("QEMU_CPU", "max")])
-    process = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0
-    )
-    assert process.stdout is not None
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    captured = bytearray()
-    deadline = time.monotonic() + float(os.environ.get("NATIVE_BOOT_TIMEOUT", "15"))
-    try:
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                break
-            for key, _ in selector.select(timeout=0.1):
-                chunk = os.read(key.fd, 4096)
-                if chunk:
-                    captured.extend(chunk)
-                    if all(marker in captured for marker in markers) and any(
-                        marker in captured for marker in clock_markers
-                    ):
-                        heap = re.search(
-                            rb"Ousject native heap: start=0x([0-9a-f]{16}) length=0x([0-9a-f]+)",
-                            captured,
-                        )
-                        if heap is None:
-                            raise SystemExit("QEMU did not report the selected Native heap range")
-                        heap_start = int(heap.group(1), 16)
-                        heap_length = int(heap.group(2), 16)
+    def run_boot(expect_prior_boot):
+        process = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, bufsize=0
+        )
+        assert process.stdout is not None
+        assert process.stdin is not None
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        captured = bytearray()
+        input_sent = False
+        expected_markers = list(markers)
+        if expect_prior_boot:
+            expected_markers.extend([
+                b"Ousject native: completed Terminal Effect recovered after restart",
+                b"Ousject native: prior boot OMS object recovered",
+                b"Ousject native: Process waiter resumed after restart",
+                b"Ousject native: Praxis Process resumed after restart",
+            ])
+        deadline = time.monotonic() + float(os.environ.get("NATIVE_BOOT_TIMEOUT", "15"))
+        try:
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    break
+                for key, _ in selector.select(timeout=0.1):
+                    chunk = os.read(key.fd, 4096)
+                    if chunk:
+                        captured.extend(chunk)
                         if (
-                            heap_start < 4096
-                            or heap_start % 4096 != 0
-                            or heap_length != 8 * 1024 * 1024
-                            or heap_start + heap_length > 4 * 1024 * 1024 * 1024
+                            not input_sent
+                            and b"Ousject native: waiting for QEMU Terminal input" in captured
                         ):
-                            raise SystemExit("QEMU reported an invalid Native heap range")
-                        if fault_smoke or double_fault_smoke:
-                            vector = "0000000000000006" if fault_smoke else "0000000000000008"
-                            fault = re.search(
-                                rb"fatal CPU exception vector 0x" + vector.encode() + rb" "
-                                rb"error=0x0000000000000000 rip=0x([0-9a-f]{16})",
+                            process.stdin.write(b"native input works\r\n")
+                            process.stdin.flush()
+                            input_sent = True
+                        if all(marker in captured for marker in expected_markers) and any(
+                            marker in captured for marker in clock_markers
+                        ):
+                            heap = re.search(
+                                rb"Ousject native heap: start=0x([0-9a-f]{16}) length=0x([0-9a-f]+)",
                                 captured,
                             )
-                            if fault is None or int(fault.group(1), 16) == 0:
-                                raise SystemExit("QEMU #UD diagnostic did not contain a valid RIP")
-                        print(captured.decode(errors="replace"), end="")
-                        suffix = " and #UD diagnostic" if fault_smoke else ""
-                        if double_fault_smoke:
-                            suffix = " and #DF diagnostic on its IST stack"
-                        if panic_smoke:
-                            suffix = " and panic diagnostic"
-                        print(f"QEMU native boot{suffix} smoke passed")
-                        raise SystemExit(0)
-        print(captured.decode(errors="replace"), end="", file=sys.stderr)
-        if process.poll() is not None:
-            raise SystemExit(f"QEMU exited before the native COM1 marker ({process.returncode})")
-        raise SystemExit("Timed out waiting for the post-ExitBootServices COM1 marker")
-    finally:
-        selector.close()
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+                            if heap is None:
+                                raise SystemExit("QEMU did not report the selected Native heap range")
+                            heap_start = int(heap.group(1), 16)
+                            heap_length = int(heap.group(2), 16)
+                            if (
+                                heap_start < 4096
+                                or heap_start % 4096 != 0
+                                or heap_length != 8 * 1024 * 1024
+                                or heap_start + heap_length > 4 * 1024 * 1024 * 1024
+                            ):
+                                raise SystemExit("QEMU reported an invalid Native heap range")
+                            if fault_smoke or double_fault_smoke:
+                                vector = "0000000000000006" if fault_smoke else "0000000000000008"
+                                fault = re.search(
+                                    rb"fatal CPU exception vector 0x" + vector.encode() + rb" "
+                                    rb"error=0x0000000000000000 rip=0x([0-9a-f]{16})",
+                                    captured,
+                                )
+                                if fault is None or int(fault.group(1), 16) == 0:
+                                    raise SystemExit("QEMU #UD diagnostic did not contain a valid RIP")
+                            print(captured.decode(errors="replace"), end="")
+                            suffix = " and #UD diagnostic" if fault_smoke else ""
+                            if double_fault_smoke:
+                                suffix = " and #DF diagnostic on its IST stack"
+                            if panic_smoke:
+                                suffix = " and panic diagnostic"
+                            restart = " with prior-boot OMS recovery" if expect_prior_boot else ""
+                            print(f"QEMU native boot{suffix}{restart} smoke passed")
+                            return
+            print(captured.decode(errors="replace"), end="", file=sys.stderr)
+            if process.poll() is not None:
+                raise SystemExit(f"QEMU exited before the native COM1 marker ({process.returncode})")
+            raise SystemExit("Timed out waiting for the post-ExitBootServices COM1 marker")
+        finally:
+            selector.close()
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+    run_boot(expect_prior_boot=False)
+    run_boot(expect_prior_boot=True)
 PY

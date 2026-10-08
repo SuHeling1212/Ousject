@@ -159,11 +159,44 @@ uses the shared bootstrap physical allocator to reserve a contiguous 8 MiB heap
 from a UEFI Conventional region below the current 4 GiB identity-map limit,
 passes the CPUID-reported physical-address width when available, installs its
 GDT/TSS/IDT, replaces the firmware CR3 with Ousject's 4 GiB identity map, moves
-execution to its own kernel stack, and initializes PIT/8259. The heap is a
-monotonic bootstrap allocator with no reclamation. QEMU validates Box/Vec/String/
-BTreeMap/Arc allocations and real transactions through the shared Native OMS
-runtime. The VM, Native Terminal Provider, persistent block backend, and shell
-are still absent.
+execution to its own kernel stack, and initializes PIT/8259. The 8 MiB heap uses
+a reclaiming free-list allocator. QEMU validates Box/Vec/String/BTreeMap/Arc
+allocations and real transactions through the shared Native OMS runtime. The
+image mounts a transitional VirtIO Block device, commits OMS snapshots through
+a two-slot durability protocol, and uses the same persistent OMS for Native
+Process and Program Objects. `check-native-boot` starts two independent QEMU
+processes over one temporary disk; the second boot verifies an OMS Object,
+resumes a checkpointed Praxis Process at its committed token position, and
+reads a completed `core.terminal.println` Effect from the prior boot. A shared
+Native VM Provider registry now dispatches `print`, `println`, raw `output`,
+`size`, and `is_interactive` to COM1. The `println` smoke runs as an OTF Process
+and confirms its durable Effect reaches Completed before the second QEMU boot.
+The Native Terminal Provider now reads COM1 through the shared bounded,
+non-blocking UTF-8 line editor. A waiting Praxis Process resumes after one
+Provider poll, with Effect completion and its next token checkpoint committed
+atomically. The QEMU check sends `native input works` through serial input and
+confirms the line is stored and printed by that Process. The scheduler exposes
+explicit Provider polling so idle loops can sleep between polls. Native Praxis
+also executes `object.create("core.value", ...)`, field reads, and field writes
+in that same resumed Terminal Process; QEMU checks that the Object remains a
+child of the persistent Process with its updated value. Native
+`object.find`/`object.query` and the basic Object-call surface (`id`, `type`,
+`parent`, `value`, `children`, `links`, `inspect`, `replace`, `link`, and
+`unlink`) are wired through the OMS. This is still an initial subset: Native
+Process subjects are not yet used as the OMS access context, and user login,
+initialization, and Praxis Shell remain unimplemented. Native VM still lacks
+much of the Hosted service and Token surface. The line editor also has
+host-side tests for UTF-8 editing, secret echo suppression, input limits,
+malformed input recovery, and interrupts.
+
+The current QEMU check was built with the local Rust 1.99 toolchain, compiling
+`core`/`alloc` from its installed Rust sources with Cargo `build-std` and using
+`lld-link`. The normal developer script still expects an installed
+`x86_64-unknown-uefi` target. The Native scheduler rebuilds its Ready queue from
+OMS and supports durable Process.wait joins: it wakes a parent after its child
+reaches a terminal state, including recovery when the child finished while the
+machine was offline. Timer waits, IPC/Input/Effect wakeups, and crash injection
+at every storage write/flush boundary remain unimplemented.
 
 In the recorded 2 GiB QEMU run, the selected heap was physical
 `0x01780000..0x01f80000` (8 MiB). This is observed output, not a configured

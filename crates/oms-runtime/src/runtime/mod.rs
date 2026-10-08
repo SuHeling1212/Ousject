@@ -53,15 +53,12 @@ type OrdMap<K, V> = BTreeMap<K, V>;
 #[cfg(not(feature = "std"))]
 type OrdSet<T> = BTreeSet<T>;
 
-#[cfg(feature = "std")]
 const SNAPSHOT_MAGIC: &[u8; 4] = b"OMS0";
 #[cfg(feature = "std")]
 const WAL_MAGIC: &[u8; 4] = b"OMW0";
 #[cfg(feature = "std")]
 const MANIFEST_MAGIC: &[u8; 4] = b"OMG0";
-#[cfg(feature = "std")]
 const RETIREMENT_TIME_EXTENSION: &[u8; 4] = b"RTM0";
-#[cfg(feature = "std")]
 const MAX_SNAPSHOT_ITEMS: usize = 16 * 1024 * 1024;
 #[cfg(feature = "std")]
 const CHECKPOINT_WAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -82,8 +79,6 @@ include!("manager_state.rs");
 include!("manager.rs");
 include!("retention_ops.rs");
 include!("transaction_apply.rs");
-#[cfg(feature = "std")]
-#[cfg(feature = "std")]
 include!("persistence.rs");
 #[cfg(feature = "std")]
 include!("tests.rs");

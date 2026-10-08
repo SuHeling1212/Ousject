@@ -15,6 +15,8 @@ pub use runtime::{
     InMemoryObjectManager, ObjectManager, ObjectQuery, ObjectView, OmsPerformanceStats, OmsStats,
     SnapshotBackend, SnapshotRecovery, StorageUsage, Transaction, TypeDescriptor, ValueSchema,
 };
+#[cfg(not(feature = "std"))]
+pub use runtime::{BlockDevice, BlockSnapshotBackend};
 
 #[cfg(feature = "std")]
 pub use runtime::{FileSnapshotBackend, TombstoneReaper};
