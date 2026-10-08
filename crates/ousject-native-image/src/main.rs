@@ -29,7 +29,7 @@ use oms_types::{
     CORE_VALUE_TYPE, ObjectId, ObjectVersion, SubjectId, SYSTEM_SUBJECT, Value,
     seed_id_generator,
 };
-use ousject_vm::{NativeVirtualMachine, ProcessStatus};
+use ousject_vm::{NativeCooperativeScheduler, NativeVirtualMachine, ProcessStatus};
 use praxis_compiler::compile_program;
 use tf_format::Token;
 use ousject_platform::{
@@ -432,6 +432,9 @@ fn run_vm_smoke(serial: &mut com1::Com1, manager: Rc<InMemoryObjectManager>) {
     assert!(state.token_position > 0);
     assert_eq!(state.frames, Vec::<ousject_vm::CallFrame>::new());
     assert_eq!(state.variables, BTreeMap::new());
+
+    run_native_scheduler_smoke(serial, &vm);
+
     let unavailable = tf_format::Program {
         tokens: alloc::vec![
             Token::ObjectCall {
@@ -456,6 +459,65 @@ fn run_vm_smoke(serial: &mut com1::Com1, manager: Rc<InMemoryObjectManager>) {
     serial_marker(serial, b"Ousject native: OTF executed\r\n");
     serial_marker(serial, b"Ousject native: execution result verified\r\n");
     serial_marker(serial, b"Ousject native: VM smoke passed\r\n");
+}
+
+fn run_native_scheduler_smoke(serial: &mut com1::Com1, vm: &NativeVirtualMachine) {
+    let source = "func main() {\n counter = 0\n while counter < 8 {\n  counter = counter + 1\n }\n return counter\n}\n";
+    let program = compile_program(source).unwrap_or_else(|_| enter_halt_loop());
+    let process_a = vm
+        .create_process(&program)
+        .unwrap_or_else(|_| enter_halt_loop());
+    let process_b = vm
+        .create_process(&program)
+        .unwrap_or_else(|_| enter_halt_loop());
+    let failed_program = tf_format::Program {
+        tokens: alloc::vec![
+            Token::ObjectCall {
+                method: String::from("missing_native_service"),
+                arguments: 0,
+            },
+            Token::Halt,
+        ],
+    };
+    let failed_process = vm
+        .create_process(&failed_program)
+        .unwrap_or_else(|_| enter_halt_loop());
+
+    let mut scheduler = NativeCooperativeScheduler::new(vm);
+    scheduler.set_slice_tokens(1);
+    scheduler.enqueue(process_a).unwrap_or_else(|_| enter_halt_loop());
+    scheduler.enqueue(failed_process).unwrap_or_else(|_| enter_halt_loop());
+    scheduler.enqueue(process_b).unwrap_or_else(|_| enter_halt_loop());
+    serial_marker(serial, b"Ousject native: Scheduler initialized\r\n");
+
+    let first_round = scheduler.run(3).unwrap_or_else(|_| enter_halt_loop());
+    assert_eq!(first_round.steps, 3);
+    let state_a = vm.process_state(process_a).unwrap_or_else(|_| enter_halt_loop());
+    let state_b = vm.process_state(process_b).unwrap_or_else(|_| enter_halt_loop());
+    assert!(state_a.token_position > 1);
+    assert!(state_b.token_position > 1);
+    assert_eq!(
+        vm.process_state(failed_process)
+            .unwrap_or_else(|_| enter_halt_loop())
+            .status,
+        ProcessStatus::Failed
+    );
+
+    let completion = scheduler.run(2_000).unwrap_or_else(|_| enter_halt_loop());
+    assert!(completion.steps > 0);
+    let state_a = vm.process_state(process_a).unwrap_or_else(|_| enter_halt_loop());
+    let state_b = vm.process_state(process_b).unwrap_or_else(|_| enter_halt_loop());
+    assert_eq!(state_a.status, ProcessStatus::Halted);
+    assert_eq!(state_b.status, ProcessStatus::Halted);
+    assert_eq!(state_a.result, Some(tf_format::Value::Integer(8)));
+    assert_eq!(state_b.result, Some(tf_format::Value::Integer(8)));
+    assert_eq!(
+        completion.statuses.get(&failed_process),
+        Some(&ProcessStatus::Failed)
+    );
+    serial_marker(serial, b"Ousject native: Process A executed\r\n");
+    serial_marker(serial, b"Ousject native: Process B executed\r\n");
+    serial_marker(serial, b"Ousject native: Scheduler smoke passed\r\n");
 }
 
 fn serial_marker(serial: &mut com1::Com1, marker: &[u8]) {

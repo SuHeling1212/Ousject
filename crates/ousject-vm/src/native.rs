@@ -37,10 +37,16 @@ impl NativeVirtualMachine {
         }
     }
 
+    #[must_use]
     pub fn manager(&self) -> &Rc<InMemoryObjectManager> {
         &self.manager
     }
 
+    /// Reads and decodes a Process Object's durable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an OMS error, a type error, or a process-state decoding error.
     pub fn process_state(&self, process: ObjectId) -> Result<ProcessState, VmError> {
         let view = self.manager.read(self.context, process)?;
         if view.header().type_id != PROCESS_TYPE {
@@ -50,6 +56,10 @@ impl NativeVirtualMachine {
     }
 
     /// Creates a Program Object and its Ready Process atomically in the OMS.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when encoding, validation, or the atomic OMS commit fails.
     pub fn create_process(&self, program: &Program) -> Result<ObjectId, VmError> {
         let encoded = program.encode()?;
         let halt = program
@@ -101,7 +111,12 @@ impl NativeVirtualMachine {
     }
 
     /// Executes a bounded token slice. Every token and its variable writes are
-    /// published together with ProcessState through one OMS transaction.
+    /// published together with `ProcessState` through one OMS transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an OMS, decoding, token execution, or provider error. A token
+    /// failure is also persisted as the Process's terminal Failed state.
     pub fn run_slice(
         &self,
         process: ObjectId,

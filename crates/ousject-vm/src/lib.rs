@@ -15,6 +15,8 @@ mod execution_core;
 mod machine;
 #[cfg(feature = "native")]
 mod native;
+#[cfg(feature = "native")]
+mod native_scheduler;
 
 pub use execution_core::{
     CallFrame, ExceptionHandler, ProcessState, ProcessStatus, VmError, WaitReason, WorkerLease,
@@ -29,3 +31,5 @@ pub use machine::{
 
 #[cfg(feature = "native")]
 pub use native::{NativeRunReport, NativeVirtualMachine, PROCESS_TYPE, PROGRAM_TYPE};
+#[cfg(feature = "native")]
+pub use native_scheduler::{NativeCooperativeScheduler, NativeScheduleReport};

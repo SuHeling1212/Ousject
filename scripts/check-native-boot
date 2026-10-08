@@ -26,7 +26,7 @@ fi
 if [ "${NATIVE_SKIP_BUILD:-0}" != 1 ]; then
     esp=$(NATIVE_FAULT_SMOKE="$fault_smoke" NATIVE_PANIC_SMOKE="$panic_smoke" \
         NATIVE_DOUBLE_FAULT_SMOKE="$double_fault_smoke" \
-        "$project_root/scripts/build-native")
+        sh "$project_root/scripts/build-native")
 else
     if [ ! -f "$efi_image" ]; then
         echo "Native EFI image is missing; run scripts/build-native or unset NATIVE_SKIP_BUILD" >&2
@@ -81,6 +81,10 @@ markers = [
     b"Ousject native: OTF executed",
     b"Ousject native: Process state committed",
     b"Ousject native: execution result verified",
+    b"Ousject native: Scheduler initialized",
+    b"Ousject native: Process A executed",
+    b"Ousject native: Process B executed",
+    b"Ousject native: Scheduler smoke passed",
     b"Ousject native: VM smoke passed",
     b"Ousject native: PIT timer interrupt online",
 ]
