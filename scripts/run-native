@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+esp=$(
+    "$project_root/scripts/build-native"
+)
+qemu=${QEMU:-qemu-system-x86_64}
+firmware_dir=${QEMU_FIRMWARE_DIR:-/opt/homebrew/Cellar/qemu/11.1.2/share/qemu}
+firmware_code=${OVMF_CODE:-$firmware_dir/edk2-x86_64-code.fd}
+firmware_vars_template=${OVMF_VARS_TEMPLATE:-$firmware_dir/edk2-i386-vars.fd}
+vars="$project_root/target/native/OVMF_VARS.fd"
+
+if [ ! -f "$firmware_code" ] || [ ! -f "$firmware_vars_template" ]; then
+    echo "Set OVMF_CODE and OVMF_VARS_TEMPLATE to the installed x86_64 OVMF files" >&2
+    exit 1
+fi
+if [ ! -f "$vars" ]; then
+    cp "$firmware_vars_template" "$vars"
+fi
+
+exec "$qemu" \
+    -machine q35 \
+    -m 512M \
+    -drive "if=pflash,format=raw,readonly=on,file=$firmware_code" \
+    -drive "if=pflash,format=raw,file=$vars" \
+    -drive "format=raw,file=fat:rw:$esp" \
+    -serial stdio \
+    -display none \
+    -no-reboot \
+    -no-shutdown

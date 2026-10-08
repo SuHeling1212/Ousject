@@ -9,7 +9,8 @@
 - 可以编译和运行 Praxis 程序；
 - 可以把 Object、Program、Process 和系统状态写入持久 Store；
 - 可以测试崩溃恢复、权限、事务和宿主 Provider；
-- 不能脱离 Linux/macOS 等宿主独立启动。
+- Native UEFI 引导脚手架可在 QEMU 中退出 Boot Services 并进入自有早期 CPU 状态；
+- 还不能脱离 Linux/macOS 等宿主运行完整 OMS/VM/Scheduler/Praxis 系统或恢复持久世界。
 
 ## 功能矩阵
 
@@ -42,7 +43,10 @@
 | Device 能力清单 | 已实现动态交集 | 运行时 `.capabilities` 取 Object 授权、Type 描述符和实际 Provider 能力的交集 |
 | User-space Driver 基础路径 | 可用现有机制表达，非独立框架 | Process、Capability、Package、普通 Object 与设备 Provider；尚无通用 Driver Manager/自动重启策略 |
 | Native Provider Registry | 已实现启动期封闭 | `VirtualMachine::register_provider` 只在第一次执行用户 Process 前可用；之后 Registry seal |
-| 裸机启动与真实驱动 | 未实现 | 不在当前宿主系统边界内 |
+| Native platform contracts | 仅有最小 `no_std` 接口 | `ousject-platform` 定义 BootInfo、内存区域、单调时钟、熵、Terminal/Block transport 和 machine control；没有 Native kernel 或 Hosted adapter |
+| 共享 Object/OTF/Praxis 编译层 | `no_std + alloc` 可构建 | `oms-types`、`tf-format`、`praxis-compiler` 可关闭 `std`；ID 生成要求 Native 启动先由平台熵播种；OMS runtime/VM 尚未接入这些 feature |
+| Native UEFI 早期引导 | 脚手架已实现 | `ousject-native-image`：UEFI handoff、COM1、bootstrap frame selector、自有 4 GiB identity page tables、GDT/TSS/IDT 与栈、fatal exception/panic diagnostics、100 Hz PIT/8259 单调时钟；QEMU 验证；尚无 OMS/VM |
+| 裸机完整系统与真实驱动 | 未实现 | 缺少动态页表/heap、4 GiB 以上映射、APIC timer 与 Scheduler 等待接线、Native Terminal Provider、OMS/VM/Praxis 启动、持久 block backend 与 VirtIO 驱动 |
 
 ## Praxis 当前可验证能力
 
@@ -87,8 +91,9 @@ Ousject Process 不是 Linux Process。它是由 VM 执行并通过 OMS 持久�
 
 ## 明确未完成或有意保留的边界
 
-- Bootloader、固件入口和 CPU 初始化；
-- 页表、物理/虚拟内存管理与独立分配器；
+- 完整 Bootloader/Native kernel handoff 与 CPU 初始化（UEFI entry、GDT/TSS/IDT 和早期栈已有）；
+- 动态页表、4 GiB 以上映射、细粒度内存权限、完整物理/虚拟内存管理、frame 回收和 heap（早期 4 GiB identity map 已有）；
+- APIC timer、Scheduler 等待/唤醒接线和多核时钟同步（早期 100 Hz PIT/8259 单调时钟已可在 QEMU 使用）；
 - 中断、抢占式调度和多核内核启动；
 - PCI、USB、ACPI 等总线枚举；
 - 独立网络协议栈与真实硬件驱动；

@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["std"]
+std = ["tf-format/std"]
+
 [dependencies]
-tf-format = { path = "../tf-format" }
+tf-format = { path = "../tf-format", default-features = false }
 
 [lints]
 workspace = true

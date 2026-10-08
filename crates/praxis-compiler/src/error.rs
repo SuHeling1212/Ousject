@@ -1,4 +1,5 @@
-use std::fmt;
+use alloc::string::String;
+use core::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
@@ -16,4 +17,5 @@ impl fmt::Display for CompileError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for CompileError {}

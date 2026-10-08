@@ -451,6 +451,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ousject-platform"
+version = "0.0.0"
+
+[[package]]
 name = "ousject-provider"
 version = "0.0.0"
 dependencies = [

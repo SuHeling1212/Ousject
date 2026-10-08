@@ -1,9 +1,16 @@
 //! TF program representation and stable binary encoding.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::borrow::ToOwned;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 use oms_types::ValueError;
 pub use oms_types::{FloatValue, Value};
-use std::collections::BTreeMap;
-use std::fmt;
 
 const MAGIC: &[u8; 4] = b"OTF0";
 const MAX_STRING_BYTES: usize = 16 * 1024 * 1024;
@@ -126,6 +133,7 @@ impl fmt::Display for TfError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for TfError {}
 
 impl From<ValueError> for TfError {
@@ -603,7 +611,7 @@ impl<'a> Reader<'a> {
         if length > MAX_STRING_BYTES {
             return Err(TfError::LimitExceeded);
         }
-        let value = std::str::from_utf8(self.take(length)?).map_err(|_| TfError::InvalidUtf8)?;
+        let value = core::str::from_utf8(self.take(length)?).map_err(|_| TfError::InvalidUtf8)?;
         Ok(value.to_owned())
     }
 
@@ -623,6 +631,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn program_round_trip() {

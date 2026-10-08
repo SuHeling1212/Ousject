@@ -140,3 +140,27 @@ ousject-macos-arm64
 
 脚本会用 `file` 校验产物确实是 `Mach-O 64-bit arm64`。它不是 macOS 原生构建的通用
 说明，也不负责签名、公证或打包。
+
+## Native UEFI 镜像（x86_64）
+
+独立 EFI 镜像 crate 使用 Rust `x86_64-unknown-uefi` target 和 QEMU/OVMF。先为当前
+工具链安装该 Rust target，再构建并启动：
+
+```bash
+./scripts/build-native
+./scripts/run-native
+./scripts/check-native-boot
+```
+
+`run-native` 与 `check-native-boot` 需要 QEMU 和 x86_64 OVMF code/variables 镜像。可以用环境变量
+`QEMU`、`OVMF_CODE`、`OVMF_VARS_TEMPLATE` 或 `QEMU_FIRMWARE_DIR` 指定位置。当前 EFI 镜像通过
+固件 Serial I/O 报告入口和退出 Boot Services，然后由原生 COM1 输出交接标记。镜像安装
+自有 GDT/TSS/IDT，切换到自有 ring-0 栈，并通过 100 Hz PIT/8259 IRQ0 提供早期单调时钟。
+可选 invariant-TSC 时钟只有在 CPUID 提供频率时才启用；当前 QEMU 配置不提供该信息。
+镜像还会替换 CR3 为自有 4 GiB identity page tables（2 MiB pages；仅为单地址空间早期映射）。
+异常仍为 fatal，系统随后停机。`check-native-boot` 会校验启动、CR3/栈切换、PIT IRQ 和时钟状态。可用 `QEMU_MEMORY` 调整 QEMU RAM（早期页表目前仅覆盖 4 GiB）。默认启用 `fault-smoke`
+时还会注入 `#UD` 并校验异常向量、错误码槽和 RIP。设置 `NATIVE_FAULT_SMOKE=0` 可检查正常
+路径；设置 `NATIVE_DOUBLE_FAULT_SMOKE=1` 可验证 #DF IST 栈；使用
+`NATIVE_FAULT_SMOKE=0 NATIVE_PANIC_SMOKE=1 ./scripts/check-native-boot` 可单独检查 Rust
+panic 诊断。可通过 `QEMU_CPU` 选择 QEMU CPU 模型。当前尚未启动 OMS、VM 或 Praxis。详见
+[UEFI Stage A1 研究记录](../project/native-uefi-notes.md)。

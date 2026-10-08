@@ -270,20 +270,18 @@ impl HostTerminalProvider {
         let outcome = match (capability, arguments) {
             ("print" | "println", [value]) => {
                 let text = value.to_string();
-                if !self.terminal.is_interactive() {
-                    if capability == "println" {
-                        self.terminal
-                            .println(&text)
-                            .map_err(ProviderError::Adapter)?;
-                    } else {
-                        self.terminal.print(&text).map_err(ProviderError::Adapter)?;
-                    }
-                } else {
+                if self.terminal.is_interactive() {
                     let mut bytes = text.into_bytes();
                     if capability == "println" {
                         bytes.push(b'\n');
                     }
                     self.output(object, state, &[Value::Bytes(bytes)])?;
+                } else if capability == "println" {
+                    self.terminal
+                        .println(&text)
+                        .map_err(ProviderError::Adapter)?;
+                } else {
+                    self.terminal.print(&text).map_err(ProviderError::Adapter)?;
                 }
                 ProviderOutcome::result(Value::Null)
             }

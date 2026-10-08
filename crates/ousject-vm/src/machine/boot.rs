@@ -18,7 +18,8 @@ impl VirtualMachine {
         }
     }
 
-    /// Connects a discovered Terminal Object to this VM boot.
+    /// Initializes kernel services and registers the generic Terminal
+    /// transport Provider for test and simple hosted backends.
     ///
     /// Persisting a Terminal Object is not enough to make it usable: a hardware
     /// provider must rediscover and connect it on every boot.
@@ -31,24 +32,49 @@ impl VirtualMachine {
         terminal: ObjectId,
         driver: Arc<dyn TerminalProvider>,
     ) -> Result<Self, VmError> {
+        let vm = Self::with_terminal_backend(manager, terminal, driver)?;
+        vm.register_terminal_transport_provider()?;
+        Ok(vm)
+    }
+
+    /// Initializes kernel services without registering a Terminal Provider.
+    ///
+    /// Platform runtimes that provide the complete `core.terminal` behavior
+    /// should use this constructor, then register their platform Provider
+    /// before starting Processes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Object is unavailable, is not the root
+    /// Terminal, or kernel services cannot be published.
+    pub fn with_terminal_backend(
+        manager: Arc<InMemoryObjectManager>,
+        terminal: ObjectId,
+        driver: Arc<dyn TerminalProvider>,
+    ) -> Result<Self, VmError> {
         let context = AccessContext::new(SYSTEM_SUBJECT);
-        if manager.inspect(context, terminal)?.type_id != CONSOLE_TYPE {
+        let terminal_header = manager.inspect(context, terminal)?;
+        if terminal_header.type_id != CORE_TERMINAL_TYPE {
             return Err(VmError::TypeError(
                 "terminal provider has the wrong Object type",
             ));
         }
+        if terminal_header.parent_id.is_some() {
+            return Err(VmError::TypeError(
+                "terminal provider must connect the root Terminal Object",
+            ));
+        }
         let providers = Arc::new(ProviderRegistry::new());
-        providers.register(Arc::new(TerminalObjectProvider {
-            object: terminal,
-            driver: Arc::clone(&driver),
-            completed_this_boot: Mutex::new(BTreeMap::new()),
-            secrets_this_boot: Mutex::new(BTreeMap::new()),
-        }))?;
         providers.register(Arc::new(TimeObjectProvider {
             started: Instant::now(),
             completed: Mutex::new(BTreeMap::new()),
         }))?;
         let kernel_services = Self::publish_kernel_services(&manager)?;
+        if kernel_services.get("terminal").copied() != Some(terminal) {
+            return Err(VmError::TypeError(
+                "terminal provider must connect the root Terminal Object",
+            ));
+        }
         Ok(Self {
             manager,
             context,
@@ -60,6 +86,31 @@ impl VirtualMachine {
             package_verification_cache: Arc::new(Mutex::new(BTreeMap::new())),
             process_reaper: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Registers the generic Terminal transport adapter.
+    ///
+    /// Platform runtimes with a full `core.terminal` Provider should not call
+    /// this method; they should register that Provider instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no Terminal backend was connected or another
+    /// Provider already owns `core.terminal`.
+    pub fn register_terminal_transport_provider(&self) -> Result<(), VmError> {
+        let object = self
+            .terminal_provider
+            .ok_or(VmError::MissingProvider("terminal"))?;
+        let driver = self
+            .terminal_driver
+            .clone()
+            .ok_or(VmError::MissingProvider("terminal"))?;
+        self.register_provider(Arc::new(TerminalTransportProvider {
+            object,
+            driver,
+            completed_this_boot: Mutex::new(BTreeMap::new()),
+            secrets_this_boot: Mutex::new(BTreeMap::new()),
+        }))
     }
 
     /// Registers a domain-capability Provider during trusted boot, before the
@@ -88,12 +139,14 @@ impl VirtualMachine {
     ) -> Result<ObjectId, VmError> {
         let context = AccessContext::new(SYSTEM_SUBJECT);
         if let Some(terminal) = manager
-            .query(context, &ObjectQuery::new().with_type(CONSOLE_TYPE))?
-            .first()
+            .query(context, &ObjectQuery::new().with_type(CORE_TERMINAL_TYPE))?
+            .into_iter()
+            .find(|terminal| terminal.parent_id.is_none())
         {
             return Ok(terminal.id);
         }
-        let request = CreateObject::new(CONSOLE_TYPE, state.encode()?);
+        let mut request = CreateObject::new(CORE_TERMINAL_TYPE, state.encode()?);
+        request.capabilities = manager.type_by_id(CORE_TERMINAL_TYPE)?.capabilities;
         let terminal = request.id;
         let mut transaction = manager.begin(context);
         transaction.create(request);
@@ -425,7 +478,7 @@ impl VirtualMachine {
         if !value.starts_with("secret:") {
             return Ok(value.to_owned());
         }
-        let provider = self.providers.get(CONSOLE_TYPE)?;
+        let provider = self.providers.get(CORE_TERMINAL_TYPE)?;
         provider.resolve_secret(value)?.ok_or_else(|| {
             VmError::Provider("secret input expired or belongs to another boot".to_owned())
         })

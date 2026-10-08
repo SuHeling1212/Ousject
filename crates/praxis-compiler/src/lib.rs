@@ -1,5 +1,12 @@
 //! Compiler for the executable Praxis subset used by the system MVP.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+
 mod error;
 mod lexer;
 mod module_loader;

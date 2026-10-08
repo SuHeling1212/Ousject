@@ -1,0 +1,32 @@
+[package]
+name = "ousject-native-image"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace]
+
+[[bin]]
+name = "ousject-native-image"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+ousject-platform = { path = "../ousject-platform" }
+
+[features]
+fault-smoke = []
+panic-smoke = []
+double-fault-smoke = []
+
+[target.'cfg(target_os = "uefi")'.dependencies]
+uefi = { version = "0.35.0", default-features = false }
+
+[lints.rust]
+# Native handoff calls UEFI's explicitly unsafe ExitBootServices boundary.
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

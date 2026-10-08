@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["std"]
+std = ["oms-types/std"]
+
 [dependencies]
-oms-types = { path = "../oms-types" }
+oms-types = { path = "../oms-types", default-features = false }
 
 [lints]
 workspace = true

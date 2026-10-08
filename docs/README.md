@@ -28,6 +28,8 @@
 - [系统架构](concepts/architecture.md)
 - [对象模型](concepts/object-model.md)
 - [事务、持久化与恢复](concepts/durability.md)
+- [Native Platform 仓库审计](project/native-platform-audit.md)
+- [Native UEFI Stage A1 研究记录](project/native-uefi-notes.md)
 
 ## 参考手册
 

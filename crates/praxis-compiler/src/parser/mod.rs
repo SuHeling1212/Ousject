@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::lexer::{Lexeme, Spanned};
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 use tf_format::{FloatValue, Program, Token, Value};
 
 pub(super) struct Parser {
@@ -102,7 +104,7 @@ impl Parser {
         expected: &Lexeme,
         message: &str,
     ) -> Result<(), CompileError> {
-        if std::mem::discriminant(&self.current().lexeme) == std::mem::discriminant(expected) {
+        if core::mem::discriminant(&self.current().lexeme) == core::mem::discriminant(expected) {
             self.advance();
             Ok(())
         } else {

@@ -10,6 +10,7 @@ members = [
     "crates/ousject-vm",
     "crates/ousject-auth",
     "crates/ousject-provider",
+    "crates/ousject-platform",
     "crates/ousject-cli",
 ]
 

@@ -2,7 +2,11 @@ use crate::CompileError;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::parser::TopLevelMode;
-use std::collections::BTreeSet;
+use alloc::borrow::ToOwned;
+use alloc::collections::BTreeSet;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use tf_format::Program;
 
 /// Compiles Praxis source into a validated TF program.

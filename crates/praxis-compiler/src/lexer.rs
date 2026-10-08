@@ -1,4 +1,7 @@
 use crate::CompileError;
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec::Vec;
 use tf_format::FloatValue;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +164,7 @@ impl<'a> Lexer<'a> {
         while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
             self.position += 1;
         }
-        let text = std::str::from_utf8(&self.source[start..self.position])
+        let text = core::str::from_utf8(&self.source[start..self.position])
             .map_err(|_| self.error("invalid number"))?;
         if self.peek() == Some(b'.')
             && self
@@ -173,7 +176,7 @@ impl<'a> Lexer<'a> {
             while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
                 self.position += 1;
             }
-            let text = std::str::from_utf8(&self.source[start..self.position])
+            let text = core::str::from_utf8(&self.source[start..self.position])
                 .map_err(|_| self.error("invalid float"))?;
             let value = text
                 .parse::<f64>()
@@ -196,7 +199,7 @@ impl<'a> Lexer<'a> {
         {
             self.position += 1;
         }
-        let text = std::str::from_utf8(&self.source[start..self.position]).unwrap_or_default();
+        let text = core::str::from_utf8(&self.source[start..self.position]).unwrap_or_default();
         let lexeme = match text {
             "true" => Lexeme::True,
             "false" => Lexeme::False,
@@ -253,7 +256,7 @@ impl<'a> Lexer<'a> {
                 value_byte if value_byte.is_ascii() => value.push(char::from(value_byte)),
                 _ => {
                     let character_start = self.position - 1;
-                    let remaining = std::str::from_utf8(&self.source[character_start..])
+                    let remaining = core::str::from_utf8(&self.source[character_start..])
                         .map_err(|_| self.error("source is not valid UTF-8"))?;
                     let character = remaining
                         .chars()

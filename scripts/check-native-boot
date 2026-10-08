@@ -1,0 +1,165 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+native_dir="$project_root/target/native"
+efi_image="$native_dir/x86_64-unknown-uefi/release/ousject-native-image.efi"
+fault_smoke=${NATIVE_FAULT_SMOKE:-}
+panic_smoke=${NATIVE_PANIC_SMOKE:-0}
+double_fault_smoke=${NATIVE_DOUBLE_FAULT_SMOKE:-0}
+if [ -z "$fault_smoke" ]; then
+    if [ "$panic_smoke" = 1 ] || [ "$double_fault_smoke" = 1 ]; then
+        fault_smoke=0
+    else
+        fault_smoke=1
+    fi
+fi
+smoke_mode_count=$((fault_smoke + panic_smoke + double_fault_smoke))
+if [ "$smoke_mode_count" -gt 1 ]; then
+    echo "Choose only one Native fault or panic smoke mode per run" >&2
+    exit 1
+fi
+if [ ! -f "$efi_image" ]; then
+    efi_image="$native_dir/x86_64-unknown-uefi/release/ousject-native-image"
+fi
+
+if [ "${NATIVE_SKIP_BUILD:-0}" != 1 ]; then
+    esp=$(NATIVE_FAULT_SMOKE="$fault_smoke" NATIVE_PANIC_SMOKE="$panic_smoke" \
+        NATIVE_DOUBLE_FAULT_SMOKE="$double_fault_smoke" \
+        "$project_root/scripts/build-native")
+else
+    if [ ! -f "$efi_image" ]; then
+        echo "Native EFI image is missing; run scripts/build-native or unset NATIVE_SKIP_BUILD" >&2
+        exit 1
+    fi
+    esp="$native_dir/esp"
+    mkdir -p "$esp/EFI/BOOT"
+    cp "$efi_image" "$esp/EFI/BOOT/BOOTX64.EFI"
+fi
+
+exec python3 - "$esp" "$fault_smoke" "$panic_smoke" "$double_fault_smoke" <<'PY'
+import os
+import pathlib
+import re
+import selectors
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+esp = pathlib.Path(sys.argv[1])
+fault_smoke = sys.argv[2] == "1"
+panic_smoke = sys.argv[3] == "1"
+double_fault_smoke = sys.argv[4] == "1"
+firmware_dir = pathlib.Path(os.environ.get(
+    "QEMU_FIRMWARE_DIR", "/opt/homebrew/Cellar/qemu/11.1.2/share/qemu"
+))
+firmware_code = pathlib.Path(os.environ.get(
+    "OVMF_CODE", firmware_dir / "edk2-x86_64-code.fd"
+))
+firmware_vars_template = pathlib.Path(os.environ.get(
+    "OVMF_VARS_TEMPLATE", firmware_dir / "edk2-i386-vars.fd"
+))
+qemu = os.environ.get("QEMU", "qemu-system-x86_64")
+markers = [
+    b"Ousject native: Boot Services exited; COM1 and frame allocator online",
+    b"Ousject native: GDT, TSS, and IDT installed",
+    b"Ousject native: owned identity page tables active",
+    b"Ousject native: owned kernel stack active",
+    b"Ousject native: PIT timer interrupt online",
+]
+clock_markers = [
+    b"Ousject native: invariant TSC clock online\r\n",
+    b"Ousject native: invariant TSC clock unavailable\r\n",
+]
+if fault_smoke:
+    markers.extend([
+        b"Ousject native: fatal CPU exception vector 0x0000000000000006",
+        b"Ousject native: fatal handler halt",
+    ])
+if double_fault_smoke:
+    markers.extend([
+        b"Ousject native: fatal CPU exception vector 0x0000000000000008",
+        b" error=0x0000000000000000 rip=0x",
+        b"Ousject native: fatal handler halt",
+    ])
+if panic_smoke:
+    markers.extend([
+        b"Ousject native: panic diagnostic begin",
+        b"Ousject native: panic handler halt",
+        b"intentional native panic smoke",
+    ])
+
+if not firmware_code.is_file() or not firmware_vars_template.is_file():
+    raise SystemExit(
+        "Set OVMF_CODE and OVMF_VARS_TEMPLATE to installed x86_64 OVMF files"
+    )
+
+with tempfile.TemporaryDirectory(prefix="ousject-native-boot-") as temp_dir:
+    vars_copy = pathlib.Path(temp_dir) / "OVMF_VARS.fd"
+    shutil.copyfile(firmware_vars_template, vars_copy)
+    command = [
+        qemu,
+        "-machine", "q35",
+        "-m", os.environ.get("QEMU_MEMORY", "512M"),
+        "-drive", f"if=pflash,format=raw,readonly=on,file={firmware_code}",
+        "-drive", f"if=pflash,format=raw,file={vars_copy}",
+        "-drive", f"format=raw,file=fat:rw:{esp}",
+        "-serial", "stdio",
+        "-display", "none",
+        "-no-reboot",
+        "-no-shutdown",
+    ]
+    if os.environ.get("QEMU_CPU"):
+        command.extend(["-cpu", os.environ["QEMU_CPU"]])
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0
+    )
+    assert process.stdout is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    captured = bytearray()
+    deadline = time.monotonic() + float(os.environ.get("NATIVE_BOOT_TIMEOUT", "15"))
+    try:
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            for key, _ in selector.select(timeout=0.1):
+                chunk = os.read(key.fd, 4096)
+                if chunk:
+                    captured.extend(chunk)
+                    if all(marker in captured for marker in markers) and any(
+                        marker in captured for marker in clock_markers
+                    ):
+                        if fault_smoke or double_fault_smoke:
+                            vector = "0000000000000006" if fault_smoke else "0000000000000008"
+                            fault = re.search(
+                                rb"fatal CPU exception vector 0x" + vector.encode() + rb" "
+                                rb"error=0x0000000000000000 rip=0x([0-9a-f]{16})",
+                                captured,
+                            )
+                            if fault is None or int(fault.group(1), 16) == 0:
+                                raise SystemExit("QEMU #UD diagnostic did not contain a valid RIP")
+                        print(captured.decode(errors="replace"), end="")
+                        suffix = " and #UD diagnostic" if fault_smoke else ""
+                        if double_fault_smoke:
+                            suffix = " and #DF diagnostic on its IST stack"
+                        if panic_smoke:
+                            suffix = " and panic diagnostic"
+                        print(f"QEMU native boot{suffix} smoke passed")
+                        raise SystemExit(0)
+        print(captured.decode(errors="replace"), end="", file=sys.stderr)
+        if process.poll() is not None:
+            raise SystemExit(f"QEMU exited before the native COM1 marker ({process.returncode})")
+        raise SystemExit("Timed out waiting for the post-ExitBootServices COM1 marker")
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+PY

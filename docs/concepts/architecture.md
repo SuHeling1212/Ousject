@@ -28,6 +28,7 @@ flowchart TB
 
     subgraph Host[宿主边界]
         CLI[ousject-cli]
+        Platform[ousject-platform mechanism contracts]
         Terminal[Terminal stream]
         Devices[Keyboard / Network / Storage]
         Display[Physical Display driver (not implemented)]
@@ -45,6 +46,7 @@ flowchart TB
     Runtime --> Types
     Provider --> Terminal
     Provider --> Devices
+    Platform -. future host/native adapters .-> Devices
     Provider -. optional future driver .-> Display
     Provider --> Network
     Runtime --> Storage
@@ -63,11 +65,18 @@ flowchart TB
 | `tf-format` | OTF0 Program 与 Token 的编码、解码和校验 |
 | `praxis-compiler` | Praxis lexer、parser、Module 加载和 TF 生成 |
 | `ousject-provider` | Provider 注册、领域能力调用和 Effect 恢复策略 |
+| `ousject-platform` | `no_std` 启动内存信息、单调时钟、熵、Terminal/Block 字节传输及关机/重启机制契约；当前尚未接入 Hosted 或 Native runtime |
 | `ousject-auth` | 用户身份、密码摘要、Session 和认证服务 |
 | `ousject-vm` | Program/Process、Token 执行、对象能力和协作式调度 |
 | `ousject-cli` | 宿主启动器、开发/恢复命令和硬件适配 |
 
 crate 依赖方向总体是从 CLI/VM 指向 OMS 与共享类型；OMS 不依赖 CLI 或 Praxis 编译器。
+
+`oms-types`、`tf-format` 与 `praxis-compiler` 默认启用 Hosted `std` feature，也支持关闭默认
+feature 后以 `no_std + alloc` 构建。Native 可复用相同的 Object/Value、OTF0 编码和 Praxis
+编译实现；调用方仍需提供全局 allocator。Native ID 生成器必须在首次生成 ID 前由平台熵源播种，
+而 OMS runtime、VM 和 scheduler 目前仍依赖 Host 文件系统、线程与同步原语，尚不能由 Native
+镜像直接启动。
 
 ## 从源码到 Process
 

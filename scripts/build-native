@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cargo_local="$project_root/scripts/cargo-local"
+native_manifest="$project_root/crates/ousject-native-image/Cargo.toml"
+target_dir="$project_root/target/native"
+
+cd "$project_root"
+set -- build --release --target x86_64-unknown-uefi \
+    --manifest-path "$native_manifest" --target-dir "$target_dir"
+native_features=
+if [ "${NATIVE_FAULT_SMOKE:-0}" = 1 ]; then
+    native_features=fault-smoke
+fi
+if [ "${NATIVE_PANIC_SMOKE:-0}" = 1 ]; then
+    if [ -n "$native_features" ]; then
+        native_features="$native_features,panic-smoke"
+    else
+        native_features=panic-smoke
+    fi
+fi
+if [ "${NATIVE_DOUBLE_FAULT_SMOKE:-0}" = 1 ]; then
+    if [ -n "$native_features" ]; then
+        native_features="$native_features,double-fault-smoke"
+    else
+        native_features=double-fault-smoke
+    fi
+fi
+if [ -n "$native_features" ]; then
+    set -- "$@" --features "$native_features"
+fi
+"$cargo_local" "$@"
+
+efi_image="$target_dir/x86_64-unknown-uefi/release/ousject-native-image.efi"
+if [ ! -f "$efi_image" ]; then
+    efi_image="$target_dir/x86_64-unknown-uefi/release/ousject-native-image"
+fi
+if [ ! -f "$efi_image" ]; then
+    echo "UEFI image was not produced by Cargo" >&2
+    exit 1
+fi
+
+esp="$target_dir/esp"
+mkdir -p "$esp/EFI/BOOT"
+cp "$efi_image" "$esp/EFI/BOOT/BOOTX64.EFI"
+printf '%s\n' "$esp"

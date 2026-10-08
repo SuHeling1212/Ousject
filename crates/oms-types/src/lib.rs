@@ -1,14 +1,93 @@
 //! Shared value types for the Ousject Object Management System.
 
-use std::collections::BTreeMap;
-use std::fmt;
-use std::str::FromStr;
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::borrow::ToOwned;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+use core::str::FromStr;
+#[cfg(not(feature = "std"))]
+use core::sync::atomic::AtomicU8;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(feature = "std")]
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(feature = "std")]
 static BOOT_ID_PREFIX: OnceLock<u64> = OnceLock::new();
+#[cfg(not(feature = "std"))]
+static ID_PREFIX: AtomicU64 = AtomicU64::new(0);
+// 0 = uninitialized, 1 = initialization in progress, 2 = ready.
+#[cfg(not(feature = "std"))]
+static ID_GENERATOR_STATE: AtomicU8 = AtomicU8::new(0);
+
+/// Error returned when the Native ID generator was already initialized.
+#[cfg(not(feature = "std"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdGeneratorAlreadyInitialized;
+
+#[cfg(not(feature = "std"))]
+impl fmt::Display for IdGeneratorAlreadyInitialized {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("identifier generator was already initialized")
+    }
+}
+
+/// Seeds the Native ID generator with a boot-unique 64-bit prefix.
+///
+/// Native startup must call this once, using platform entropy, before any
+/// `ObjectId::new`, `TypeId::new`, `TransactionId::new`, or `SubjectId::new`.
+/// Refusing to generate IDs before seeding avoids silently reusing the same
+/// identifier range after a machine restart.
+///
+/// # Errors
+///
+/// Returns [`IdGeneratorAlreadyInitialized`] if another caller has already
+/// started initialization.
+#[cfg(not(feature = "std"))]
+pub fn seed_id_generator(prefix: u64) -> Result<(), IdGeneratorAlreadyInitialized> {
+    ID_GENERATOR_STATE
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire)
+        .map_err(|_| IdGeneratorAlreadyInitialized)?;
+    ID_PREFIX.store(prefix, Ordering::Relaxed);
+    ID_GENERATOR_STATE.store(2, Ordering::Release);
+    Ok(())
+}
+
+fn id_prefix() -> u64 {
+    #[cfg(feature = "std")]
+    {
+        *BOOT_ID_PREFIX.get_or_init(|| {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos());
+            let bytes = timestamp.to_le_bytes();
+            u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ])
+        })
+    }
+    #[cfg(all(not(feature = "std"), not(test)))]
+    {
+        assert_eq!(
+            ID_GENERATOR_STATE.load(Ordering::Acquire),
+            2,
+            "Native identifier generator must be seeded before allocating IDs"
+        );
+        ID_PREFIX.load(Ordering::Relaxed)
+    }
+    #[cfg(all(not(feature = "std"), test))]
+    {
+        1
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseIdError;
@@ -19,6 +98,7 @@ impl fmt::Display for ParseIdError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for ParseIdError {}
 
 macro_rules! id_type {
@@ -40,17 +120,7 @@ macro_rules! id_type {
             #[must_use]
             pub fn new() -> Self {
                 let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                let prefix = *BOOT_ID_PREFIX.get_or_init(|| {
-                    let timestamp = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map_or(0, |duration| duration.as_nanos());
-                    let bytes = timestamp.to_le_bytes();
-                    let time_bits = u64::from_le_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-                        bytes[7],
-                    ]);
-                    time_bits
-                });
+                let prefix = id_prefix();
                 Self((u128::from(prefix) << 64) | u128::from(sequence))
             }
         }
@@ -309,6 +379,7 @@ impl fmt::Display for ValueError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for ValueError {}
 
 fn encode_value(bytes: &mut Vec<u8>, value: &Value, depth: usize) -> Result<(), ValueError> {
@@ -495,7 +566,7 @@ impl<'a> ValueReader<'a> {
     }
 
     fn string(&mut self) -> Result<String, ValueError> {
-        std::str::from_utf8(self.bytes()?)
+        core::str::from_utf8(self.bytes()?)
             .map(str::to_owned)
             .map_err(|_| ValueError::InvalidUtf8)
     }
@@ -627,12 +698,26 @@ impl fmt::Display for OmsError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for OmsError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use alloc::collections::BTreeSet;
+    use alloc::format;
+    use alloc::string::ToString;
+    use alloc::vec;
+
+    #[cfg(not(feature = "std"))]
+    #[test]
+    fn native_id_generator_can_only_be_seeded_once() {
+        assert_eq!(seed_id_generator(0x1234), Ok(()));
+        assert_eq!(
+            seed_id_generator(0x5678),
+            Err(IdGeneratorAlreadyInitialized)
+        );
+    }
 
     #[test]
     fn generated_ids_are_unique() {
