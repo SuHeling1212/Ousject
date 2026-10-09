@@ -4,13 +4,18 @@
 
 ## 定位
 
-当前交付物是“可在宿主应用中运行的持久对象系统核心”：
+当前主要交付物是 Hosted Ousject：一个依赖宿主 OS 提供硬件机制、由 Ousject 自己管理
+Object、Process、权限、事务、Praxis 和持久状态的计算系统。Native UEFI 保留为长期研究方向，
+现有构建与 smoke 覆盖继续维护；本阶段不以新增底层驱动作为进度目标。
 
-- 可以编译和运行 Praxis 程序；
-- 可以把 Object、Program、Process 和系统状态写入持久 Store；
-- 可以测试崩溃恢复、权限、事务和宿主 Provider；
-- Native UEFI 镜像已在 QEMU 退出 Boot Services、接管早期 CPU 状态、启用可回收 heap，并通过共享 OMS 执行 Praxis 编译器生成的 OTF Process；
-- Native VM 目前只覆盖共享纯 Token 核心与变量 Object 提交；完整 Scheduler、Provider、交互式 Terminal 和持久世界恢复仍未完成。
+Hosted 当前可以：
+
+- 编译并运行 Praxis 程序；
+- 把 Object、Program、Process 和系统状态写入持久 Store；
+- 恢复未完成 Process，并测试事务、权限和宿主 Provider。
+
+Native 现状：UEFI 镜像曾在 QEMU 通过现有 boot smoke；VM 目前只覆盖共享 Token 核心与变量
+Object 提交，完整 Scheduler、Provider、交互式 Terminal 和持久世界恢复仍未完成。
 
 ## 功能矩阵
 
@@ -25,6 +30,7 @@
 | Praxis compiler | 已实现子集 | compiler 测试、`examples/` |
 | OTF0 与 VM | 已实现，格式预发布 | `tf-format`、system e2e |
 | 持久 Program/Process | 已实现 | recovery、atomic objects 测试 |
+| Hosted 编译复用 | 有界进程内 OTF 缓存 | SHA-256 键包含 Praxis 编译器版本、语义版本、模式、Subject、源码、展开源码及 Module Object ID/内容摘要；Terminal 每次仍重新解析导入并执行命中后的 OTF。缓存容量 128；解码 Program 缓存容量 256。当前缓存不跨重启保存，`compiler.compile` 每次仍创建持久 Program Object |
 | 协作式 Scheduler | 已实现 | scheduler 与 recovery 测试 |
 | Channel IPC | 已实现 | IPC recovery 测试 |
 | SwapPool | 已实现 | swap pool 测试 |

@@ -489,6 +489,7 @@ impl VirtualMachine {
             kernel_services: self.kernel_services.clone(),
             providers: Arc::clone(&self.providers),
             program_cache: Arc::clone(&self.program_cache),
+            compilation_cache: Arc::clone(&self.compilation_cache),
             package_verification_cache: Arc::clone(&self.package_verification_cache),
             process_reaper: Arc::clone(&self.process_reaper),
         }
@@ -511,13 +512,11 @@ impl VirtualMachine {
             .program_cache
             .lock()
             .map_err(|_| VmError::InvalidProcessState("Program cache unavailable".to_owned()))?;
-        if let Some((cached_version, program)) = cache.get(&object) {
-            if *cached_version == version {
-                return Ok(Arc::clone(program));
-            }
+        if let Some(program) = cache.get(object, version) {
+            return Ok(program);
         }
         let program = Arc::new(Program::decode(view.state())?);
-        cache.insert(object, (version, Arc::clone(&program)));
+        cache.insert(object, version, Arc::clone(&program));
         Ok(program)
     }
 

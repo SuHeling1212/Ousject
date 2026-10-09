@@ -86,12 +86,35 @@ pub fn compile_interactive_with_loader(
 /// Returns a positioned compiler error, loader error or module-cycle error.
 pub fn compile_interactive_with_contextual_loader(
     source: &str,
-    mut loader: impl FnMut(&str, Option<&str>) -> Result<(String, String), String>,
+    loader: impl FnMut(&str, Option<&str>) -> Result<(String, String), String>,
 ) -> Result<Program, CompileError> {
+    let expanded = expand_interactive_with_contextual_loader(source, loader)?;
+    compile_interactive_expanded(&expanded)
+}
+
+/// Expands imports for an interactive submission without compiling its tokens.
+/// Callers may use the resolved dependency identities and content to validate a
+/// compilation cache entry before parsing the expanded source.
+///
+/// # Errors
+///
+/// Returns a positioned error, loader error or module-cycle error.
+pub fn expand_interactive_with_contextual_loader(
+    source: &str,
+    mut loader: impl FnMut(&str, Option<&str>) -> Result<(String, String), String>,
+) -> Result<String, CompileError> {
     let mut imported = BTreeSet::new();
     let mut stack = Vec::new();
-    let expanded = expand_source(source, None, &mut loader, &mut imported, &mut stack)?;
-    compile_expanded(&expanded, true)
+    expand_source(source, None, &mut loader, &mut imported, &mut stack)
+}
+
+/// Compiles an already expanded interactive source fragment.
+///
+/// # Errors
+///
+/// Returns a positioned syntax or TF validation error.
+pub fn compile_interactive_expanded(source: &str) -> Result<Program, CompileError> {
+    compile_expanded(source, true)
 }
 
 /// Compiles Praxis after recursively expanding top-level `import` and `include` directives.

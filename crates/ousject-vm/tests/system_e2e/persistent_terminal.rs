@@ -320,6 +320,8 @@ shell_terminal.submit("counter = 1")
 process.wait()
 shell_terminal.submit("counter++")
 process.wait()
+shell_terminal.submit("counter++")
+process.wait()
 shell_id_again = terminal.shell()
 "#;
     let parent = vm.create_process(&compile(source).unwrap()).unwrap();
@@ -351,7 +353,7 @@ shell_id_again = terminal.shell()
         panic!("expected Terminal Process id");
     };
     let process_id = process_id.parse().unwrap();
-    assert_eq!(vm.variable(process_id, "counter"), Ok(Value::Integer(2)));
+    assert_eq!(vm.variable(process_id, "counter"), Ok(Value::Integer(3)));
     let shell_terminals = manager
         .query(
             AccessContext::new(SYSTEM_SUBJECT),

@@ -31,7 +31,8 @@ use ousject_provider::{
 };
 pub use ousject_provider::{EffectRecoveryPolicy, EffectStatus};
 use praxis_compiler::{
-    compile_interactive_with_contextual_loader, compile_program, compile_with_contextual_loader,
+    compile_interactive_expanded, compile_program, compile_with_contextual_loader,
+    expand_interactive_with_contextual_loader,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -51,7 +52,6 @@ const PROCESS_RUNTIME_EXTENSION: &[u8; 4] = b"PXT0";
 const PROCESS_SCHEDULER_EXTENSION: &[u8; 4] = b"PSX0";
 const PROCESS_RETENTION_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const MAX_STATE_ITEMS: usize = 1_000_000;
-type ProgramCache = BTreeMap<ObjectId, (oms_types::ObjectVersion, Arc<Program>)>;
 type PackageVerificationCache = BTreeMap<ObjectId, (ObjectVersion, ObjectVersion)>;
 
 include!("types.rs");
@@ -60,6 +60,7 @@ include!("vm_type.rs");
 mod audit;
 mod boot;
 mod calls;
+mod compilation_cache;
 mod instruction;
 mod lifecycle;
 mod modules;

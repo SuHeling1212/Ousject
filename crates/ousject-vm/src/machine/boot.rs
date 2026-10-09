@@ -12,7 +12,8 @@ impl VirtualMachine {
             terminal_driver: None,
             kernel_services: BTreeMap::new(),
             providers: Arc::new(ProviderRegistry::new()),
-            program_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            program_cache: Arc::new(Mutex::new(compilation_cache::ProgramCache::default())),
+            compilation_cache: Arc::new(Mutex::new(compilation_cache::CompilationCache::default())),
             package_verification_cache: Arc::new(Mutex::new(BTreeMap::new())),
             process_reaper: Arc::new(Mutex::new(None)),
         }
@@ -82,7 +83,8 @@ impl VirtualMachine {
             terminal_driver: Some(driver),
             kernel_services,
             providers,
-            program_cache: Arc::new(Mutex::new(BTreeMap::new())),
+            program_cache: Arc::new(Mutex::new(compilation_cache::ProgramCache::default())),
+            compilation_cache: Arc::new(Mutex::new(compilation_cache::CompilationCache::default())),
             package_verification_cache: Arc::new(Mutex::new(BTreeMap::new())),
             process_reaper: Arc::new(Mutex::new(None)),
         })
