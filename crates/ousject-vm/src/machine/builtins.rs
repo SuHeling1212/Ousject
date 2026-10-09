@@ -1,4 +1,4 @@
-fn arithmetic(token: &Token, left: Value, right: Value) -> Result<Value, VmError> {
+pub(crate) fn arithmetic(token: &Token, left: Value, right: Value) -> Result<Value, VmError> {
     if matches!(left, Value::Float(_)) || matches!(right, Value::Float(_)) {
         let left = numeric_float(&left)?;
         let right = numeric_float(&right)?;
@@ -47,7 +47,7 @@ fn arithmetic(token: &Token, left: Value, right: Value) -> Result<Value, VmError
     }
 }
 
-fn arithmetic_ref(token: &Token, left: &Value, right: &Value) -> Result<Value, VmError> {
+pub(crate) fn arithmetic_ref(token: &Token, left: &Value, right: &Value) -> Result<Value, VmError> {
     if matches!(left, Value::Float(_)) || matches!(right, Value::Float(_)) {
         let left = numeric_float(left)?;
         let right = numeric_float(right)?;
@@ -98,7 +98,7 @@ fn arithmetic_ref(token: &Token, left: &Value, right: &Value) -> Result<Value, V
     }
 }
 
-fn execute_collection_token(token: &Token, stack: &mut Vec<Value>) -> Result<(), VmError> {
+pub(crate) fn execute_collection_token(token: &Token, stack: &mut Vec<Value>) -> Result<(), VmError> {
     match token {
         Token::MakeArray(count) => {
             let count =
@@ -241,7 +241,7 @@ fn index_position(index: i64) -> Result<usize, VmError> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn math_capability(name: &str, arguments: &[Value]) -> Result<Value, VmError> {
+pub(crate) fn math_capability(name: &str, arguments: &[Value]) -> Result<Value, VmError> {
     match (name, arguments) {
         ("random", []) => random_float(),
         ("random_integer", [Value::Integer(minimum), Value::Integer(maximum)]) => {
@@ -374,7 +374,7 @@ fn random_u64() -> Result<u64, VmError> {
     Ok(u64::from_ne_bytes(bytes))
 }
 
-fn text_capability(name: &str, arguments: &[Value], receiver: &Value) -> Result<Value, VmError> {
+pub(crate) fn text_capability(name: &str, arguments: &[Value], receiver: &Value) -> Result<Value, VmError> {
     let Value::Text(text) = receiver else {
         return Err(VmError::TypeError("text capability requires a Text Object"));
     };

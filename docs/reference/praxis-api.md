@@ -72,7 +72,7 @@ Process 另外公开 `.result`、`.error`、`.variables`、`.program`、`.user`/
 
 `types.register` 的 `schema` 可为 `any`、`text`、`bytes`、`collection`、`record`；
 `creation` 可为 `public` 或 `provider_only`。它登记 Praxis Object 的数据描述与 capability
-名称，不会安装 Rust Provider 或 native Type 实现。Provider 只能在可信 VM 启动阶段通过 Rust
+名称，不会安装 Rust Provider 或 Rust Type 实现。Provider 只能在可信 VM 启动阶段通过 Rust
 API 注册；第一个 runnable Process 开始执行时 Registry 自动 seal。
 
 ## Terminal
@@ -329,7 +329,7 @@ Network、Block Storage 的真实收发/读写走 durable Effect，当前 host a
 Driver Process 失败由 VM 标记为 Failed；已有 Device Object、Capability 和 sealed Provider 集
 保持不变。其他用户空间代码可以按策略重新启动 Program，但当前没有内建 Driver Manager 或自动
 重启服务。Package/Market/`import` 只装载或编译 Praxis 与资源，`providers` 服务没有注册 API，
-不能加载 native library、注册 Provider 或修补 VM/OMS。
+不能加载 Rust 动态库、注册 Provider 或修补 VM/OMS。
 
 ## 如何查看当前运行时实际能力
 

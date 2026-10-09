@@ -171,7 +171,7 @@ impl VirtualMachine {
         let mut program = Program::decode(program_view.state())?;
         compact_terminal_program(&mut program)?;
         let mut imported_modules = BTreeMap::new();
-        let submitted = compile_interactive_with_contextual_loader(source, |name, importer| {
+        let expanded = expand_interactive_with_contextual_loader(source, |name, importer| {
             let (source, identity) =
                 self.package_module_source_for_subject(owner, name, importer)?;
             let module = identity
@@ -181,7 +181,18 @@ impl VirtualMachine {
             Ok((source, identity))
         })
         .map_err(|error| VmError::Provider(error.to_string()))?;
-        let start = append_interactive_program(&mut program, submitted)?;
+        let cache_key = super::compilation_cache::compilation_cache_key(
+            super::compilation_cache::CompilationMode::Interactive,
+            owner,
+            source,
+            &expanded,
+            &imported_modules,
+        );
+        let submitted = self.compile_cached(cache_key, || {
+            compile_interactive_expanded(&expanded)
+                .map_err(|error| VmError::Provider(error.to_string()))
+        })?;
+        let start = append_interactive_program(&mut program, submitted.as_ref().clone())?;
         process_state.token_position = start;
         process_state.status = ProcessStatus::Ready;
         process_state.wait_reason = WaitReason::None;

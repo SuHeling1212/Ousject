@@ -1,4 +1,4 @@
-fn encode_process_state(state: &ProcessState) -> Result<Vec<u8>, VmError> {
+pub(crate) fn encode_process_state(state: &ProcessState) -> Result<Vec<u8>, VmError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(PROCESS_MAGIC);
     write_u128(&mut bytes, state.program.as_u128());

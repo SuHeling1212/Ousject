@@ -17,6 +17,90 @@ mod tests {
         VirtualMachine::with_terminal(manager, terminal, Arc::new(TestTerminal)).unwrap()
     }
 
+    #[derive(Debug)]
+    struct PlatformTerminalProvider;
+
+    impl ObjectProvider for PlatformTerminalProvider {
+        fn type_id(&self) -> TypeId {
+            CORE_TERMINAL_TYPE
+        }
+
+        fn create(&self, _initial: &Value) -> Result<Value, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("create".to_owned()))
+        }
+
+        fn invoke(
+            &self,
+            _object: ObjectId,
+            _state: &Value,
+            capability: &str,
+            _arguments: &[Value],
+            _effect: ObjectId,
+        ) -> Result<ProviderOutcome, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(capability.to_owned()))
+        }
+
+        fn capabilities(&self) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+    }
+
+    #[test]
+    fn terminal_backend_constructor_leaves_terminal_provider_slot_for_platform() {
+        let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+        let terminal =
+            VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+        let vm = VirtualMachine::with_terminal_backend(
+            manager,
+            terminal,
+            Arc::new(TestTerminal),
+        )
+        .unwrap();
+
+        assert!(vm.providers.get(CORE_TERMINAL_TYPE).is_err());
+        vm.register_provider(Arc::new(PlatformTerminalProvider))
+            .unwrap();
+        assert!(vm.register_terminal_transport_provider().is_err());
+    }
+
+    #[test]
+    fn publish_terminal_reuses_the_root_not_an_earlier_child() {
+        let manager = Arc::new(InMemoryObjectManager::new(1).unwrap());
+        let root =
+            VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap();
+        let child_id = ObjectId::from_u128(root.as_u128() - 1);
+        let mut child = CreateObject::new(
+            CORE_TERMINAL_TYPE,
+            Value::Record(BTreeMap::new()).encode().unwrap(),
+        )
+        .with_id(child_id)
+        .with_parent(root);
+        child.capabilities = manager.type_by_id(CORE_TERMINAL_TYPE).unwrap().capabilities;
+        let mut transaction = manager.begin(AccessContext::new(SYSTEM_SUBJECT));
+        let root_version = manager.inspect(AccessContext::new(SYSTEM_SUBJECT), root).unwrap();
+        transaction.expect(root, root_version.version);
+        transaction.create(child);
+        manager.commit(transaction).unwrap();
+
+        let terminals = manager
+            .query(
+                AccessContext::new(SYSTEM_SUBJECT),
+                &ObjectQuery::new().with_type(CORE_TERMINAL_TYPE),
+            )
+            .unwrap();
+        assert_eq!(terminals[0].id, child_id);
+        assert_eq!(
+            VirtualMachine::publish_terminal(&manager, &Value::Record(BTreeMap::new())).unwrap(),
+            root
+        );
+        assert!(VirtualMachine::with_terminal_backend(
+            manager,
+            child_id,
+            Arc::new(TestTerminal)
+        )
+        .is_err());
+    }
+
     #[test]
     fn process_state_round_trip() {
         let state = ProcessState {

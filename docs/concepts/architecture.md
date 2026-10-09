@@ -124,10 +124,10 @@ math, crypto, time, terminal, modules, packages, market, audit, resolver
 
 Provider 用于实现 Object 的领域能力。普通程序不能通过伪造 Type 或能力字符串创建物理
 设备 Object；`CreationPolicy::ProviderOnly` 的对象只能由可信路径发布。VM 在第一次执行
-用户 Process 前封闭 Provider Registry；宿主必须在启动阶段注册所有 native Provider，之后
+用户 Process 前封闭 Provider Registry；宿主必须在启动阶段注册所有 Rust Provider，之后
 注册会返回 `Sealed`。内建 Type 描述符的 schema/creation contract 在 VM 构建时固定；反射 API
 会把 Provider-backed Type 的领域能力与当前注册的 Provider 求交集，避免把不存在的方法宣传成
-可执行。Praxis `types.register` 只能登记普通 Type 描述信息，不会注册 native Provider 或 native
+可执行。Praxis `types.register` 只能登记普通 Type 描述信息，不会注册 Rust Provider 或 Rust
 Type 实现。
 
 Terminal 是字节流接口并维护自己的虚拟屏幕；Display 是可选的物理像素设备，不能用 stdout
@@ -159,7 +159,7 @@ CLI 不是 Ousject 用户空间 Shell。
 
 用户空间 Driver 沿用现有的 Process、Package、Object、Capability、Parent/Link 和 `input/output`
 机制：Driver Process 只获得被明确授权的 Device Object，可以创建普通 Object 保存语义状态，
-并通过 Namespace/Link 发布给应用。没有 `core.driver_manager`、native 插件加载器或自动重启
+并通过 Namespace/Link 发布给应用。没有 `core.driver_manager`、Rust 插件加载器或自动重启
 服务；进程失败由 Scheduler 隔离，不会修改已 seal 的 Provider Registry，重启策略属于上层。
 Praxis Module/Package 是用户空间代码与资源，绝不是 Kernel Module；Market 下载和 `import`
 不能加载 Rust dylib 或 patch VM/OMS。

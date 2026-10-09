@@ -164,7 +164,7 @@ terminal.println(types.types())
 }
 
 #[test]
-fn praxis_module_cannot_register_a_native_provider() {
+fn praxis_module_cannot_register_a_host_provider() {
     let manager = Arc::new(InMemoryObjectManager::new(2).unwrap());
     let vm = vm_with_terminal(Arc::clone(&manager));
     vm.register_provider(Arc::new(DriverDeviceProvider))
@@ -173,7 +173,7 @@ fn praxis_module_cannot_register_a_native_provider() {
     let installer_program = compile(
         r#"
 modules = object.find("modules")
-module_id = modules.install("native_boundary", "1.0.0", "func attempt_native() { providers = object.find(\"providers\")\nproviders.register(\"native\") }", [])
+module_id = modules.install("host_boundary", "1.0.0", "func attempt_provider() { providers = object.find(\"providers\")\nproviders.register(\"host\") }", [])
 modules.enable(module_id)
 providers = object.find("providers")
 before = providers.providers()
@@ -182,7 +182,7 @@ terminal_id = terminal.shell()
 shell_terminal = object.find(terminal_id)
 shell_id = shell_terminal.process()
 shell = object.find(shell_id)
-shell_terminal.submit("import \"native_boundary\"\nattempt_native()")
+shell_terminal.submit("import \"host_boundary\"\nattempt_provider()")
 shell.wait()
 registered = providers.providers()
 "#,
@@ -190,7 +190,7 @@ registered = providers.providers()
     .unwrap();
     let installer = vm.create_process(&installer_program).unwrap();
     // The installer is complete; its interactive Process attempted the Module
-    // call and failed without changing the native Provider Registry.
+    // call and failed without changing the host Provider Registry.
     let report = vm.run(installer, 10_000).unwrap();
     assert_eq!(report.status, ProcessStatus::Halted);
     let shell_id: ObjectId = match vm.variable(installer, "shell_id").unwrap() {
@@ -201,7 +201,7 @@ registered = providers.providers()
     assert_eq!(shell_state.status, ProcessStatus::Failed);
     assert!(
         format!("{:?}", shell_state.error).contains("unknown Object capability"),
-        "the imported Praxis function should fail at the missing native API: {:?}",
+        "the imported Praxis function should fail at the unavailable host API: {:?}",
         shell_state.error
     );
     let registered = vm.variable(installer, "registered").unwrap();
@@ -320,6 +320,8 @@ shell_terminal.submit("counter = 1")
 process.wait()
 shell_terminal.submit("counter++")
 process.wait()
+shell_terminal.submit("counter++")
+process.wait()
 shell_id_again = terminal.shell()
 "#;
     let parent = vm.create_process(&compile(source).unwrap()).unwrap();
@@ -351,7 +353,7 @@ shell_id_again = terminal.shell()
         panic!("expected Terminal Process id");
     };
     let process_id = process_id.parse().unwrap();
-    assert_eq!(vm.variable(process_id, "counter"), Ok(Value::Integer(2)));
+    assert_eq!(vm.variable(process_id, "counter"), Ok(Value::Integer(3)));
     let shell_terminals = manager
         .query(
             AccessContext::new(SYSTEM_SUBJECT),
@@ -435,7 +437,7 @@ fn failed_user_space_driver_process_leaves_device_and_kernel_usable() {
     assert_eq!(
         vm.register_provider(Arc::new(DriverDeviceProvider)),
         Err(VmError::Provider("Sealed".to_owned())),
-        "a failed user Process cannot mutate the native Provider set"
+        "a failed user Process cannot mutate the host Provider set"
     );
 
     // A user-space supervisor may start another Process with the same stable

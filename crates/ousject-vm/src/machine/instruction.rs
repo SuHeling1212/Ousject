@@ -16,6 +16,45 @@ impl PendingWrites {
     }
 }
 
+struct HostedTokenHost<'a> {
+    vm: &'a VirtualMachine,
+    process: ObjectId,
+    pending: &'a mut PendingWrites,
+}
+
+impl TokenHost for HostedTokenHost<'_> {
+    fn load_variable(&mut self, state: &ProcessState, name: &str) -> Result<Value, VmError> {
+        let object = binding_id(state, name)?;
+        if let Some(value) = self.pending.values.get(&object) {
+            return Ok(value.clone());
+        }
+        self.vm.variable_from_state(state, name)
+    }
+
+    fn store_variable(
+        &mut self,
+        state: &mut ProcessState,
+        name: String,
+        value: &Value,
+    ) -> Result<(), VmError> {
+        let object = self
+            .vm
+            .stage_store(self.process, state, name, value, self.pending)?;
+        self.pending.values.insert(object, value.clone());
+        Ok(())
+    }
+
+    fn get_field(
+        &mut self,
+        state: &ProcessState,
+        receiver: &Value,
+        field: &str,
+        program: &Program,
+    ) -> Result<Value, VmError> {
+        self.vm.get_field(state, receiver, field, program)
+    }
+}
+
 impl VirtualMachine {
     pub(super) fn step(
         &self,
@@ -226,82 +265,26 @@ impl VirtualMachine {
             .checked_add(1)
             .ok_or(VmError::TokenPositionOutOfRange(state.token_position))?;
 
-        if execute_control_token(state, &token, next)? {
+        // Halt completion includes Hosted wall-clock and process-reaper work;
+        // keep that platform boundary in the Hosted adapter.
+        if matches!(token, Token::Halt) {
+            return Ok(false);
+        }
+
+        let mut host = HostedTokenHost {
+            vm: self,
+            process,
+            pending,
+        };
+        if execute_token(&mut host, state, program)? {
             return Ok(true);
         }
-
         match token {
             Token::ObjectCall { method, arguments } => {
-                return self
-                    .execute_ephemeral_object_call(process, state, next, &method, arguments);
+                self.execute_ephemeral_object_call(process, state, next, &method, arguments)
             }
-            Token::Push(value) => state.stack.push(value),
-            Token::Load(name) => {
-                let object = binding_id(state, &name)?;
-                let value = if let Some(value) = pending.values.get(&object) {
-                    value.clone()
-                } else {
-                    self.variable_from_state(state, &name)?
-                };
-                state.stack.push(value);
-            }
-            Token::LoadIdentity(name) => {
-                let binding = binding_id(state, &name)?;
-                state.stack.push(Value::Text(binding.to_string()));
-            }
-            Token::Add
-            | Token::Subtract
-            | Token::Multiply
-            | Token::Divide
-            | Token::Modulo
-            | Token::Equal
-            | Token::NotEqual
-            | Token::Less
-            | Token::LessEqual
-            | Token::Greater
-            | Token::GreaterEqual => execute_binary_pure_token(state, &token)?,
-            Token::Not => {
-                let value = state.stack.pop().ok_or(VmError::StackUnderflow)?;
-                state.stack.push(Value::Bool(!value.is_truthy()));
-            }
-            Token::Pop => {
-                state.stack.pop().ok_or(VmError::StackUnderflow)?;
-            }
-            Token::Store(name) => {
-                let value = state.stack.pop().ok_or(VmError::StackUnderflow)?;
-                let object = match self.stage_store(process, state, name, &value, pending) {
-                    Ok(object) => object,
-                    Err(error) => {
-                        state.stack.push(value);
-                        return Err(error);
-                    }
-                };
-                pending.values.insert(object, value);
-                state.token_position = next;
-                return Ok(true);
-            }
-            Token::MakeArray(_)
-            | Token::MakeMap(_)
-            | Token::IndexGet
-            | Token::IndexSet
-            | Token::IndexIncrement
-            | Token::IndexDecrement
-            | Token::Length => execute_collection_token(&token, &mut state.stack)?,
-            Token::GetField(field) => {
-                let receiver = state.stack.last().ok_or(VmError::StackUnderflow)?;
-                let value = self.get_field(state, receiver, &field, program)?;
-                state.stack.pop();
-                state.stack.push(value);
-            }
-            Token::BindLink { name, target } => {
-                let target = binding_id(state, &target)?;
-                bind_name(state, name, target);
-            }
-            _ => return Ok(false),
+            _ => Ok(false),
         }
-
-        state.token_position = next;
-        Ok(true)
     }
 
     fn execute_ephemeral_object_call(
@@ -691,91 +674,12 @@ impl VirtualMachine {
                 "transaction commit marker cannot execute directly",
             )),
             Token::Halt => {
-                state.status = ProcessStatus::Halted;
-                state.result = state.stack.last().cloned();
-                state.error = None;
-                state.wait_reason = WaitReason::None;
+                apply_halt(&mut state, next);
                 state.ended_at_unix_ms = Some(unix_time_millis());
-                state.token_position = next;
                 self.commit_process(process, process_view.header().version, &state)?;
                 self.notify_process_ended(process)?;
                 Ok(None)
             }
         }
     }
-}
-
-fn execute_control_token(
-    state: &mut ProcessState,
-    token: &Token,
-    next: u32,
-) -> Result<bool, VmError> {
-    match token {
-        Token::Jump(target) => state.token_position = *target,
-        Token::JumpIfFalse(target) => {
-            let condition = state.stack.pop().ok_or(VmError::StackUnderflow)?;
-            state.token_position = if condition.is_truthy() { next } else { *target };
-        }
-        Token::DefineFunction { end, .. }
-        | Token::DefineClass { end, .. }
-        | Token::DefineMethod { end, .. } => state.token_position = *end,
-        Token::Return => {
-            let frame = state
-                .frames
-                .last()
-                .ok_or(VmError::TypeError("return outside function"))?;
-            let stack_base =
-                usize::try_from(frame.stack_base).map_err(|_| VmError::StackUnderflow)?;
-            let return_position = frame.return_position;
-            let result = state.stack.pop().ok_or(VmError::StackUnderflow)?;
-            state.frames.pop();
-            state.stack.truncate(stack_base);
-            state.stack.push(result);
-            state.token_position = return_position;
-            state.handlers.retain(|handler| {
-                usize::try_from(handler.frame_depth).is_ok_and(|depth| depth <= state.frames.len())
-            });
-        }
-        Token::BeginTry { catch, error, .. } => {
-            state.handlers.push(ExceptionHandler {
-                catch_position: *catch,
-                error_name: error.clone(),
-                frame_depth: u32::try_from(state.frames.len())
-                    .map_err(|_| invalid_state("too many call frames"))?,
-                stack_base: u32::try_from(state.stack.len())
-                    .map_err(|_| invalid_state("stack is too large"))?,
-            });
-            state.token_position = next;
-        }
-        Token::EndTry { end } => {
-            state
-                .handlers
-                .pop()
-                .ok_or(VmError::TypeError("try handler stack is empty"))?;
-            state.token_position = *end;
-        }
-        _ => return Ok(false),
-    }
-    Ok(true)
-}
-
-fn execute_binary_pure_token(state: &mut ProcessState, token: &Token) -> Result<(), VmError> {
-    let start = state
-        .stack
-        .len()
-        .checked_sub(2)
-        .ok_or(VmError::StackUnderflow)?;
-    if matches!(
-        token,
-        Token::Add | Token::Subtract | Token::Multiply | Token::Divide | Token::Modulo
-    ) {
-        let result = arithmetic_ref(token, &state.stack[start], &state.stack[start + 1])?;
-        state.stack.truncate(start);
-        state.stack.push(result);
-    } else {
-        let result = compare(token, &state.stack[start], &state.stack[start + 1])?;
-        state.stack.truncate(start);
-        state.stack.push(Value::Bool(result));
-    }
-    Ok(())
 }

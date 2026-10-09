@@ -4,12 +4,11 @@
 
 ## 定位
 
-当前交付物是“可在宿主应用中运行的持久对象系统核心”：
+当前交付物是 Hosted Ousject：依赖宿主 OS 提供硬件机制，由 Ousject 管理 Object、Process、
+Capability、Praxis、事务和持久状态的计算系统。
 
-- 可以编译和运行 Praxis 程序；
-- 可以把 Object、Program、Process 和系统状态写入持久 Store；
-- 可以测试崩溃恢复、权限、事务和宿主 Provider；
-- 不能脱离 Linux/macOS 等宿主独立启动。
+当前运行形态可以编译和运行 Praxis 程序，将 Object、Program、Process 和系统状态写入持久
+Store，并在重启后恢复已提交状态；它不能脱离 Linux/macOS 等宿主独立启动。
 
 ## 功能矩阵
 
@@ -24,6 +23,7 @@
 | Praxis compiler | 已实现子集 | compiler 测试、`examples/` |
 | OTF0 与 VM | 已实现，格式预发布 | `tf-format`、system e2e |
 | 持久 Program/Process | 已实现 | recovery、atomic objects 测试 |
+| Hosted 编译复用 | 有界进程内 OTF 缓存 | SHA-256 键包含 Praxis 编译器版本、语义版本、模式、Subject、源码、展开源码及 Module Object ID/内容摘要；Terminal 仍重新解析导入并执行命中后的 OTF。缓存容量 128；解码 Program 缓存容量 256。缓存不跨重启保存，`compiler.compile` 每次仍创建持久 Program Object |
 | 协作式 Scheduler | 已实现 | scheduler 与 recovery 测试 |
 | Channel IPC | 已实现 | IPC recovery 测试 |
 | SwapPool | 已实现 | swap pool 测试 |
@@ -41,8 +41,8 @@
 | Keyboard Provider | 已实现高层事件 API | 宿主只提供按键事件，不伪造 HID/USB Bytes；`capture`、`next_event`、`poll_event(s)` |
 | Device 能力清单 | 已实现动态交集 | 运行时 `.capabilities` 取 Object 授权、Type 描述符和实际 Provider 能力的交集 |
 | User-space Driver 基础路径 | 可用现有机制表达，非独立框架 | Process、Capability、Package、普通 Object 与设备 Provider；尚无通用 Driver Manager/自动重启策略 |
-| Native Provider Registry | 已实现启动期封闭 | `VirtualMachine::register_provider` 只在第一次执行用户 Process 前可用；之后 Registry seal |
-| 裸机启动与真实驱动 | 未实现 | 不在当前宿主系统边界内 |
+| 宿主 Provider Registry | 已实现启动期封闭 | `VirtualMachine::register_provider` 只在第一次执行用户 Process 前可用；之后 Registry seal |
+| 独立启动与硬件驱动 | 未实现 | 当前 Hosted 运行形态依赖宿主 OS |
 
 ## Praxis 当前可验证能力
 
@@ -101,7 +101,7 @@ Ousject Process 不是 Linux Process。它是由 VM 执行并通过 OMS 持久�
 - 发行版级安装、升级、签名、公证和兼容策略。
 
 Provider、Type 描述符和内建执行机制在用户空间执行开始后不可扩展。`types.register` 只登记
-Praxis 可用的普通 Type 描述信息，不会注册 Rust Provider 或 native Type 实现。Package、Market
+Praxis 可用的普通 Type 描述信息，不会注册 Rust Provider 或 Rust Type 实现。Package、Market
 和 Praxis `import` 只处理 Praxis/数据资源，不加载 Rust 动态库，也不能修改 VM、OMS 或 Provider
 Registry。用户空间 Driver 可以持有获授权的 Device Object、运行在独立 Process 中，并发布普通
 Object 作为语义状态/服务入口；Driver 失败不会改变 Registry，但由上层策略决定是否重启。

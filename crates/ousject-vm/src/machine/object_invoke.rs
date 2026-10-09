@@ -914,8 +914,16 @@ impl VirtualMachine {
                 Ok((type_descriptor_value(&descriptor), None))
             }
             (CORE_COMPILER_TYPE, "compile", [Value::Text(source)]) => {
-                let program = compile_program(source)
-                    .map_err(|error| VmError::Provider(error.to_string()))?;
+                let cache_key = super::compilation_cache::compilation_cache_key(
+                    super::compilation_cache::CompilationMode::Program,
+                    current_state.subject,
+                    source,
+                    source,
+                    &BTreeMap::new(),
+                );
+                let program = self.compile_cached(cache_key, || {
+                    compile_program(source).map_err(|error| VmError::Provider(error.to_string()))
+                })?;
                 let request = CreateObject::new(CORE_PROGRAM_TYPE, program.encode()?)
                     .with_parent(current_process);
                 let program_id = request.id;

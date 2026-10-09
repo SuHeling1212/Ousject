@@ -1,6 +1,6 @@
 
 #[allow(clippy::too_many_lines)]
-fn decode_process_state(bytes: &[u8]) -> Result<ProcessState, VmError> {
+pub(crate) fn decode_process_state(bytes: &[u8]) -> Result<ProcessState, VmError> {
     let mut reader = StateReader::new(bytes);
     if reader.take(4)? != PROCESS_MAGIC {
         return Err(invalid_state("invalid Process state magic"));
@@ -85,7 +85,7 @@ fn decode_process_state(bytes: &[u8]) -> Result<ProcessState, VmError> {
             }
             (
                 decode_state_optional_u64(&mut reader)?,
-                decode_optional_u64(&mut reader)?,
+                decode_state_optional_u64(&mut reader)?,
             )
         };
         (result, error, wake_at_unix_ms, ended_at_unix_ms)
@@ -115,7 +115,7 @@ fn decode_process_state(bytes: &[u8]) -> Result<ProcessState, VmError> {
                 wait_reason,
                 lease_owner,
                 reader.u64()?,
-                decode_optional_u64(&mut reader)?,
+                decode_state_optional_u64(&mut reader)?,
             )
         };
     if legacy_wake.is_some() && status == ProcessStatus::Suspended {
@@ -273,7 +273,7 @@ impl<'a> StateReader<'a> {
 
     fn string(&mut self) -> Result<String, VmError> {
         let length = self.count()?;
-        let value = std::str::from_utf8(self.take(length)?)
+        let value = core::str::from_utf8(self.take(length)?)
             .map_err(|_| invalid_state("VM state string is not UTF-8"))?;
         Ok(value.to_owned())
     }

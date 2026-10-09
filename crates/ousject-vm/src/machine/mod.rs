@@ -1,5 +1,12 @@
 //! Ousject TF virtual machine backed by Process and Variable Objects.
 
+use crate::execution_core::{
+    CallFrame, ExceptionHandler, ProcessState, ProcessStatus, TokenHost, VmError, WaitReason,
+    WorkerLease, apply_halt, execute_token,
+};
+use crate::execution_core::{
+    arithmetic, compare, execute_collection_token, math_capability, text_capability,
+};
 use oms_runtime::{
     AccessContext, CreateObject, CreateSpec, CreationPolicy, InMemoryObjectManager, ObjectQuery,
     ObjectView, Transaction, TypeDescriptor, ValueSchema,
@@ -16,7 +23,7 @@ use oms_types::{
     CORE_TEXT_TYPE, CORE_TIME_TYPE, CORE_TYPE_REGISTRY_TYPE, CORE_USER_REGISTRY_TYPE,
     CORE_USER_TYPE, CORE_VALUE_TYPE, Capability, DEVICE_BLOCK_STORAGE_TYPE, DEVICE_DISPLAY_TYPE,
     DEVICE_KEYBOARD_TYPE, DEVICE_SENSOR_TYPE, LOCAL_USER_NAME, LifecycleState, NET_ENDPOINT_TYPE,
-    NET_RESOLVER_TYPE, ObjectId, ObjectVersion, OmsError, SubjectId, TypeId, ValueError,
+    NET_RESOLVER_TYPE, ObjectId, ObjectVersion, OmsError, SubjectId, TypeId,
 };
 use ousject_auth::{AuthService, UserIdentity};
 use ousject_provider::{
@@ -24,15 +31,15 @@ use ousject_provider::{
 };
 pub use ousject_provider::{EffectRecoveryPolicy, EffectStatus};
 use praxis_compiler::{
-    compile_interactive_with_contextual_loader, compile_program, compile_with_contextual_loader,
+    compile_interactive_expanded, compile_program, compile_with_contextual_loader,
+    expand_interactive_with_contextual_loader,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::io::Read;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tf_format::{Program, TfError, Token, Value};
+use tf_format::{Program, Token, Value};
 
 pub use oms_types::SYSTEM_SUBJECT;
 pub const PROGRAM_TYPE: TypeId = CORE_PROGRAM_TYPE;
@@ -45,7 +52,6 @@ const PROCESS_RUNTIME_EXTENSION: &[u8; 4] = b"PXT0";
 const PROCESS_SCHEDULER_EXTENSION: &[u8; 4] = b"PSX0";
 const PROCESS_RETENTION_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const MAX_STATE_ITEMS: usize = 1_000_000;
-type ProgramCache = BTreeMap<ObjectId, (oms_types::ObjectVersion, Arc<Program>)>;
 type PackageVerificationCache = BTreeMap<ObjectId, (ObjectVersion, ObjectVersion)>;
 
 include!("types.rs");
@@ -54,6 +60,7 @@ include!("vm_type.rs");
 mod audit;
 mod boot;
 mod calls;
+mod compilation_cache;
 mod instruction;
 mod lifecycle;
 mod modules;
@@ -74,8 +81,6 @@ mod transaction;
 include!("bindings.rs");
 include!("scheduler.rs");
 include!("errors.rs");
-include!("builtins.rs");
-include!("value_ops.rs");
 include!("process_codec.rs");
 include!("process_reaper.rs");
 include!("object_inspection.rs");
